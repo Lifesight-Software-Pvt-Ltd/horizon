@@ -1,0 +1,9 @@
+pandas
+numpy
+prophet
+neuralprophet
+statsmodels
+catboost
+pymc
+matplotlib
+pyyaml
