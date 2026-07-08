@@ -92,8 +92,25 @@ class BaseModel(ABC):
                 itself.
 
         Returns:
-            DataFrame with (at minimum) columns ["ds", "yhat"] — one row
+            DataFrame with, at minimum, columns ["ds", "yhat"] — one row
             per forecasted period.
+
+            Optionally, wrappers whose underlying library natively
+            supports it (Prophet, SARIMAX, PyMC) MAY also include
+            "yhat_lower" and "yhat_upper" columns (model-native
+            uncertainty/credible intervals). Wrappers that do not
+            support this (CatBoost, NeuralProphet in v1) should simply
+            omit these columns rather than fabricating them.
+
+            IMPORTANT — uncertainty bounds are an INDIVIDUAL-MODEL-ONLY
+            concept in this library. They are surfaced in per-model
+            plots/CSVs (see plotting.py / exporters.py) but are never
+            propagated into the ensemble output: averaging confidence/
+            credible intervals across statistically different models
+            (trend-simulation vs. posterior vs. Gaussian-approximation
+            bands) has no coherent interpretation, so ensemble.py
+            operates on the "yhat" column only and ignores bounds
+            entirely, by design.
 
         Raises:
             ModelPredictionError: if called before fit(), or if the
