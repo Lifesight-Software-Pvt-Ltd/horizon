@@ -119,3 +119,27 @@ def test_fit_predict_chaining_works_end_to_end():
     df = pd.DataFrame({"y": [5, 10, 15, 20]})
     forecast = DummyModel(frequency="weekly").fit(df, target_column="y").predict(horizon=2)
     assert len(forecast) == 2
+
+# ---------- generic save() / load() default (via DummyModel) ----------
+
+def test_generic_save_raises_if_called_before_fit(tmp_path):
+    model = DummyModel(frequency="daily")
+    with pytest.raises(ModelPredictionError):
+        model.save(str(tmp_path / "model.pkl"))
+
+def test_generic_save_and_load_roundtrip(tmp_path):
+    save_path = str(tmp_path / "dummy_model.pkl")
+
+    original = DummyModel(frequency="daily", params={"alpha": 0.5})
+    df = pd.DataFrame({"y": [10, 20, 30]})
+    original.fit(df, target_column="y")
+    original.save(save_path)
+
+    reloaded = DummyModel.load(save_path)
+    assert reloaded.is_fitted is True
+    assert reloaded.frequency == "daily"
+    assert reloaded.get_params() == {"alpha": 0.5}
+
+    original_forecast = original.predict(horizon=3)
+    reloaded_forecast = reloaded.predict(horizon=3)
+    pd.testing.assert_frame_equal(original_forecast, reloaded_forecast)

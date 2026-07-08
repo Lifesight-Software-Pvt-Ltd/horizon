@@ -142,3 +142,40 @@ class BaseModel(ABC):
                 f"{self.model_name} model must be fitted before calling predict().",
                 model_name=self.model_name,
             )
+
+    def save(self, path: str) -> None:
+        """
+        Persist this fitted model to disk, so it can be reloaded in a
+        future session without refitting.
+
+        Default implementation: generic pickle of the whole wrapper
+        instance. This is fine for wrappers whose underlying library
+        pickles reliably (e.g. SARIMAX/statsmodels).
+
+        IMPORTANT: wrappers whose underlying library has known
+        serialization caveats (Prophet's Stan/cmdstanpy backend, PyMC's
+        InferenceData, NeuralProphet's torch state) MUST override this
+        method with that library's own recommended native serialization
+        approach instead of relying on this default — generic pickling
+        of those objects can silently produce a file that fails to load
+        correctly in a different environment or library version.
+        """
+        self._check_is_fitted()
+        import pickle
+
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, path: str) -> "BaseModel":
+        """
+        Reload a previously saved model from disk.
+
+        Default implementation: generic unpickle. See the note on
+        save() — wrappers that override save() with library-native
+        serialization must also override load() to match.
+        """
+        import pickle
+
+        with open(path, "rb") as f:
+            return pickle.load(f)
