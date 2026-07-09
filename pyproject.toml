@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "Ensemble time-series forecasting across Prophet, NeuralProphet, SARIMAX, CatBoost, and Bayesian PyMC"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 dependencies = [
     "pandas==2.3.3",
     "numpy==1.26.4",
@@ -49,3 +49,13 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+# Explicit include list, rather than relying on setuptools' automatic
+# flat-layout discovery. Without this, ANY stray top-level folder in the
+# project root (a venv named "test_env", a build artifact like
+# "catboost_info", etc.) gets mistaken for a second package and the
+# build fails outright — confirmed to happen in practice, not
+# theoretical. This makes the build robust regardless of what a
+# contributor happens to name their virtual environment.
+include = ["horizon_forecaster", "horizon_forecaster.*"]
