@@ -5,24 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "horizon_forecaster"
 version = "0.0.1"
-description = "Ensemble time-series forecasting across Prophet, NeuralProphet, SARIMAX, CatBoost, and PyMC"
+description = "Ensemble time-series forecasting across Prophet, NeuralProphet, SARIMAX, CatBoost, and Bayesian PyMC"
 readme = "README.md"
-requires-python = ">=3.9"
-license = "MIT"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
 dependencies = [
-    "pandas",
-    "numpy",
-    "prophet",
-    "neuralprophet",
-    "statsmodels",
-    "catboost",
-    "pymc",
-    "matplotlib",
-    "pyyaml",
+    "pandas==2.3.3",
+    "numpy==1.26.4",
+    "prophet==1.3.0",
+    "neuralprophet==0.8.0",
+    "statsmodels==0.14.6",
+    "catboost==1.2.10",
+    "pymc==5.25.1",
+    "matplotlib==3.11.0",
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "flake8"]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "flake8",
+]
 
-[tool.setuptools]
-packages = ["horizon_forecaster"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
