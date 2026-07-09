@@ -7,4 +7,4 @@ catboost==1.2.10
 pymc==5.25.1
 matplotlib==3.10.6
 pyyaml==6.0.3
-setuptools>=68
+setuptools>=68,<82

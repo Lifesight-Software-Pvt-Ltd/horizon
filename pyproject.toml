@@ -30,10 +30,13 @@ dependencies = [
     # transitive dependencies (pytorch_lightning, via neuralprophet)
     # import pkg_resources at runtime, which isn't guaranteed present in
     # every fresh Python environment (confirmed failure on a Python 3.12
-    # GitHub Actions runner). Kept as a loose lower-bound, not an exact
-    # pin, since this is an environment-compatibility shim rather than a
-    # core computational dependency.
-    "setuptools>=68",
+    # GitHub Actions runner). The upper bound is NOT optional: setuptools
+    # 82.0.0 (released Feb 8, 2026) completely removed pkg_resources from
+    # the package — a loose ">=68" bound was tried first and failed for
+    # exactly this reason, since pip satisfied it with 82+, which no
+    # longer has the module at all. Confirmed fix via multiple
+    # independent upstream bug reports converging on the same pin.
+    "setuptools>=68,<82",
 ]
 
 [project.optional-dependencies]
