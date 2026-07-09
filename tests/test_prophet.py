@@ -37,15 +37,35 @@ def test_fit_raises_insufficient_data_error_below_min_rows():
 
 def test_fit_raises_exactly_one_row_below_min_rows_boundary():
     model = ProphetWrapper(frequency="daily")
-    df = make_train_df(n=model.MIN_ROWS_REQUIRED - 1)
+    df = make_train_df(n=model.min_rows_required - 1)
     with pytest.raises(InsufficientDataError):
         model.fit(df, target_column="y")
 
 def test_fit_succeeds_at_exact_min_rows_boundary():
     model = ProphetWrapper(frequency="daily")
-    df = make_train_df(n=model.MIN_ROWS_REQUIRED)
+    df = make_train_df(n=model.min_rows_required)
     model.fit(df, target_column="y")
     assert model.is_fitted is True
+
+def test_min_rows_required_is_frequency_aware_by_default():
+    daily_model = ProphetWrapper(frequency="daily")
+    weekly_model = ProphetWrapper(frequency="weekly")
+    assert daily_model.min_rows_required == 14
+    assert weekly_model.min_rows_required == 8
+    assert daily_model.min_rows_required != weekly_model.min_rows_required
+
+def test_min_rows_required_can_be_explicitly_overridden():
+    model = ProphetWrapper(frequency="daily", min_rows_required=100)
+    assert model.min_rows_required == 100
+    df = make_train_df(n=50)
+    with pytest.raises(InsufficientDataError):
+        model.fit(df, target_column="y")  # 50 < explicit override of 100
+
+def test_random_seed_defaults_to_42_and_can_be_overridden():
+    default_model = ProphetWrapper(frequency="daily")
+    custom_model = ProphetWrapper(frequency="daily", random_seed=123)
+    assert default_model.random_seed == 42
+    assert custom_model.random_seed == 123
 
 def test_fit_raises_model_prediction_error_when_missing_ds_or_y_columns():
     model = ProphetWrapper(frequency="daily")
@@ -229,3 +249,23 @@ def test_loaded_model_is_a_fresh_instance_not_shared_state(tmp_path):
     reloaded = ProphetWrapper.load(save_path)
     assert reloaded is not original
     assert reloaded._fitted_model is not original._fitted_model
+
+def test_save_and_load_preserves_wrapper_level_config():
+    """
+    min_rows_required and random_seed are wrapper-level config, not
+    Prophet hyperparameters — confirm they survive the save/load
+    roundtrip too, not just the underlying Prophet model.
+    """
+    import tempfile
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        save_path = os.path.join(tmp_dir, "model.json")
+        original = ProphetWrapper(frequency="weekly", min_rows_required=12, random_seed=99)
+        original.fit(make_train_df(n=20), target_column="y")
+        original.save(save_path)
+
+        reloaded = ProphetWrapper.load(save_path)
+        assert reloaded.min_rows_required == 12
+        assert reloaded.random_seed == 99
+        assert reloaded.frequency == "weekly"

@@ -1,0 +1,45 @@
+# Default hyperparameters, by model and frequency.
+#
+# Structure, per model/frequency block:
+#   hyperparameters: passed directly to the underlying library's
+#                     constructor (e.g. Prophet(**hyperparameters)).
+#                     Users may override any of these.
+#   wrapper_config:   settings consumed by horizon_forecaster's own
+#                     wrapper logic, NOT passed to the underlying library
+#                     (e.g. minimum-rows floor, random seed for
+#                     reproducibility). Kept in a separate block
+#                     deliberately, so wrappers never need to filter
+#                     library-specific keys out of a mixed dict.
+#
+# Only daily/weekly are supported currently, per project scope.
+
+prophet:
+  daily:
+    hyperparameters:
+      yearly_seasonality: auto
+      weekly_seasonality: true
+      daily_seasonality: false
+      seasonality_mode: additive
+    wrapper_config:
+      # Floor: 14 days = 2 full weeks, the earliest point a weekly
+      # pattern can even theoretically repeat once. Not a guarantee of a
+      # good fit, just a sanity floor below which Prophet is fitting
+      # noise, not a pattern.
+      min_rows_required: 14
+      random_seed: 42
+
+  weekly:
+    hyperparameters:
+      yearly_seasonality: auto
+      # Weekly-granularity data has no "within-week" pattern to detect
+      # (each row already IS a week), so this is intentionally off,
+      # unlike the daily block above.
+      weekly_seasonality: false
+      daily_seasonality: false
+      seasonality_mode: additive
+    wrapper_config:
+      # Floor: 8 weeks (~2 months), the point below which there isn't
+      # enough span to estimate a trend + any real pattern, as opposed
+      # to just curve-fitting a line through noise.
+      min_rows_required: 8
+      random_seed: 42
