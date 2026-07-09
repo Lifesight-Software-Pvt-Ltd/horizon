@@ -50,6 +50,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.black]
+line-length = 100
+
 [tool.setuptools.packages.find]
 # Explicit include list, rather than relying on setuptools' automatic
 # flat-layout discovery. Without this, ANY stray top-level folder in the
@@ -59,3 +62,12 @@ testpaths = ["tests"]
 # theoretical. This makes the build robust regardless of what a
 # contributor happens to name their virtual environment.
 include = ["horizon_forecaster", "horizon_forecaster.*"]
+
+[tool.setuptools.package-data]
+# Without this, non-.py files (like the YAML config) are silently
+# excluded from the actual built/distributable package — confirmed by
+# inspecting a real built wheel, which contained zero .yaml files despite
+# editable installs (pip install -e .) working fine throughout
+# development. Editable installs symlink to the source tree and don't
+# expose this gap; only a real wheel build does.
+horizon_forecaster = ["config/*.yaml"]

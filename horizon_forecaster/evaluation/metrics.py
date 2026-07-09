@@ -12,7 +12,6 @@ dependency on any model class.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
