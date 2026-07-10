@@ -62,6 +62,42 @@ def test_constructor_sorts_data_chronologically():
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert forecaster.raw_df["orders"].tolist() == [10, 20, 30]
 
+def test_constructor_warns_when_declared_frequency_mismatches_actual_data():
+    """
+    The likely real-world bug this check exists for: a user declares
+    frequency="weekly" but their actual date column is daily-spaced (or
+    vice versa) - infer_frequency() (built in Phase 1) is used here to
+    catch this, rather than silently proceeding with a mismatch.
+    """
+    daily_df = pd.DataFrame({
+        "date": pd.date_range("2026-01-01", periods=60, freq="D"),
+        "orders": [100 + i * 2 for i in range(60)],
+    })
+    with pytest.warns(UserWarning, match="most common date spacing looks like 'daily'"):
+        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="weekly")
+
+def test_constructor_does_not_warn_when_frequency_matches_data():
+    daily_df = make_raw_df(n=60, freq="D")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="daily")
+
+def test_constructor_warns_but_does_not_block_on_irregular_data():
+    """
+    Real-world data is rarely perfectly regular - irregular spacing that
+    doesn't cleanly match daily or weekly should warn, not raise, so
+    legitimate (if slightly messy) data isn't rejected outright.
+    """
+    irregular_df = pd.DataFrame({
+        "date": pd.to_datetime(["2026-01-01", "2026-01-03", "2026-01-10", "2026-01-25"]),
+        "orders": [10, 20, 30, 40],
+    })
+    with pytest.warns(UserWarning):
+        forecaster = HorizonForecaster(
+            irregular_df, date_column="date", target_column="orders", frequency="weekly"
+        )
+    assert forecaster is not None  # confirms it did NOT raise, just warned
+
 # ---------- config loading ----------
 
 def test_config_loaded_correctly_for_daily():

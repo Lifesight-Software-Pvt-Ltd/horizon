@@ -23,10 +23,15 @@ import yaml
 
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
-from horizon_forecaster.exceptions import InvalidConfigError
+from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
 from horizon_forecaster.models.base import BaseModel
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
-from horizon_forecaster.utils import clean_zero_variance, validate_frequency, validate_training_size
+from horizon_forecaster.utils import (
+    clean_zero_variance,
+    infer_frequency,
+    validate_frequency,
+    validate_training_size,
+)
 
 _CONFIG_PATH = Path(__file__).parent / "config" / "default_params.yaml"
 _FREQUENCY_OFFSETS = {"daily": "D", "weekly": "7D"}
@@ -94,7 +99,6 @@ class ForecastResult:
     horizon: int
     used_default_future_strategy: bool
 
-
 class HorizonForecaster:
     """
     Main orchestrator. Takes raw user data once at construction, and
@@ -146,6 +150,8 @@ class HorizonForecaster:
         ]
 
         self.raw_df = cleaned_df.sort_values(date_column).reset_index(drop=True)
+        self._warn_if_declared_frequency_mismatches_data()
+
         self._config = self._load_config()
 
         # Cache slot for forecast()'s full-data refit — populated on the
@@ -159,6 +165,44 @@ class HorizonForecaster:
         with open(_CONFIG_PATH) as f:
             full_config = yaml.safe_load(f)
         return full_config["prophet"][self.frequency]
+
+    def _warn_if_declared_frequency_mismatches_data(self) -> None:
+        """
+        Cross-checks the user-declared `frequency` against the actual
+        spacing of the date column, using infer_frequency() (built in
+        Phase 1, but not previously wired into any real caller).
+
+        This is a WARNING, not a hard error: real-world data is rarely
+        perfectly regular (a genuinely weekly dataset might have a few
+        irregular gaps), so blocking outright would reject legitimate
+        data too aggressively. But a genuine mismatch (e.g. declaring
+        "weekly" on data that's actually daily-spaced) silently produces
+        a model whose seasonality assumptions and future-date generation
+        don't match its own training data's real cadence — worth
+        surfacing clearly, even if not blocking.
+        """
+        try:
+            inferred = infer_frequency(self.raw_df[self.date_column])
+        except (UnsupportedFrequencyError, InvalidConfigError):
+            warnings.warn(
+                f"Could not confirm that '{self.date_column}' has a clean, "
+                f"regular daily or weekly spacing. Proceeding with the "
+                f"declared frequency ('{self.frequency}') as-is, but verify "
+                f"this matches your data's actual granularity.",
+                stacklevel=2,
+            )
+            return
+
+        if inferred != self.frequency:
+            warnings.warn(
+                f"Declared frequency is '{self.frequency}', but the data's "
+                f"most common date spacing looks like '{inferred}' data. "
+                f"This can cause the model's seasonality assumptions and "
+                f"future forecast date spacing to be inconsistent with the "
+                f"data it was actually trained on. If this is intentional, "
+                f"this warning can be ignored.",
+                stacklevel=2,
+            )
 
     def evaluate(self) -> EvaluationResult:
         """
