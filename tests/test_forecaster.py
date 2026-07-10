@@ -1,3 +1,5 @@
+import warnings
+
 import pandas as pd
 import pytest
 
@@ -6,7 +8,7 @@ from horizon_forecaster.exceptions import (
     InvalidConfigError,
     UnsupportedFrequencyError,
 )
-from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult
+from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult
 
 def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
     df = pd.DataFrame({
@@ -143,3 +145,132 @@ def test_evaluate_weekly_frequency_end_to_end():
     result = forecaster.evaluate()
     assert result.model_name == "prophet"
     assert result.mape.value < 10.0
+
+# ---------- forecast() ----------
+
+def test_forecast_returns_structured_result():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result = forecaster.forecast(horizon=10)
+
+    assert isinstance(result, ForecastResult)
+    assert result.model_name == "prophet"
+    assert result.horizon == 10
+    assert len(result.forecast) == 10
+    assert result.used_default_future_strategy is False  # no independent columns at all
+
+def test_forecast_continues_trend_correctly():
+    df = make_raw_df(n=60)  # orders = 100 + i*2, so trend is +2/period
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result = forecaster.forecast(horizon=5)
+    yhats = result.forecast["yhat"].tolist()
+    diffs = [round(yhats[i + 1] - yhats[i], 4) for i in range(len(yhats) - 1)]
+    assert all(d == 2.0 for d in diffs)
+
+def test_forecast_raises_on_non_positive_horizon():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    with pytest.raises(InvalidConfigError):
+        forecaster.forecast(horizon=0)
+    with pytest.raises(InvalidConfigError):
+        forecaster.forecast(horizon=-5)
+
+def test_forecast_refits_only_once_and_caches_across_calls():
+    """
+    Critical design contract: the full-data refit must happen exactly
+    once per instance, regardless of how many times forecast() is
+    called afterward (even with different horizons).
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+
+    assert forecaster._forecast_model is None
+    forecaster.forecast(horizon=5)
+    model_after_first_call = forecaster._forecast_model
+    assert model_after_first_call is not None
+
+    forecaster.forecast(horizon=10)  # different horizon
+    model_after_second_call = forecaster._forecast_model
+
+    assert model_after_first_call is model_after_second_call  # same object, not refit
+
+def test_forecast_uses_default_strategy_when_independent_data_not_supplied():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+    )
+    result = forecaster.forecast(horizon=5)
+    assert result.used_default_future_strategy is True
+    assert len(result.forecast) == 5
+
+def test_forecast_uses_supplied_future_independent_data_when_provided():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+    )
+    future_spend = pd.DataFrame({"spend": [500, 510, 520, 530, 540]})
+    result = forecaster.forecast(horizon=5, future_independent_data=future_spend)
+    assert result.used_default_future_strategy is False
+    assert len(result.forecast) == 5
+
+def test_default_future_strategy_reuses_last_n_periods_when_horizon_fits_within_history():
+    df = make_raw_df(n=60, with_spend=True)  # spend = 50 + i, last values: ..., 107, 108, 109
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+    )
+    default_future = forecaster._build_default_future_independent_data(horizon=3)
+    # last 3 actual spend values in a 60-row series starting at 50: 107, 108, 109
+    assert default_future["spend"].tolist() == [107, 108, 109]
+
+def test_default_future_strategy_cycles_when_horizon_exceeds_history():
+    df = make_raw_df(n=20, with_spend=True)  # spend = 50..69 (20 values)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+    )
+    # horizon of 45 > 20 rows of history -> must cycle, not crash
+    default_future = forecaster._build_default_future_independent_data(horizon=45)
+    assert len(default_future) == 45
+    assert not default_future["spend"].isna().any()
+
+def test_forecast_warns_when_horizon_far_exceeds_history():
+    df = make_raw_df(n=20, with_spend=True)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+    )
+    with pytest.warns(UserWarning, match="Forecasting 45 periods from only 20 periods"):
+        forecaster.forecast(horizon=45)
+
+def test_forecast_does_not_warn_when_horizon_is_reasonable():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning becomes a test failure
+        forecaster.forecast(horizon=10)  # well within 2x of 60 rows of history
+
+def test_forecast_weekly_frequency_produces_correct_future_dates():
+    df = make_raw_df(n=40, freq="7D")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly")
+    result = forecaster.forecast(horizon=3)
+    last_train_date = df["date"].max()
+    expected_first_future_date = last_train_date + pd.Timedelta(days=7)
+    assert result.forecast["ds"].iloc[0] == expected_first_future_date
