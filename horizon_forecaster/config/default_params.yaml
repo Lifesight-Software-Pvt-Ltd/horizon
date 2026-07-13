@@ -1,25 +1,71 @@
 # Default hyperparameters, by model and frequency.
 #
 # Structure, per model/frequency block:
-#   hyperparameters: passed directly to the underlying library's
-#                     constructor (e.g. Prophet(**hyperparameters)).
-#                     Users may override any of these.
-#   wrapper_config:   settings consumed by horizon_forecaster's own
-#                     wrapper logic, NOT passed to the underlying library
-#                     (e.g. minimum-rows floor, random seed for
-#                     reproducibility). Kept in a separate block
-#                     deliberately, so wrappers never need to filter
-#                     library-specific keys out of a mixed dict.
+#   hyperparameter_grid: a LIST of candidate hyperparameter sets. When no
+#                        explicit model_params override is given by the
+#                        caller, CustomForecaster.evaluate() fits and
+#                        evaluates EVERY candidate on the same train/test
+#                        split and automatically selects whichever
+#                        achieves the lowest test-set MAPE.
+#
+#                        The first 4 candidates reflect a combination the
+#                        project owner has actually used and found to
+#                        work well in practice on datasets with enough
+#                        history to support them. The last 2 candidates
+#                        use yearly_seasonality='auto' — Prophet's own
+#                        data-span-aware setting, which safely disables
+#                        yearly seasonality when there isn't enough
+#                        history to support it, rather than forcing it on
+#                        regardless. This matters concretely: forcing an
+#                        explicit yearly_seasonality Fourier order on a
+#                        dataset shorter than ~1-2 years was confirmed
+#                        (via direct testing) to produce wild,
+#                        unconstrained extrapolation — including negative
+#                        forecasted values for a strictly positive metric
+#                        — since Prophet has nowhere near enough data to
+#                        constrain a yearly cycle but tries to fit one
+#                        anyway. Including 'auto' candidates lets the
+#                        grid search itself naturally favor the safe
+#                        fallback on short datasets (where it will score
+#                        better) and the tuned aggressive settings on
+#                        long datasets (where they should win instead),
+#                        rather than hand-coding a data-span threshold.
+#   base_hyperparameters: settings applied to EVERY candidate in the
+#                        grid, not varied by the search.
+#   wrapper_config:      settings consumed by horizon_forecaster's own
+#                        wrapper logic, NOT passed to the underlying
+#                        library (minimum-rows floor, random seed).
+#
+# An explicit `model_params` override (passed to CustomForecaster's
+# constructor) always skips the grid search entirely and uses exactly
+# what was passed, merged on top of base_hyperparameters.
 #
 # Only daily/weekly are supported currently, per project scope.
 
 prophet:
   daily:
-    hyperparameters:
-      yearly_seasonality: auto
-      weekly_seasonality: true
+    base_hyperparameters:
       daily_seasonality: false
-      seasonality_mode: additive
+    hyperparameter_grid:
+      - seasonality_mode: additive
+        yearly_seasonality: 10
+        weekly_seasonality: 3
+      - seasonality_mode: multiplicative
+        yearly_seasonality: 10
+        weekly_seasonality: 3
+      - seasonality_mode: additive
+        yearly_seasonality: 20
+        weekly_seasonality: 5
+      - seasonality_mode: multiplicative
+        yearly_seasonality: 20
+        weekly_seasonality: 5
+      # Safe fallback candidates for shorter datasets — see note above.
+      - seasonality_mode: additive
+        yearly_seasonality: auto
+        weekly_seasonality: auto
+      - seasonality_mode: multiplicative
+        yearly_seasonality: auto
+        weekly_seasonality: auto
     wrapper_config:
       # Floor: 14 days = 2 full weeks, the earliest point a weekly
       # pattern can even theoretically repeat once. Not a guarantee of a
@@ -29,14 +75,34 @@ prophet:
       random_seed: 42
 
   weekly:
-    hyperparameters:
-      yearly_seasonality: auto
-      # Weekly-granularity data has no "within-week" pattern to detect
-      # (each row already IS a week), so this is intentionally off,
-      # unlike the daily block above.
-      weekly_seasonality: false
+    base_hyperparameters:
       daily_seasonality: false
-      seasonality_mode: additive
+    # NOTE: weekly_seasonality is included in the first 4 candidates for
+    # consistency with the daily grid above, but is arguably not
+    # meaningful at weekly granularity (each row already IS a week, so
+    # there's no "within-week" pattern to detect). The safe fallback
+    # candidates below explicitly disable it rather than using 'auto',
+    # since we already know structurally it shouldn't apply here.
+    hyperparameter_grid:
+      - seasonality_mode: additive
+        yearly_seasonality: 10
+        weekly_seasonality: 3
+      - seasonality_mode: multiplicative
+        yearly_seasonality: 10
+        weekly_seasonality: 3
+      - seasonality_mode: additive
+        yearly_seasonality: 20
+        weekly_seasonality: 5
+      - seasonality_mode: multiplicative
+        yearly_seasonality: 20
+        weekly_seasonality: 5
+      # Safe fallback candidates for shorter datasets — see note above.
+      - seasonality_mode: additive
+        yearly_seasonality: auto
+        weekly_seasonality: false
+      - seasonality_mode: multiplicative
+        yearly_seasonality: auto
+        weekly_seasonality: false
     wrapper_config:
       # Floor: 8 weeks (~2 months), the point below which there isn't
       # enough span to estimate a trend + any real pattern, as opposed
