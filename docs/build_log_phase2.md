@@ -407,23 +407,95 @@ reasoning below).
 
 ---
 
+## Step 7 — Real-dataset testing surfaces two more gaps, both fixed
+
+The 6 steps above were validated against clean synthetic data. Testing
+`evaluate()`/`forecast()` against real datasets (via a reusable Colab
+workflow, `evaluate()`/`forecast()` helpers, visualizations, and a
+findings-log template) surfaced two genuine gaps neither synthetic data
+nor unit tests had exposed.
+
+### Gap 1: fixed default hyperparameters underperformed known-good ones
+
+Prophet's out-of-the-box defaults scored worse on real data than
+hyperparameter combinations already proven to work well in practice.
+A single fixed default can't be simultaneously right for every dataset
+shape, so **`evaluate()`/`forecast()` now run a hyperparameter grid
+search by default**: 6 candidates per frequency
+(`config/default_params.yaml`'s `hyperparameter_grid`) — 4 tuned
+combinations plus 2 safe `yearly_seasonality='auto'` fallbacks — each
+fit and scored on the same chronological train/test split, with the
+lowest-MAPE candidate selected automatically
+(`EvaluationResult.grid_search_summary` exposes the full comparison).
+An explicit `model_params` override at construction still skips the
+search entirely, unchanged from the original design.
+
+**Found mid-implementation**: forcing the 4 tuned candidates onto
+short-history datasets produced badly broken forecasts — MAPE as high
+as 802%, including negative predictions for a strictly positive metric.
+Root cause: those combos hard-code a `yearly_seasonality` Fourier order
+that assumes enough history to constrain a yearly cycle; with too
+little data, Prophet still tries to fit one and extrapolates wildly.
+Rather than hand-coding a data-span threshold to guard against this,
+the 2 `'auto'` fallback candidates were added to the grid — Prophet's
+own data-span-aware setting naturally disables yearly seasonality when
+unsupported, so the grid search itself favors the safe fallback on
+short datasets and the tuned combos on long ones, without an explicit
+rule to maintain.
+
+**Accepted trade-off**: grid search makes `evaluate()`/`forecast()`
+slower (roughly 1–4 minutes instead of one fit), in exchange for not
+silently shipping a badly-fit default. Deliberate, not an oversight.
+
+### Gap 2: declared frequency was never checked against actual data spacing
+
+A user could declare `frequency="daily"` while passing weekly-spaced
+data (or vice versa) with no warning — silently producing seasonality
+assumptions and future forecast date spacing inconsistent with what the
+model was actually trained on. Fixed:
+`HorizonForecaster.__init__()` now calls `infer_frequency()` against the
+actual date column and warns (non-blocking) if the inferred spacing
+doesn't match the declared `frequency`, or if the spacing can't be
+confirmed as clean daily/weekly at all.
+
+### How this was verified
+
+- Test suite grew from 124 to 137 tests, all passing, individually
+  re-confirmed against the real repository after this change (not
+  assumed from a sandbox run).
+- Both fixes verified against the specific real-data failure modes that
+  surfaced them: the grid search against the 802%-MAPE short-history
+  case directly, the frequency check against a deliberately mismatched
+  daily/weekly dataset pair.
+
+### Known open thread from this step
+
+The Colab notebook this testing was done in (`examples/real_dataset_testing.ipynb`)
+is not yet committed to this repository — it currently lives in Colab
+only. Pushing it is blocked on the same GitHub PAT/org-admin access
+issue noted below, not forgotten.
+
+---
+
 ## Phase 2 exit state
 
-All 6 steps complete and independently verified against the real
-repository (not assumed from a local sandbox). The full vertical slice —
-raw data in, real Prophet forecasts out, with honest evaluation metrics
-in between — works end to end, with the environment it depends on
-hardened against real, encountered failure modes rather than
-hypothetical ones.
+All 6 core steps plus the step-7 real-dataset-testing follow-up are
+complete and independently verified against the real repository (not
+assumed from a local sandbox). The full vertical slice — raw data in,
+real Prophet forecasts out, with honest evaluation metrics and
+hyperparameter selection in between — works end to end, with the
+environment it depends on hardened against real, encountered failure
+modes rather than hypothetical ones.
 
 ---
 
 ## Open items carried forward into later phases
 
 - **Resolved during this phase, no longer open**: `MIN_ROWS_REQUIRED`
-  frequency-awareness (step 3) and the horizon-vs-history warning
-  (step 6) — both flagged as open items earlier in Phase 2, both now
-  implemented and tested.
+  frequency-awareness (step 3), the horizon-vs-history warning
+  (step 6), the fixed-default-hyperparameter gap, and the
+  declared-vs-actual frequency check (both step 7) — all flagged as
+  open items during Phase 2, all now implemented and tested.
 - PyMC and NeuralProphet will still need their own `save()`/`load()`
   overrides later (Phase 6), following the principle established for
   Prophet: use each library's own recommended native serialization,
@@ -442,3 +514,6 @@ hypothetical ones.
   historical-average, linear-trend) remain a documented future
   enhancement, not yet built — worth revisiting once real usage shows
   whether the current default is sufficient.
+- `examples/real_dataset_testing.ipynb` exists in Colab but is not yet
+  committed to this repository, and the GitHub PAT/org-admin access
+  needed to resolve this is still pending.

@@ -104,13 +104,112 @@ def test_config_loaded_correctly_for_daily():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert forecaster._config["wrapper_config"]["min_rows_required"] == 14
-    assert forecaster._config["hyperparameters"]["weekly_seasonality"] is True
+    assert forecaster._config["base_hyperparameters"]["daily_seasonality"] is False
+    assert len(forecaster._config["hyperparameter_grid"]) == 6
 
 def test_config_loaded_correctly_for_weekly():
     df = make_raw_df(n=60, freq="7D")
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly")
     assert forecaster._config["wrapper_config"]["min_rows_required"] == 8
-    assert forecaster._config["hyperparameters"]["weekly_seasonality"] is False
+    assert len(forecaster._config["hyperparameter_grid"]) == 6
+
+
+def test_model_params_override_skips_grid_search_entirely():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        model_params={"seasonality_mode": "multiplicative", "yearly_seasonality": 20},
+    )
+    assert forecaster._use_grid_search is False
+    # Resolved immediately at construction, not lazily
+    assert forecaster._selected_hyperparameters["seasonality_mode"] == "multiplicative"
+    assert forecaster._selected_hyperparameters["yearly_seasonality"] == 20
+    # base_hyperparameters (not part of the override) still applied
+    assert forecaster._selected_hyperparameters["daily_seasonality"] is False
+
+
+def test_model_params_override_actually_reaches_the_fitted_prophet_model():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        model_params={"seasonality_mode": "multiplicative"},
+    )
+    result = forecaster.evaluate()
+    assert result.fitted_model.params["seasonality_mode"] == "multiplicative"
+    assert result.grid_search_summary is None  # no search happened, nothing to report
+
+
+def test_no_model_params_uses_grid_search_mode():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    assert forecaster._use_grid_search is True
+    # Not resolved yet — lazy, until evaluate()/forecast() actually runs it
+    assert forecaster._selected_hyperparameters is None
+
+
+# ---------- hyperparameter grid search ----------
+
+def test_grid_search_evaluates_all_six_candidates():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result = forecaster.evaluate()
+    assert result.grid_search_summary is not None
+    assert len(result.grid_search_summary) == 6
+
+
+def test_grid_search_summary_is_sorted_best_to_worst():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result = forecaster.evaluate()
+    mapes = [c["mape"] for c in result.grid_search_summary]
+    assert mapes == sorted(mapes)
+
+
+def test_grid_search_winner_matches_evaluate_result():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result = forecaster.evaluate()
+    assert result.mape.value == result.grid_search_summary[0]["mape"]
+
+
+def test_grid_search_runs_only_once_across_repeated_evaluate_calls():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    result1 = forecaster.evaluate()
+    result2 = forecaster.evaluate()
+    # Same cached result object, not recomputed
+    assert result1 is result2
+
+
+def test_forecast_reuses_grid_search_winner_from_evaluate():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    eval_result = forecaster.evaluate()
+    winning_params = forecaster._selected_hyperparameters
+
+    forecaster.forecast(horizon=5)
+    assert forecaster._forecast_model.params == winning_params
+
+
+def test_forecast_runs_grid_search_itself_when_called_before_evaluate():
+    """
+    forecast() must be independently capable of selecting hyperparameters
+    if evaluate() was never called first in this session.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    assert forecaster._selected_hyperparameters is None
+
+    forecaster.forecast(horizon=5)
+    assert forecaster._selected_hyperparameters is not None
+    assert forecaster._grid_search_result is not None
+
 
 # ---------- evaluate() ----------
 
@@ -126,6 +225,7 @@ def test_evaluate_returns_structured_result():
     assert len(result.test_predictions) == 12
     assert result.fitted_model.is_fitted is True
 
+
 def test_evaluate_produces_low_mape_on_clean_trend():
     """
     A clean, noise-free linear trend should be near-trivially predictable
@@ -138,6 +238,7 @@ def test_evaluate_produces_low_mape_on_clean_trend():
     result = forecaster.evaluate()
     assert result.mape.value < 5.0  # should be very low on a clean trend
 
+
 def test_evaluate_test_predictions_have_expected_columns():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
@@ -145,6 +246,7 @@ def test_evaluate_test_predictions_have_expected_columns():
     assert set(["ds", "y", "yhat", "yhat_lower", "yhat_upper"]).issubset(
         set(result.test_predictions.columns)
     )
+
 
 def test_evaluate_works_with_independent_columns():
     df = make_raw_df(n=60, with_spend=True)
@@ -158,6 +260,7 @@ def test_evaluate_works_with_independent_columns():
     result = forecaster.evaluate()
     assert result.fitted_model._regressor_columns == ["spend"]
 
+
 def test_evaluate_raises_invalid_config_error_when_training_size_leaves_no_test_rows():
     # A tiny dataset where int(n * 0.99...) could plausibly consume all rows
     # is contrived; instead directly force the scenario via a very small n
@@ -169,11 +272,13 @@ def test_evaluate_raises_invalid_config_error_when_training_size_leaves_no_test_
     with pytest.raises(InvalidConfigError):
         forecaster.evaluate()
 
+
 def test_evaluate_propagates_insufficient_data_error_on_tiny_dataset():
     df = make_raw_df(n=10)  # 80% train -> 8 rows, below daily floor of 14
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     with pytest.raises(InsufficientDataError):
         forecaster.evaluate()
+
 
 def test_evaluate_weekly_frequency_end_to_end():
     df = make_raw_df(n=40, freq="7D")
@@ -181,6 +286,7 @@ def test_evaluate_weekly_frequency_end_to_end():
     result = forecaster.evaluate()
     assert result.model_name == "prophet"
     assert result.mape.value < 10.0
+
 
 # ---------- forecast() ----------
 
@@ -195,6 +301,7 @@ def test_forecast_returns_structured_result():
     assert len(result.forecast) == 10
     assert result.used_default_future_strategy is False  # no independent columns at all
 
+
 def test_forecast_continues_trend_correctly():
     df = make_raw_df(n=60)  # orders = 100 + i*2, so trend is +2/period
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
@@ -203,6 +310,7 @@ def test_forecast_continues_trend_correctly():
     diffs = [round(yhats[i + 1] - yhats[i], 4) for i in range(len(yhats) - 1)]
     assert all(d == 2.0 for d in diffs)
 
+
 def test_forecast_raises_on_non_positive_horizon():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
@@ -210,6 +318,7 @@ def test_forecast_raises_on_non_positive_horizon():
         forecaster.forecast(horizon=0)
     with pytest.raises(InvalidConfigError):
         forecaster.forecast(horizon=-5)
+
 
 def test_forecast_refits_only_once_and_caches_across_calls():
     """
@@ -230,6 +339,7 @@ def test_forecast_refits_only_once_and_caches_across_calls():
 
     assert model_after_first_call is model_after_second_call  # same object, not refit
 
+
 def test_forecast_uses_default_strategy_when_independent_data_not_supplied():
     df = make_raw_df(n=60, with_spend=True)
     forecaster = HorizonForecaster(
@@ -242,6 +352,7 @@ def test_forecast_uses_default_strategy_when_independent_data_not_supplied():
     result = forecaster.forecast(horizon=5)
     assert result.used_default_future_strategy is True
     assert len(result.forecast) == 5
+
 
 def test_forecast_uses_supplied_future_independent_data_when_provided():
     df = make_raw_df(n=60, with_spend=True)
@@ -257,6 +368,7 @@ def test_forecast_uses_supplied_future_independent_data_when_provided():
     assert result.used_default_future_strategy is False
     assert len(result.forecast) == 5
 
+
 def test_default_future_strategy_reuses_last_n_periods_when_horizon_fits_within_history():
     df = make_raw_df(n=60, with_spend=True)  # spend = 50 + i, last values: ..., 107, 108, 109
     forecaster = HorizonForecaster(
@@ -269,6 +381,7 @@ def test_default_future_strategy_reuses_last_n_periods_when_horizon_fits_within_
     default_future = forecaster._build_default_future_independent_data(horizon=3)
     # last 3 actual spend values in a 60-row series starting at 50: 107, 108, 109
     assert default_future["spend"].tolist() == [107, 108, 109]
+
 
 def test_default_future_strategy_cycles_when_horizon_exceeds_history():
     df = make_raw_df(n=20, with_spend=True)  # spend = 50..69 (20 values)
@@ -284,6 +397,7 @@ def test_default_future_strategy_cycles_when_horizon_exceeds_history():
     assert len(default_future) == 45
     assert not default_future["spend"].isna().any()
 
+
 def test_forecast_warns_when_horizon_far_exceeds_history():
     df = make_raw_df(n=20, with_spend=True)
     forecaster = HorizonForecaster(
@@ -295,6 +409,7 @@ def test_forecast_warns_when_horizon_far_exceeds_history():
     )
     with pytest.warns(UserWarning, match="Forecasting 45 periods from only 20 periods"):
         forecaster.forecast(horizon=45)
+
 
 def test_forecast_does_not_warn_when_horizon_is_reasonable():
     df = make_raw_df(n=60)
