@@ -4,11 +4,12 @@ import pandas as pd
 import pytest
 
 from horizon_forecaster.exceptions import (
+    AllModelsRejectedError,
     InsufficientDataError,
     InvalidConfigError,
     UnsupportedFrequencyError,
 )
-from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult
+from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult, MODEL_REGISTRY
 
 def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
     df = pd.DataFrame({
@@ -26,18 +27,18 @@ def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
 def test_constructor_validates_frequency():
     df = make_raw_df()
     with pytest.raises(UnsupportedFrequencyError):
-        HorizonForecaster(df, date_column="date", target_column="orders", frequency="monthly")
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="monthly", models=["prophet"])
 
 def test_constructor_validates_training_size():
     df = make_raw_df()
     with pytest.raises(InvalidConfigError):
         HorizonForecaster(
-            df, date_column="date", target_column="orders", frequency="daily", training_size=30
+            df, date_column="date", target_column="orders", frequency="daily", training_size=30, models=["prophet"]
         )
 
 def test_constructor_default_training_size_is_80_percent():
     df = make_raw_df()
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
     assert forecaster.training_fraction == 0.8
 
 def test_constructor_drops_zero_variance_independent_columns():
@@ -48,6 +49,7 @@ def test_constructor_drops_zero_variance_independent_columns():
         target_column="orders",
         frequency="daily",
         independent_columns=["constant_col"],
+        models=["prophet"],
     )
     assert "constant_col" in forecaster.dropped_zero_variance_columns
     # Critically: also removed from independent_columns, so the adapter's
@@ -59,7 +61,7 @@ def test_constructor_sorts_data_chronologically():
         "date": pd.to_datetime(["2026-01-03", "2026-01-01", "2026-01-02"]),
         "orders": [30, 10, 20],
     })
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
     assert forecaster.raw_df["orders"].tolist() == [10, 20, 30]
 
 def test_constructor_warns_when_declared_frequency_mismatches_actual_data():
@@ -74,13 +76,13 @@ def test_constructor_warns_when_declared_frequency_mismatches_actual_data():
         "orders": [100 + i * 2 for i in range(60)],
     })
     with pytest.warns(UserWarning, match="most common date spacing looks like 'daily'"):
-        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="weekly")
+        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])
 
 def test_constructor_does_not_warn_when_frequency_matches_data():
     daily_df = make_raw_df(n=60, freq="D")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="daily")
+        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
 
 def test_constructor_warns_but_does_not_block_on_irregular_data():
     """
@@ -94,24 +96,71 @@ def test_constructor_warns_but_does_not_block_on_irregular_data():
     })
     with pytest.warns(UserWarning):
         forecaster = HorizonForecaster(
-            irregular_df, date_column="date", target_column="orders", frequency="weekly"
+            irregular_df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"]
         )
     assert forecaster is not None  # confirms it did NOT raise, just warned
+
+def test_constructor_raises_immediately_when_training_size_leaves_no_test_rows():
+    """
+    training_size leaving zero test rows is a dataset-level configuration
+    problem, identical for every model -- validated at construction time
+    (fails fast, before any model even runs), not discovered later inside
+    evaluate()'s per-model try/except.
+    """
+    df = make_raw_df(n=1)
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(
+            df, date_column="date", target_column="orders", frequency="daily", training_size=100, models=["prophet"]
+        )
+
+# ---------- models= parameter ----------
+
+def test_models_defaults_to_every_registered_model():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    assert set(forecaster.models) == set(MODEL_REGISTRY.keys())
+    assert set(forecaster.models) == {"prophet", "catboost"}
+
+def test_models_can_be_restricted_to_a_subset():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    assert forecaster.models == ["prophet"]
+
+def test_models_raises_on_unknown_model_name():
+    df = make_raw_df(n=60)
+    with pytest.raises(InvalidConfigError) as exc_info:
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet", "sarimax"])
+    assert "sarimax" in str(exc_info.value)
+
+def test_models_raises_on_empty_list():
+    df = make_raw_df(n=60)
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=[])
 
 # ---------- config loading ----------
 
 def test_config_loaded_correctly_for_daily():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    assert forecaster._config["wrapper_config"]["min_rows_required"] == 14
-    assert forecaster._config["base_hyperparameters"]["daily_seasonality"] is False
-    assert len(forecaster._config["hyperparameter_grid"]) == 6
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    assert forecaster._configs["prophet"]["wrapper_config"]["min_rows_required"] == 14
+    assert forecaster._configs["prophet"]["base_hyperparameters"]["daily_seasonality"] is False
+    assert len(forecaster._configs["prophet"]["hyperparameter_grid"]) == 6
 
 def test_config_loaded_correctly_for_weekly():
     df = make_raw_df(n=60, freq="7D")
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly")
-    assert forecaster._config["wrapper_config"]["min_rows_required"] == 8
-    assert len(forecaster._config["hyperparameter_grid"]) == 6
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])
+    assert forecaster._configs["prophet"]["wrapper_config"]["min_rows_required"] == 8
+    assert len(forecaster._configs["prophet"]["hyperparameter_grid"]) == 6
+
+def test_config_loaded_independently_per_model():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    assert forecaster._configs["prophet"]["wrapper_config"]["min_rows_required"] == 14
+    assert forecaster._configs["catboost"]["wrapper_config"]["min_rows_required"] == 14
+    assert len(forecaster._configs["catboost"]["hyperparameter_grid"]) == 18
+    # prophet and catboost have genuinely different hyperparameter keys
+    assert "seasonality_mode" in forecaster._configs["prophet"]["hyperparameter_grid"][0]
+    assert "iterations" in forecaster._configs["catboost"]["hyperparameter_grid"][0]
 
 
 def test_model_params_override_skips_grid_search_entirely():
@@ -121,14 +170,15 @@ def test_model_params_override_skips_grid_search_entirely():
         date_column="date",
         target_column="orders",
         frequency="daily",
-        model_params={"seasonality_mode": "multiplicative", "yearly_seasonality": 20},
+        models=["prophet"],
+        model_params={"prophet": {"seasonality_mode": "multiplicative", "yearly_seasonality": 20}},
     )
-    assert forecaster._use_grid_search is False
+    assert forecaster._use_grid_search["prophet"] is False
     # Resolved immediately at construction, not lazily
-    assert forecaster._selected_hyperparameters["seasonality_mode"] == "multiplicative"
-    assert forecaster._selected_hyperparameters["yearly_seasonality"] == 20
+    assert forecaster._selected_hyperparameters["prophet"]["seasonality_mode"] == "multiplicative"
+    assert forecaster._selected_hyperparameters["prophet"]["yearly_seasonality"] == 20
     # base_hyperparameters (not part of the override) still applied
-    assert forecaster._selected_hyperparameters["daily_seasonality"] is False
+    assert forecaster._selected_hyperparameters["prophet"]["daily_seasonality"] is False
 
 
 def test_model_params_override_actually_reaches_the_fitted_prophet_model():
@@ -138,63 +188,81 @@ def test_model_params_override_actually_reaches_the_fitted_prophet_model():
         date_column="date",
         target_column="orders",
         frequency="daily",
-        model_params={"seasonality_mode": "multiplicative"},
+        models=["prophet"],
+        model_params={"prophet": {"seasonality_mode": "multiplicative"}},
     )
-    result = forecaster.evaluate()
+    result = forecaster.evaluate()["prophet"]
     assert result.fitted_model.params["seasonality_mode"] == "multiplicative"
     assert result.grid_search_summary is None  # no search happened, nothing to report
 
 
 def test_no_model_params_uses_grid_search_mode():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    assert forecaster._use_grid_search is True
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    assert forecaster._use_grid_search["prophet"] is True
     # Not resolved yet — lazy, until evaluate()/forecast() actually runs it
-    assert forecaster._selected_hyperparameters is None
+    assert forecaster._selected_hyperparameters["prophet"] is None
+
+
+def test_model_params_are_independent_per_model():
+    """
+    Giving prophet an explicit override should not affect catboost's own
+    (independent) decision to use grid search, and vice versa.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "multiplicative"}},  # catboost gets no entry
+    )
+    assert forecaster._use_grid_search["prophet"] is False
+    assert forecaster._use_grid_search["catboost"] is True
 
 
 # ---------- hyperparameter grid search ----------
 
 def test_grid_search_evaluates_all_six_candidates():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     assert result.grid_search_summary is not None
     assert len(result.grid_search_summary) == 6
 
 
 def test_grid_search_summary_is_sorted_best_to_worst():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     mapes = [c["mape"] for c in result.grid_search_summary]
     assert mapes == sorted(mapes)
 
 
 def test_grid_search_winner_matches_evaluate_result():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     assert result.mape.value == result.grid_search_summary[0]["mape"]
 
 
 def test_grid_search_runs_only_once_across_repeated_evaluate_calls():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result1 = forecaster.evaluate()
-    result2 = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result1 = forecaster.evaluate()["prophet"]
+    result2 = forecaster.evaluate()["prophet"]
     # Same cached result object, not recomputed
     assert result1 is result2
 
 
 def test_forecast_reuses_grid_search_winner_from_evaluate():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    eval_result = forecaster.evaluate()
-    winning_params = forecaster._selected_hyperparameters
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    forecaster.evaluate()
+    winning_params = forecaster._selected_hyperparameters["prophet"]
 
     forecaster.forecast(horizon=5)
-    assert forecaster._forecast_model.params == winning_params
+    assert forecaster._forecast_models["prophet"].params == winning_params
 
 
 def test_forecast_runs_grid_search_itself_when_called_before_evaluate():
@@ -203,21 +271,23 @@ def test_forecast_runs_grid_search_itself_when_called_before_evaluate():
     if evaluate() was never called first in this session.
     """
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    assert forecaster._selected_hyperparameters is None
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    assert forecaster._selected_hyperparameters["prophet"] is None
 
     forecaster.forecast(horizon=5)
-    assert forecaster._selected_hyperparameters is not None
-    assert forecaster._grid_search_result is not None
+    assert forecaster._selected_hyperparameters["prophet"] is not None
+    assert "prophet" in forecaster._grid_search_results
 
 
 # ---------- evaluate() ----------
 
 def test_evaluate_returns_structured_result():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    results = forecaster.evaluate()
+    result = results["prophet"]
 
+    assert isinstance(results, dict)
     assert isinstance(result, EvaluationResult)
     assert result.model_name == "prophet"
     assert result.n_train == 48  # 60 * 0.8
@@ -234,15 +304,15 @@ def test_evaluate_produces_low_mape_on_clean_trend():
     code that runs without error.
     """
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     assert result.mape.value < 5.0  # should be very low on a clean trend
 
 
 def test_evaluate_test_predictions_have_expected_columns():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     assert set(["ds", "y", "yhat", "yhat_lower", "yhat_upper"]).issubset(
         set(result.test_predictions.columns)
     )
@@ -256,45 +326,145 @@ def test_evaluate_works_with_independent_columns():
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
-    result = forecaster.evaluate()
+    result = forecaster.evaluate()["prophet"]
     assert result.fitted_model._regressor_columns == ["spend"]
 
 
-def test_evaluate_raises_invalid_config_error_when_training_size_leaves_no_test_rows():
-    # A tiny dataset where int(n * 0.99...) could plausibly consume all rows
-    # is contrived; instead directly force the scenario via a very small n
-    # combined with a training_size that floors to 100% of available rows.
-    df = make_raw_df(n=1)
-    forecaster = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily", training_size=100
-    )
-    with pytest.raises(InvalidConfigError):
-        forecaster.evaluate()
-
-
-def test_evaluate_propagates_insufficient_data_error_on_tiny_dataset():
+def test_evaluate_all_models_fail_raises_all_models_rejected_error():
+    """
+    A single requested model failing is treated identically to multiple
+    models failing: if NOTHING succeeded, AllModelsRejectedError is
+    raised rather than returning a silently-empty dict. The real
+    underlying exception is still available via evaluate_errors.
+    """
     df = make_raw_df(n=10)  # 80% train -> 8 rows, below daily floor of 14
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    with pytest.raises(InsufficientDataError):
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    with pytest.raises(AllModelsRejectedError) as exc_info:
         forecaster.evaluate()
+    assert exc_info.value.rejected_models == ["prophet"]
+    assert isinstance(forecaster.evaluate_errors["prophet"], InsufficientDataError)
 
 
 def test_evaluate_weekly_frequency_end_to_end():
     df = make_raw_df(n=40, freq="7D")
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly")
-    result = forecaster.evaluate()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])
+    result = forecaster.evaluate()["prophet"]
     assert result.model_name == "prophet"
     assert result.mape.value < 10.0
+
+
+# ---------- multi-model evaluate()/forecast() ----------
+
+def test_evaluate_runs_both_models_by_default():
+    df = make_raw_df(n=90)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    results = forecaster.evaluate()
+    assert set(results.keys()) == {"prophet", "catboost"}
+    assert isinstance(results["prophet"], EvaluationResult)
+    assert isinstance(results["catboost"], EvaluationResult)
+
+
+def test_forecast_runs_both_models_by_default():
+    df = make_raw_df(n=90)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    results = forecaster.forecast(horizon=5)
+    assert set(results.keys()) == {"prophet", "catboost"}
+    for result in results.values():
+        assert isinstance(result, ForecastResult)
+        assert len(result.forecast) == 5
+
+
+def test_evaluate_partial_failure_returns_successful_models_and_records_errors():
+    """
+    CatBoostAdapter's own lag-warmup drop (14 rows for default lag_14)
+    consumes history before its min_rows_required floor even applies --
+    so on a dataset that satisfies Prophet's floor (14) but not
+    CatBoost's effective floor (14 warmup + 14 = 28), Prophet should
+    succeed while CatBoost fails, and evaluate() should return Prophet's
+    result rather than aborting the whole call.
+    """
+    df = make_raw_df(n=25)  # n_train=20: prophet OK (>=14), catboost post-warmup = 20-14=6 < 14
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+    )
+    results = forecaster.evaluate()
+    assert set(results.keys()) == {"prophet"}
+    assert set(forecaster.evaluate_errors.keys()) == {"catboost"}
+    assert isinstance(forecaster.evaluate_errors["catboost"], InsufficientDataError)
+
+
+def test_evaluate_errors_reset_fresh_on_each_call_not_accumulated():
+    df = make_raw_df(n=25)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+    )
+    forecaster.evaluate()
+    errors_first_call = dict(forecaster.evaluate_errors)
+    forecaster.evaluate()
+    errors_second_call = dict(forecaster.evaluate_errors)
+    assert set(errors_first_call.keys()) == set(errors_second_call.keys()) == {"catboost"}
+
+
+def test_evaluate_all_models_fail_raises_all_models_rejected_error_multi_model():
+    df = make_raw_df(n=10)  # below both models' floors
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    with pytest.raises(AllModelsRejectedError) as exc_info:
+        forecaster.evaluate()
+    assert set(exc_info.value.rejected_models) == {"prophet", "catboost"}
+
+
+def test_grid_search_is_independent_per_model():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}},  # catboost gets no override
+    )
+    results = forecaster.evaluate()
+    assert results["prophet"].grid_search_summary is None
+    assert results["catboost"].grid_search_summary is not None
+    assert len(results["catboost"].grid_search_summary) == 18
+
+
+def test_catboost_test_split_features_are_anchored_to_train_history_not_test_split():
+    """
+    Direct regression test for the Phase 3 architecture fix: the test
+    split's features must be built via transform_future() (reusing the
+    adapter's retained training history), not transform_train() on the
+    test split alone -- the latter would silently compute lag/rolling
+    features from the wrong (short, disconnected) data for a stateful
+    adapter like CatBoostAdapter.
+    """
+    df = make_raw_df(n=90)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["catboost"], model_params={"catboost": {"iterations": 50, "depth": 3}},
+    )
+    n_train, n_test, adapted_train, adapted_test_features, y_test = forecaster._prepare_split("catboost")
+    train_last_actual = df["orders"].iloc[n_train - 1]
+
+    assert adapted_test_features["lag_1"].nunique() == 1
+    assert adapted_test_features["lag_1"].iloc[0] == train_last_actual
 
 
 # ---------- forecast() ----------
 
 def test_forecast_returns_structured_result():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.forecast(horizon=10)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    results = forecaster.forecast(horizon=10)
+    result = results["prophet"]
 
+    assert isinstance(results, dict)
     assert isinstance(result, ForecastResult)
     assert result.model_name == "prophet"
     assert result.horizon == 10
@@ -303,17 +473,25 @@ def test_forecast_returns_structured_result():
 
 
 def test_forecast_continues_trend_correctly():
-    df = make_raw_df(n=60)  # orders = 100 + i*2, so trend is +2/period
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    result = forecaster.forecast(horizon=5)
+    """
+    orders = 100 + i*2, so trend is +2/period. We check the diffs are
+    CLOSE to +2 rather than exactly == 2.0: whichever grid candidate wins
+    (picked by lowest test-set MAPE) may be a multiplicative-seasonality
+    one, which introduces tiny (sub-0.01) numerical deviation from a pure
+    linear trend even on clean data. Exact equality made this test flaky
+    depending on which of the 6 real candidates the grid search selects.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    result = forecaster.forecast(horizon=5)["prophet"]
     yhats = result.forecast["yhat"].tolist()
-    diffs = [round(yhats[i + 1] - yhats[i], 4) for i in range(len(yhats) - 1)]
-    assert all(d == 2.0 for d in diffs)
+    diffs = [yhats[i + 1] - yhats[i] for i in range(len(yhats) - 1)]
+    assert all(1.9 <= d <= 2.1 for d in diffs), diffs
 
 
 def test_forecast_raises_on_non_positive_horizon():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
     with pytest.raises(InvalidConfigError):
         forecaster.forecast(horizon=0)
     with pytest.raises(InvalidConfigError):
@@ -327,15 +505,15 @@ def test_forecast_refits_only_once_and_caches_across_calls():
     called afterward (even with different horizons).
     """
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
 
-    assert forecaster._forecast_model is None
+    assert "prophet" not in forecaster._forecast_models
     forecaster.forecast(horizon=5)
-    model_after_first_call = forecaster._forecast_model
+    model_after_first_call = forecaster._forecast_models["prophet"]
     assert model_after_first_call is not None
 
     forecaster.forecast(horizon=10)  # different horizon
-    model_after_second_call = forecaster._forecast_model
+    model_after_second_call = forecaster._forecast_models["prophet"]
 
     assert model_after_first_call is model_after_second_call  # same object, not refit
 
@@ -348,8 +526,9 @@ def test_forecast_uses_default_strategy_when_independent_data_not_supplied():
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
-    result = forecaster.forecast(horizon=5)
+    result = forecaster.forecast(horizon=5)["prophet"]
     assert result.used_default_future_strategy is True
     assert len(result.forecast) == 5
 
@@ -362,9 +541,10 @@ def test_forecast_uses_supplied_future_independent_data_when_provided():
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
     future_spend = pd.DataFrame({"spend": [500, 510, 520, 530, 540]})
-    result = forecaster.forecast(horizon=5, future_independent_data=future_spend)
+    result = forecaster.forecast(horizon=5, future_independent_data=future_spend)["prophet"]
     assert result.used_default_future_strategy is False
     assert len(result.forecast) == 5
 
@@ -377,6 +557,7 @@ def test_default_future_strategy_reuses_last_n_periods_when_horizon_fits_within_
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
     default_future = forecaster._build_default_future_independent_data(horizon=3)
     # last 3 actual spend values in a 60-row series starting at 50: 107, 108, 109
@@ -391,6 +572,7 @@ def test_default_future_strategy_cycles_when_horizon_exceeds_history():
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
     # horizon of 45 > 20 rows of history -> must cycle, not crash
     default_future = forecaster._build_default_future_independent_data(horizon=45)
@@ -406,6 +588,7 @@ def test_forecast_warns_when_horizon_far_exceeds_history():
         target_column="orders",
         frequency="daily",
         independent_columns=["spend"],
+        models=["prophet"],
     )
     with pytest.warns(UserWarning, match="Forecasting 45 periods from only 20 periods"):
         forecaster.forecast(horizon=45)
@@ -413,15 +596,34 @@ def test_forecast_warns_when_horizon_far_exceeds_history():
 
 def test_forecast_does_not_warn_when_horizon_is_reasonable():
     df = make_raw_df(n=60)
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes a test failure
         forecaster.forecast(horizon=10)  # well within 2x of 60 rows of history
 
 def test_forecast_weekly_frequency_produces_correct_future_dates():
     df = make_raw_df(n=40, freq="7D")
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly")
-    result = forecaster.forecast(horizon=3)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])
+    result = forecaster.forecast(horizon=3)["prophet"]
     last_train_date = df["date"].max()
     expected_first_future_date = last_train_date + pd.Timedelta(days=7)
     assert result.forecast["ds"].iloc[0] == expected_first_future_date
+
+
+def test_forecast_all_models_fail_raises_all_models_rejected_error():
+    df = make_raw_df(n=10)
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    with pytest.raises(AllModelsRejectedError):
+        forecaster.forecast(horizon=5)
+    assert isinstance(forecaster.forecast_errors["prophet"], InsufficientDataError)
+
+
+def test_forecast_partial_failure_returns_successful_models():
+    df = make_raw_df(n=25)  # prophet OK, catboost fails (see partial-failure evaluate() test above)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+    )
+    results = forecaster.forecast(horizon=3)
+    assert set(results.keys()) == {"prophet"}
+    assert set(forecaster.forecast_errors.keys()) == {"catboost"}

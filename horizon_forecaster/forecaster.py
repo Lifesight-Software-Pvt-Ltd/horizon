@@ -1,30 +1,41 @@
 """
 HorizonForecaster: the main orchestration class for horizon_forecaster.
 
-This is the first place that wires together data adapters, model
-wrappers, and config loading — everything built so far (Phase 1's
-contracts, Phase 2's Prophet adapter/wrapper/config) was built precisely
-so this file could stay thin, since all the hard decisions were already
-made and tested in isolation before reaching here.
+Phase 3 extends this from a single hardcoded model (Prophet) to a
+registry-driven orchestrator that can run any number of registered
+models in one evaluate()/forecast() call. Still no ensemble here --
+each model's result is independent and parallel; combining them is
+Phase 4's job.
 
-Current scope (Phase 2, steps 5-6): single model (Prophet), evaluate()
-and forecast(). No ensemble/multi-model selection yet — that's Phase 4.
+Adding a new model to this orchestrator should mean adding ONE entry to
+MODEL_REGISTRY below, nothing else in this file. If a new model ever
+forces a change to this file's core logic beyond that, that's a signal
+a Phase 1/2 contract (BaseModel/BaseAdapter) had a gap -- fix the
+contract, don't special-case the orchestrator.
 """
 
 import math
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import yaml
 
+from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
+from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
-from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
+from horizon_forecaster.exceptions import (
+    AllModelsRejectedError,
+    HorizonForecasterError,
+    InvalidConfigError,
+    UnsupportedFrequencyError,
+)
 from horizon_forecaster.models.base import BaseModel
+from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
 from horizon_forecaster.utils import (
     clean_zero_variance,
@@ -38,10 +49,23 @@ _FREQUENCY_OFFSETS = {"daily": "D", "weekly": "7D"}
 
 _HORIZON_WARNING_MULTIPLE = 2
 
+# Every model this orchestrator can run. Only models with a real
+# adapter/wrapper implementation belong here -- sarimax/pymc/
+# neuralprophet are still empty stub files (Phase 6) and are
+# deliberately NOT registered yet.
+MODEL_REGISTRY: Dict[str, dict] = {
+    "prophet": {"adapter": ProphetAdapter, "wrapper": ProphetWrapper},
+    "catboost": {"adapter": CatBoostAdapter, "wrapper": CatBoostWrapper},
+}
+
 @dataclass
 class EvaluationResult:
     """
-    Structured result from HorizonForecaster.evaluate().
+    Structured result from evaluating ONE model. HorizonForecaster.evaluate()
+    returns a Dict[str, EvaluationResult] keyed by model name -- this
+    dataclass itself is unchanged from the single-model Phase 2 version,
+    since Phase 4's ensemble logic will consume these per-model results
+    directly.
 
     Attributes:
         model_name: which model this result is for (e.g. "prophet").
@@ -70,7 +94,8 @@ class EvaluationResult:
 @dataclass
 class ForecastResult:
     """
-    Structured result from HorizonForecaster.forecast().
+    Structured result from forecasting with ONE model. forecast()
+    returns a Dict[str, ForecastResult] keyed by model name.
 
     Attributes:
         model_name: which model produced this forecast.
@@ -89,9 +114,8 @@ class ForecastResult:
 class HorizonForecaster:
     """
     Main orchestrator. Takes raw user data once at construction, and
-    exposes evaluate() (train/test split + MAPE) as a first step, with a
-    separate forecast() step (full-data refit + real future prediction)
-    to follow.
+    exposes evaluate() (train/test split + MAPE, per model) and
+    forecast() (full-data refit + real future prediction, per model).
 
     Args:
         raw_df: user's raw DataFrame containing at least date_column and
@@ -104,15 +128,33 @@ class HorizonForecaster:
             evaluation. Defaults to 80 (an 80/20 split).
         independent_columns: names of independent variable columns
             (spend, impressions, promos, etc.) to use, if any.
-        model_params: optional dict of Prophet hyperparameter overrides.
-            If given, this SKIPS the default hyperparameter grid search
-            entirely and uses exactly these values (merged on top of
-            this frequency's base_hyperparameters). If omitted (the
-            default), evaluate() automatically tries every candidate in
-            config/default_params.yaml's hyperparameter_grid on the same
-            train/test split and selects whichever achieves the lowest
-            MAPE — see EvaluationResult.grid_search_summary for the full
-            comparison.
+        models: which models to run, e.g. ["prophet", "catboost"]. If
+            None (the default), runs every model in MODEL_REGISTRY.
+            Raises InvalidConfigError naming any unrecognized model.
+        model_params: optional PER-MODEL dict of hyperparameter
+            overrides, e.g. {"prophet": {...}, "catboost": {...}}. A
+            model with an entry here SKIPS that model's default
+            hyperparameter grid search entirely and uses exactly what
+            was passed (merged on top of that model's
+            base_hyperparameters). A model with no entry (or if
+            model_params is omitted entirely) uses its own grid search
+            as normal -- this is independent per model.
+
+    evaluate()/forecast() ALWAYS return a dict keyed by model name, even
+    when only one model is requested -- deliberate, so the return shape
+    never depends on how many models were asked for.
+
+    Partial-failure behavior: if some requested models fail (e.g.
+    InsufficientDataError) while others succeed, the successful models'
+    results are still returned; failures are recorded in
+    self.evaluate_errors / self.forecast_errors (Dict[str,
+    HorizonForecasterError], repopulated fresh on every call) rather
+    than aborting the whole call. If EVERY requested model fails,
+    AllModelsRejectedError is raised instead of returning an empty dict
+    (a silently-empty successful return would hide a real, total
+    failure). This is intentionally a much lighter concept than Phase
+    4's MAPE-threshold-based rejection reporting -- just "did this
+    model produce a result or not."
     """
 
     def __init__(
@@ -123,12 +165,15 @@ class HorizonForecaster:
         frequency: str,
         training_size: float = 80,
         independent_columns: Optional[List[str]] = None,
-        model_params: Optional[dict] = None,
+        models: Optional[List[str]] = None,
+        model_params: Optional[Dict[str, dict]] = None,
     ):
         self.frequency = validate_frequency(frequency)
         self.training_fraction = validate_training_size(training_size)
         self.date_column = date_column
         self.target_column = target_column
+
+        self.models = self._validate_models(models)
 
         requested_independent_columns = independent_columns or []
         cleaned_df, dropped_columns = clean_zero_variance(
@@ -143,30 +188,89 @@ class HorizonForecaster:
         self.raw_df = cleaned_df.sort_values(date_column).reset_index(drop=True)
         self._warn_if_declared_frequency_mismatches_data()
 
-        self._config = self._load_config()
-        base_hyperparameters = self._config.get("base_hyperparameters", {})
+        # Computed once here, not per-model: which rows go to train/test
+        # depends only on training_fraction and row count, never on
+        # which model is being evaluated. A training_size that leaves
+        # zero test rows is a dataset-level configuration error common
+        # to every model, not a single model's data problem -- so it's
+        # validated here, at construction, and fails immediately with a
+        # direct InvalidConfigError, rather than being discovered inside
+        # a per-model try/except during evaluate() (where it would
+        # otherwise get caught by the partial-failure handling below and
+        # surface as a confusing AllModelsRejectedError instead).
+        n_total = len(self.raw_df)
+        self._n_train = int(n_total * self.training_fraction)
+        self._n_test = n_total - self._n_train
+        if self._n_test == 0:
+            raise InvalidConfigError(
+                f"training_size of {self.training_fraction * 100:.0f}% leaves no rows for "
+                f"evaluation ({n_total} total rows -> {self._n_train} train, 0 test). "
+                f"Use a smaller training_size, or a larger dataset.",
+                param_name="training_size",
+                provided_value=self.training_fraction,
+            )
 
-        # Explicit override -> skip grid search entirely, exactly one
-        # fixed hyperparameter set, resolved immediately.
-        # No override -> grid search mode; hyperparameters are resolved
-        # LAZILY (on the first evaluate() or forecast() call, whichever
-        # comes first), since selecting them requires actually fitting
-        # every candidate against the train/test split.
-        self._use_grid_search = model_params is None and "hyperparameter_grid" in self._config
-        if self._use_grid_search:
-            self._selected_hyperparameters: Optional[dict] = None
-        else:
-            overrides = model_params or {}
-            self._selected_hyperparameters = {**base_hyperparameters, **overrides}
+        self._configs: Dict[str, dict] = {
+            model_name: self._load_config(model_name) for model_name in self.models
+        }
 
-        self._grid_search_result: Optional[EvaluationResult] = None
-        self._forecast_model: Optional[BaseModel] = None
+        model_params = model_params or {}
+        self._use_grid_search: Dict[str, bool] = {}
+        self._selected_hyperparameters: Dict[str, Optional[dict]] = {}
+        for model_name in self.models:
+            config = self._configs[model_name]
+            base_hyperparameters = config.get("base_hyperparameters", {})
+            override = model_params.get(model_name)
 
-    def _load_config(self) -> dict:
-        """Load this frequency's Prophet config block."""
+            use_grid_search = override is None and "hyperparameter_grid" in config
+            self._use_grid_search[model_name] = use_grid_search
+            if use_grid_search:
+                self._selected_hyperparameters[model_name] = None
+            else:
+                self._selected_hyperparameters[model_name] = {**base_hyperparameters, **(override or {})}
+
+        self._grid_search_results: Dict[str, EvaluationResult] = {}
+        self._split_cache: Dict[str, tuple] = {}
+        self._forecast_models: Dict[str, BaseModel] = {}
+        self._forecast_adapters: Dict[str, BaseAdapter] = {}
+
+        self.evaluate_errors: Dict[str, HorizonForecasterError] = {}
+        self.forecast_errors: Dict[str, HorizonForecasterError] = {}
+
+    def _validate_models(self, models: Optional[List[str]]) -> List[str]:
+        if models is None:
+            return list(MODEL_REGISTRY.keys())
+
+        if not models:
+            raise InvalidConfigError(
+                "models list cannot be empty.",
+                param_name="models",
+                provided_value=models,
+            )
+
+        invalid = [m for m in models if m not in MODEL_REGISTRY]
+        if invalid:
+            raise InvalidConfigError(
+                f"Unknown model(s) requested: {invalid}. "
+                f"Available models: {list(MODEL_REGISTRY.keys())}.",
+                param_name="models",
+                provided_value=models,
+            )
+        return list(models)
+
+    def _load_config(self, model_name: str) -> dict:
+        """Load one model's config block for this instance's frequency."""
         with open(_CONFIG_PATH) as f:
             full_config = yaml.safe_load(f)
-        return full_config["prophet"][self.frequency]
+        try:
+            return full_config[model_name][self.frequency]
+        except KeyError:
+            raise InvalidConfigError(
+                f"No config found for model '{model_name}' at frequency "
+                f"'{self.frequency}' in {_CONFIG_PATH}.",
+                param_name="models",
+                provided_value=model_name,
+            )
 
     def _warn_if_declared_frequency_mismatches_data(self) -> None:
         try:
@@ -192,86 +296,112 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
-    def _chronological_split(self):
-        """Shared by evaluate() and the grid search: split, validate, adapt."""
-        n_total = len(self.raw_df)
-        n_train = int(n_total * self.training_fraction)
-        n_test = n_total - n_train
+    def _prepare_split(self, model_name: str):
+        """
+        Builds and caches (n_train, n_test, adapted_train,
+        adapted_test_features, y_test) for ONE model, using that
+        model's own adapter class. Cached per model per instance,
+        since the split doesn't depend on hyperparameters -- grid
+        search candidates all reuse the same adapted data.
 
-        if n_test == 0:
-            raise InvalidConfigError(
-                f"training_size of {self.training_fraction * 100:.0f}% leaves no rows for "
-                f"evaluation ({n_total} total rows -> {n_train} train, 0 test). "
-                f"Use a smaller training_size, or a larger dataset.",
-                param_name="training_size",
-                provided_value=self.training_fraction,
-            )
+        Critical detail: the test split is shaped via
+        adapter.transform_future(), NOT adapter.transform_train().
+        Using transform_train() on the test split alone (the Phase 2
+        Prophet-only approach) happened to work for ProphetAdapter,
+        which is a stateless pure function -- but it would be actively
+        WRONG for a stateful, history-dependent adapter like
+        CatBoostAdapter: it would compute lag/rolling features from the
+        test split's own short, disconnected data instead of the real
+        training history, AND it would silently overwrite the
+        adapter's retained self._history, corrupting it for any
+        subsequent use. transform_future() is the correct call here --
+        it's exactly what a genuine future forecast would do, reusing
+        the adapter's history from the train-split fit. The only
+        difference from a real future forecast is that the actual y
+        values for this "future" period ARE already known (it's
+        held-out historical data, being used for evaluation) -- so
+        they're read directly from raw_df, never routed through the
+        adapter, which by design never sees them.
+        """
+        if model_name in self._split_cache:
+            return self._split_cache[model_name]
 
+        n_train, n_test = self._n_train, self._n_test
         train_raw = self.raw_df.iloc[:n_train]
         test_raw = self.raw_df.iloc[n_train:]
 
-        adapter = ProphetAdapter(
+        AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
+        adapter = AdapterClass(
             date_column=self.date_column,
             target_column=self.target_column,
             independent_columns=self.independent_columns,
         )
         adapted_train = adapter.transform_train(train_raw)
-        adapted_test = adapter.transform_train(test_raw)
 
-        return n_train, n_test, adapted_train, adapted_test
+        future_dates = pd.Series(test_raw[self.date_column].reset_index(drop=True))
+        future_independent_data = (
+            test_raw[self.independent_columns].reset_index(drop=True)
+            if self.independent_columns
+            else None
+        )
+        adapted_test_features = adapter.transform_future(future_dates, future_independent_data)
+        y_test = test_raw[self.target_column].to_numpy()
 
-    def _fit_predict_mape(self, params: dict, adapted_train, adapted_test):
-        """Fit one candidate hyperparameter set, predict on test, score it."""
-        model = ProphetWrapper(
+        result = (n_train, n_test, adapted_train, adapted_test_features, y_test)
+        self._split_cache[model_name] = result
+        return result
+
+    def _fit_predict_mape(self, model_name: str, params: dict, adapted_train, adapted_test_features, y_test):
+        """Fit one model with one candidate hyperparameter set, predict on the held-out test split, score it."""
+        WrapperClass = MODEL_REGISTRY[model_name]["wrapper"]
+        wrapper_config = self._configs[model_name]["wrapper_config"]
+        model = WrapperClass(
             frequency=self.frequency,
             params=params,
-            min_rows_required=self._config["wrapper_config"]["min_rows_required"],
-            random_seed=self._config["wrapper_config"]["random_seed"],
+            min_rows_required=wrapper_config["min_rows_required"],
+            random_seed=wrapper_config["random_seed"],
         )
         model.fit(adapted_train, target_column="y")
 
-        future_exog = adapted_test.drop(columns=["y"])
-        forecast_df = model.predict(horizon=len(adapted_test), future_exog=future_exog)
-        mape_result = mape(adapted_test["y"].values, forecast_df["yhat"].values)
+        forecast_df = model.predict(horizon=len(adapted_test_features), future_exog=adapted_test_features)
+        mape_result = mape(y_test, forecast_df["yhat"].values)
         return model, forecast_df, mape_result
 
-    def _run_hyperparameter_grid_search(self) -> EvaluationResult:
-        """
-        Fits and evaluates EVERY candidate in this frequency's
-        hyperparameter_grid on the same chronological train/test split,
-        and returns the EvaluationResult of whichever candidate achieved
-        the lowest test-set MAPE. Caches the winning hyperparameters
-        (for forecast()'s later full-data refit) and the full comparison.
-        """
-        n_train, n_test, adapted_train, adapted_test = self._chronological_split()
-        base = self._config.get("base_hyperparameters", {})
+    def _build_test_predictions(self, adapted_test_features, y_test, forecast_df) -> pd.DataFrame:
+        test_predictions = pd.DataFrame({
+            "ds": adapted_test_features["ds"].reset_index(drop=True),
+            "y": y_test,
+            "yhat": forecast_df["yhat"].values,
+        })
+        if "yhat_lower" in forecast_df.columns:
+            test_predictions["yhat_lower"] = forecast_df["yhat_lower"].values
+            test_predictions["yhat_upper"] = forecast_df["yhat_upper"].values
+        return test_predictions
+
+    def _run_hyperparameter_grid_search(self, model_name: str) -> EvaluationResult:
+        n_train, n_test, adapted_train, adapted_test_features, y_test = self._prepare_split(model_name)
+        config = self._configs[model_name]
+        base = config.get("base_hyperparameters", {})
 
         candidates = []
-        for grid_entry in self._config["hyperparameter_grid"]:
+        for grid_entry in config["hyperparameter_grid"]:
             full_params = {**base, **grid_entry}
             model, forecast_df, mape_result = self._fit_predict_mape(
-                full_params, adapted_train, adapted_test
+                model_name, full_params, adapted_train, adapted_test_features, y_test
             )
             candidates.append((full_params, model, forecast_df, mape_result))
 
         def sort_key(candidate):
             val = candidate[3].value
-            return float("inf") if val != val else val  # NaN sorts last
+            return float("inf") if val != val else val
 
         candidates.sort(key=sort_key)
         best_params, best_model, best_forecast_df, best_mape = candidates[0]
 
-        test_predictions = adapted_test[["ds", "y"]].copy()
-        test_predictions["yhat"] = best_forecast_df["yhat"].values
-        if "yhat_lower" in best_forecast_df.columns:
-            test_predictions["yhat_lower"] = best_forecast_df["yhat_lower"].values
-            test_predictions["yhat_upper"] = best_forecast_df["yhat_upper"].values
+        test_predictions = self._build_test_predictions(adapted_test_features, y_test, best_forecast_df)
+        grid_search_summary = [{"params": p, "mape": m.value} for p, _, _, m in candidates]
 
-        grid_search_summary = [
-            {"params": params, "mape": m.value} for params, _, _, m in candidates
-        ]
-
-        self._selected_hyperparameters = best_params
+        self._selected_hyperparameters[model_name] = best_params
         result = EvaluationResult(
             model_name=best_model.model_name,
             mape=best_mape,
@@ -281,42 +411,20 @@ class HorizonForecaster:
             fitted_model=best_model,
             grid_search_summary=grid_search_summary,
         )
-        self._grid_search_result = result
+        self._grid_search_results[model_name] = result
         return result
 
-    def evaluate(self) -> EvaluationResult:
-        """
-        Chronologically split the data, fit Prophet on the training
-        portion only, predict on the held-out test portion, and compute
-        MAPE.
+    def _evaluate_single_model(self, model_name: str) -> EvaluationResult:
+        if self._use_grid_search[model_name]:
+            if model_name in self._grid_search_results:
+                return self._grid_search_results[model_name]
+            return self._run_hyperparameter_grid_search(model_name)
 
-        If no explicit model_params override was given at construction,
-        this automatically searches this frequency's hyperparameter_grid
-        and returns the result of whichever candidate scored best.
-
-        Raises:
-            InvalidConfigError: if training_size leaves zero rows for
-                the test split.
-            InsufficientDataError: propagated from ProphetWrapper.fit().
-            ModelConvergenceError / ModelPredictionError: propagated
-                from ProphetWrapper if the underlying Prophet fit or
-                predict genuinely fails.
-        """
-        if self._use_grid_search:
-            if self._grid_search_result is not None:
-                return self._grid_search_result
-            return self._run_hyperparameter_grid_search()
-
-        n_train, n_test, adapted_train, adapted_test = self._chronological_split()
+        n_train, n_test, adapted_train, adapted_test_features, y_test = self._prepare_split(model_name)
         model, forecast_df, mape_result = self._fit_predict_mape(
-            self._selected_hyperparameters, adapted_train, adapted_test
+            model_name, self._selected_hyperparameters[model_name], adapted_train, adapted_test_features, y_test
         )
-
-        test_predictions = adapted_test[["ds", "y"]].copy()
-        test_predictions["yhat"] = forecast_df["yhat"].values
-        if "yhat_lower" in forecast_df.columns:
-            test_predictions["yhat_lower"] = forecast_df["yhat_lower"].values
-            test_predictions["yhat_upper"] = forecast_df["yhat_upper"].values
+        test_predictions = self._build_test_predictions(adapted_test_features, y_test, forecast_df)
 
         return EvaluationResult(
             model_name=model.model_name,
@@ -328,17 +436,100 @@ class HorizonForecaster:
             grid_search_summary=None,
         )
 
+    def evaluate(self) -> Dict[str, EvaluationResult]:
+        """
+        Runs evaluate() independently for every requested model.
+        Always returns a dict keyed by model name (even for a single
+        model). See class docstring for partial-failure behavior.
+
+        Raises:
+            AllModelsRejectedError: if every requested model failed.
+        """
+        results: Dict[str, EvaluationResult] = {}
+        errors: Dict[str, HorizonForecasterError] = {}
+
+        for model_name in self.models:
+            try:
+                results[model_name] = self._evaluate_single_model(model_name)
+            except HorizonForecasterError as e:
+                errors[model_name] = e
+
+        self.evaluate_errors = errors
+
+        if not results:
+            raise AllModelsRejectedError(
+                f"All requested models failed during evaluate(): "
+                f"{ {k: str(v) for k, v in errors.items()} }",
+                rejected_models=list(errors.keys()),
+            )
+
+        return results
+
+    def _forecast_single_model(
+        self, model_name: str, horizon: int, future_independent_data: Optional[pd.DataFrame]
+    ) -> ForecastResult:
+        AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
+
+        if model_name not in self._forecast_models:
+            if self._selected_hyperparameters[model_name] is None:
+                self._run_hyperparameter_grid_search(model_name)
+
+            adapter = AdapterClass(
+                date_column=self.date_column,
+                target_column=self.target_column,
+                independent_columns=self.independent_columns,
+            )
+            adapted_full = adapter.transform_train(self.raw_df)
+
+            wrapper_config = self._configs[model_name]["wrapper_config"]
+            WrapperClass = MODEL_REGISTRY[model_name]["wrapper"]
+            model = WrapperClass(
+                frequency=self.frequency,
+                params=self._selected_hyperparameters[model_name],
+                min_rows_required=wrapper_config["min_rows_required"],
+                random_seed=wrapper_config["random_seed"],
+            )
+            model.fit(adapted_full, target_column="y")
+
+            self._forecast_models[model_name] = model
+            self._forecast_adapters[model_name] = adapter
+
+        adapter = self._forecast_adapters[model_name]
+
+        used_default_strategy = False
+        if self.independent_columns and future_independent_data is None:
+            future_independent_data = self._build_default_future_independent_data(horizon)
+            used_default_strategy = True
+
+        last_date = self.raw_df[self.date_column].max()
+        offset = _FREQUENCY_OFFSETS[self.frequency]
+        future_dates = pd.Series(
+            pd.date_range(
+                start=pd.to_datetime(last_date) + pd.tseries.frequencies.to_offset(offset),
+                periods=horizon,
+                freq=offset,
+            )
+        )
+
+        future_exog = adapter.transform_future(future_dates, future_independent_data)
+        forecast_df = self._forecast_models[model_name].predict(horizon=horizon, future_exog=future_exog)
+
+        return ForecastResult(
+            model_name=self._forecast_models[model_name].model_name,
+            forecast=forecast_df,
+            horizon=horizon,
+            used_default_future_strategy=used_default_strategy,
+        )
+
     def forecast(
         self, horizon: int, future_independent_data: Optional[pd.DataFrame] = None
-    ) -> ForecastResult:
+    ) -> Dict[str, ForecastResult]:
         """
-        Produce a real future forecast, refitting on the FULL dataset
-        (not just the train split) the first time this is called.
-
-        If hyperparameters haven't been selected yet (i.e. forecast() is
-        called before evaluate() in grid-search mode), the grid search
-        runs here first, purely to select hyperparameters — the
-        expensive full-data refit itself still only ever happens once.
+        Runs forecast() independently for every requested model, each
+        refitting on the FULL dataset (once, cached) the first time
+        it's called. Always returns a dict keyed by model name (even
+        for a single model). See class docstring for partial-failure
+        behavior.
 
         Args:
             horizon: number of future periods to forecast.
@@ -349,6 +540,7 @@ class HorizonForecaster:
 
         Raises:
             InvalidConfigError: if horizon is not a positive integer.
+            AllModelsRejectedError: if every requested model failed.
         """
         if horizon <= 0:
             raise InvalidConfigError(
@@ -367,50 +559,25 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
-        adapter = ProphetAdapter(
-            date_column=self.date_column,
-            target_column=self.target_column,
-            independent_columns=self.independent_columns,
-        )
+        results: Dict[str, ForecastResult] = {}
+        errors: Dict[str, HorizonForecasterError] = {}
 
-        if self._forecast_model is None:
-            if self._selected_hyperparameters is None:
-                self._run_hyperparameter_grid_search()
+        for model_name in self.models:
+            try:
+                results[model_name] = self._forecast_single_model(model_name, horizon, future_independent_data)
+            except HorizonForecasterError as e:
+                errors[model_name] = e
 
-            adapted_full = adapter.transform_train(self.raw_df)
-            model = ProphetWrapper(
-                frequency=self.frequency,
-                params=self._selected_hyperparameters,
-                min_rows_required=self._config["wrapper_config"]["min_rows_required"],
-                random_seed=self._config["wrapper_config"]["random_seed"],
+        self.forecast_errors = errors
+
+        if not results:
+            raise AllModelsRejectedError(
+                f"All requested models failed during forecast(): "
+                f"{ {k: str(v) for k, v in errors.items()} }",
+                rejected_models=list(errors.keys()),
             )
-            model.fit(adapted_full, target_column="y")
-            self._forecast_model = model
 
-        used_default_strategy = False
-        if self.independent_columns and future_independent_data is None:
-            future_independent_data = self._build_default_future_independent_data(horizon)
-            used_default_strategy = True
-
-        last_date = self.raw_df[self.date_column].max()
-        offset = _FREQUENCY_OFFSETS[self.frequency]
-        future_dates = pd.Series(
-            pd.date_range(
-                start=pd.to_datetime(last_date) + pd.tseries.frequencies.to_offset(offset),
-                periods=horizon,
-                freq=offset,
-            )
-        )
-
-        future_exog = adapter.transform_future(future_dates, future_independent_data)
-        forecast_df = self._forecast_model.predict(horizon=horizon, future_exog=future_exog)
-
-        return ForecastResult(
-            model_name=self._forecast_model.model_name,
-            forecast=forecast_df,
-            horizon=horizon,
-            used_default_future_strategy=used_default_strategy,
-        )
+        return results
 
     def _build_default_future_independent_data(self, horizon: int) -> pd.DataFrame:
         """
@@ -418,7 +585,8 @@ class HorizonForecaster:
         historical values of each independent column, cycling
         (repeating) the full history as many times as needed to cover
         the requested horizon, then taking the trailing `horizon` rows
-        of that cycled sequence.
+        of that cycled sequence. Model-agnostic -- operates on
+        self.raw_df directly, not through any adapter.
         """
         history = self.raw_df[self.independent_columns].to_numpy()
         n_total = len(history)
