@@ -267,6 +267,20 @@ def test_catboost_adapter_transform_train_raises_when_history_shorter_than_reque
         adapter.transform_future(pd.Series(pd.date_range("2026-02-01", periods=3)))
     assert "lag_30" in str(exc_info.value)
 
+def test_catboost_adapter_transform_future_raises_when_history_shorter_than_requested_rolling_window():
+    """
+    Same guard as the lag case above, but for rolling_windows -- needs
+    its own test since lags are checked first in
+    _compute_frozen_lag_and_rolling_features(), so a too-large lag would
+    mask this branch from ever being reached.
+    """
+    df = make_catboost_raw_df(n=15)
+    adapter = CatBoostAdapter(date_column="date", target_column="orders", lags=(1, 2), rolling_windows=(20,))
+    adapter.transform_train(df)
+    with pytest.raises(InvalidConfigError) as exc_info:
+        adapter.transform_future(pd.Series(pd.date_range("2026-02-01", periods=3)))
+    assert "20-period rolling feature" in str(exc_info.value)
+
 def test_catboost_adapter_custom_lags_and_rolling_windows_are_respected():
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", lags=(1, 2), rolling_windows=(3,))
