@@ -2,6 +2,14 @@ name: Publish to PyPI
 
 on:
   workflow_dispatch:      # allows manual trigger from the Actions tab
+    inputs:
+      target:
+        description: "Where to publish (testpypi is a safe dry run; pypi is a real, irreversible release)"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
   push:
     tags:
       - 'v*'              # only fires on version tags like v0.1.0, not every commit
@@ -9,17 +17,42 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Required for PyPI Trusted Publishing (OIDC): GitHub mints a short-lived
+    # identity token for this job, which PyPI/TestPyPI exchange for a
+    # short-lived (15-minute) upload token. No stored secrets involved --
+    # nothing to generate, rotate, or leak. This replaces the previous
+    # twine + long-lived API token approach.
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
       - name: Install build tools
-        run: pip install build twine
+        run: pip install build
       - name: Build package
         run: python -m build
+
+      # Manual dry run: publishes to TestPyPI, a separate index that lets us
+      # rehearse the build/upload mechanics (package metadata, artifact
+      # shape, trust link) without spending a real, un-reusable version
+      # number on the real PyPI index. This is the default target for
+      # manual runs -- a real PyPI publish must be explicitly selected.
+      # Requires a Trusted Publisher registered on test.pypi.org for this
+      # repo + workflow filename (publish.yml).
+      - name: Publish to TestPyPI (dry run)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      # Real release: fires on a version tag push (the normal release path),
+      # or an explicit manual "pypi" selection. Never the default path.
+      # Requires a Trusted Publisher registered on pypi.org for this repo +
+      # workflow filename -- PyPI supports registering this as a "pending"
+      # publisher before the project's first-ever release, so this works
+      # even though the package hasn't been published yet.
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
+        uses: pypa/gh-action-pypi-publish@release/v1
