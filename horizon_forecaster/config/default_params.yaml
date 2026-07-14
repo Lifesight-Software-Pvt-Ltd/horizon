@@ -109,3 +109,223 @@ prophet:
       # to just curve-fitting a line through noise.
       min_rows_required: 8
       random_seed: 42
+
+# CatBoost hyperparameters, by frequency.
+#
+# Structure mirrors the prophet block above exactly (base_hyperparameters
+# / hyperparameter_grid / wrapper_config) — same generic grid-search
+# mechanics in CustomForecaster.evaluate() apply unchanged, which is
+# itself a real test of whether that mechanism actually generalizes
+# across genuinely different model types, not just a second copy of it.
+#
+# hyperparameter_grid here is the full cartesian product of the ranges
+# below (a grid the project owner has used successfully before), kept
+# as the complete 16-combination grid rather than a curated subset,
+# plus 2 additional safe/conservative fallback candidates (see the
+# note further down, next to those entries) — 18 candidates total:
+#   iterations:    [500, 1000]
+#   learning_rate: [0.03, 0.1]
+#   depth:         [4, 6]
+#   l2_leaf_reg:   [1, 3]
+#
+# NOTE on cost: 18 candidates is materially more expensive per
+# evaluate()/forecast() call than Prophet's 6-candidate grid. Accepted
+# deliberately (not an oversight) — performance/thoroughness was
+# explicitly prioritized over grid-search runtime for this model.
+#
+# NOTE on random_seed/verbose: these are NOT part of the grid or
+# base_hyperparameters, on purpose. CatBoostWrapper's constructor takes
+# random_seed as an explicit wrapper-level argument (same pattern as
+# ProphetWrapper) and hardcodes verbose=False directly on the
+# CatBoostRegressor call. Putting either key in params too would collide
+# with those and raise "got multiple values for keyword argument" —
+# exactly the class of bug Prophet's random_seed had before it was
+# filtered out in Phase 2. Both live under wrapper_config instead, never
+# under base_hyperparameters/hyperparameter_grid.
+catboost:
+  daily:
+    base_hyperparameters:
+      loss_function: MAE
+      # MAPE as CatBoost's own eval_metric, not just this project's
+      # external evaluation metric — keeps what the model itself
+      # optimizes/monitors during training consistent with how it's
+      # judged afterward by evaluate().
+      eval_metric: MAPE
+    hyperparameter_grid:
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 3
+      # Safe fallback candidates for short/small datasets — see note
+      # above. Unlike Prophet's 'auto' fallback (which was added to fix
+      # a confirmed, dramatic 802%-MAPE catastrophic failure), direct
+      # testing here did NOT find an equally dramatic failure mode for
+      # the aggressive candidates on short CatBoost data — differences
+      # between aggressive and conservative candidates were marginal and
+      # inconsistent across seeds (a few points of MAPE either way, not
+      # an order-of-magnitude blowup). Included anyway as low-cost
+      # insurance: shallower trees, fewer rounds, stronger L2
+      # regularization, so the grid search has a genuinely
+      # low-capacity option to fall back to if a future dataset shape
+      # does trigger real overfitting that this project's own test
+      # datasets didn't happen to surface.
+      - iterations: 100
+        learning_rate: 0.05
+        depth: 2
+        l2_leaf_reg: 10
+      - iterations: 300
+        learning_rate: 0.05
+        depth: 3
+        l2_leaf_reg: 8
+    wrapper_config:
+      # Same floor as Prophet's daily config, and for the same reason:
+      # CatBoostAdapter's own lag-warmup drop (up to 14 rows for the
+      # default lag_14 feature) already consumes history before the
+      # wrapper ever sees a row — this floor applies to what's LEFT
+      # after that drop, not raw input rows.
+      min_rows_required: 14
+      random_seed: 42
+
+  weekly:
+    base_hyperparameters:
+      loss_function: MAE
+      eval_metric: MAPE
+    hyperparameter_grid:
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 500
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.03
+        depth: 6
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 4
+        l2_leaf_reg: 3
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 1
+      - iterations: 1000
+        learning_rate: 0.1
+        depth: 6
+        l2_leaf_reg: 3
+      # Safe fallback candidates for short/small datasets — see the
+      # matching note in the daily block above.
+      - iterations: 100
+        learning_rate: 0.05
+        depth: 2
+        l2_leaf_reg: 10
+      - iterations: 300
+        learning_rate: 0.05
+        depth: 3
+        l2_leaf_reg: 8
+    wrapper_config:
+      # Same floor as Prophet's weekly config.
+      min_rows_required: 8
+      random_seed: 42
