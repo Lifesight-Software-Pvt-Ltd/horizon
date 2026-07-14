@@ -5,7 +5,7 @@ Prophet data adapter, the Prophet model wrapper, its default configuration,
 and the `CustomForecaster` orchestrator that wires them together into
 `evaluate()` and `forecast()`. It also covers a substantial environment/
 packaging hardening effort that happened partway through this phase,
-triggered by real failures on a colleague's machine and in CI. 
+triggered by real failures on a machine and in CI. 
 
 ---
 
@@ -231,7 +231,7 @@ since each row already represents a full week.
 ## Environment & packaging hardening (a detour, not a planned step)
 
 Between finishing the core Prophet vertical slice and building
-`forecaster.py`, a colleague's attempt to run the project surfaced a
+`forecaster.py`, an attempt to run the project surfaced a
 chain of real environment issues. Each was root-caused with actual
 evidence (error logs, `pip` resolver output, web searches for the exact
 failure) rather than guessed at, and each fix was verified before moving
@@ -239,7 +239,7 @@ to the next.
 
 1. **Unpinned dependencies resolved differently on a different machine/date.**
    `requirements.txt`/`pyproject.toml` had been left unpinned since Phase 0
-   (deliberately, pending a "pin later" plan). A colleague's fresh install
+   (deliberately, pending a "pin later" plan). A fresh install
    pulled much newer versions of everything, which didn't have a mutually
    compatible resolution, and `pip`'s resolver eventually backtracked into
    an old `statsmodels` release whose legacy build assumed `pkg_resources`
@@ -251,22 +251,21 @@ to the next.
 
 2. **A CI test matrix (Python 3.10, 3.11, 3.12) was added**, specifically
    so this class of version-compatibility issue is caught automatically by
-   CI going forward, not discovered via a colleague's laptop again. It
-   caught real issues on its very first run:
+   CI going forward. It caught real issues on its very first run:
    - `matplotlib==3.11.0` (the version that resolved naturally on a
      Python 3.12 machine) had already dropped Python 3.10 support —
      pinning it broke the 3.10 job specifically. Fixed by pinning to
      `3.10.6`, a version confirmed (from the actual pip error log) to
      support 3.10 through 3.12.
    - Python 3.12 failed on the same `pkg_resources` issue as the
-     colleague's original failure. Root-caused further than "add
-     setuptools": `setuptools>=68` alone wasn't sufficient, because it was
+     original failure. Root-caused further than "add setuptools":
+     `setuptools>=68` alone wasn't sufficient, because it was
      satisfied by `setuptools 82.0.0` — a version confirmed (via multiple
      independent upstream bug reports) to have **completely removed**
      `pkg_resources` from the package. Fixed with a real upper bound:
      `setuptools>=68,<82`.
 
-3. **A packaging footgun**: a colleague's `pip install -e ".[dev]"` failed
+3. **A packaging footgun**: a `pip install -e ".[dev]"` failed
    with "multiple top-level packages discovered," traced to their virtual
    environment folder (`test_env/`) sitting in the project root and being
    mistaken by setuptools' automatic flat-layout discovery for a second
@@ -302,8 +301,8 @@ to the next.
 
 6. **Verification chain, not a single check**: throughout this detour,
    fixes were confirmed at multiple independent levels before being
-   considered done — local machine, a genuinely independent colleague
-   machine (different OS/architecture), GitHub CI across 3 Python
+   considered done — local machine, a genuinely independent machine
+   (different OS/architecture), GitHub CI across 3 Python
    versions, `pip check` (dependency consistency), `black`/`flake8`
    (code quality — one real unused import was found and removed), and a
    real wheel build/install in a clean venv with a `find`-level check
@@ -472,8 +471,7 @@ confirmed as clean daily/weekly at all.
 
 The Colab notebook this testing was done in (`examples/real_dataset_testing.ipynb`)
 is not yet committed to this repository — it currently lives in Colab
-only. Pushing it is blocked on the same GitHub PAT/org-admin access
-issue noted below, not forgotten.
+only. 
 
 ---
 
@@ -515,5 +513,4 @@ modes rather than hypothetical ones.
   enhancement, not yet built — worth revisiting once real usage shows
   whether the current default is sufficient.
 - `examples/real_dataset_testing.ipynb` exists in Colab but is not yet
-  committed to this repository, and the GitHub PAT/org-admin access
-  needed to resolve this is still pending.
+  committed to this repository.
