@@ -2,9 +2,9 @@
 Evaluation metrics for horizon_forecaster.
 
 MAPE is the canonical metric per project spec — every model is evaluated
-and every ensemble threshold decision is made using MAPE. WAPE and RMSE
-are provided as supplementary metrics only (e.g. for future reporting),
-never used for threshold/ensemble decisions.
+and every ensemble threshold decision is made using MAPE. WAPE, RMSE, and
+MAE are provided as supplementary metrics only (e.g. for future
+reporting), never used for threshold/ensemble decisions.
 
 All functions are pure: they take numpy-array-like actuals/predictions
 and return plain floats (or a dict with metadata for MAPE), with no

@@ -53,6 +53,8 @@ def infer_frequency(date_series: pd.Series) -> str:
     based on the most common gap between consecutive sorted dates.
 
     Raises:
+        InvalidConfigError: if fewer than 2 distinct dates are provided
+            (too few to infer any spacing).
         UnsupportedFrequencyError: if the inferred gap doesn't cleanly
             match daily (1 day) or weekly (7 days) spacing.
     """

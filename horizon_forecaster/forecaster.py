@@ -370,14 +370,16 @@ class HorizonForecaster:
         Using transform_train() on the test split alone (the Phase 2
         Prophet-only approach) happened to work for ProphetAdapter,
         which is a stateless pure function -- but it would be actively
-        WRONG for a stateful, history-dependent adapter like
-        CatBoostAdapter: it would compute lag/rolling features from the
-        test split's own short, disconnected data instead of the real
-        training history, AND it would silently overwrite the
-        adapter's retained self._history, corrupting it for any
-        subsequent use. transform_future() is the correct call here --
-        it's exactly what a genuine future forecast would do, reusing
-        the adapter's history from the train-split fit. The only
+        WRONG for an adapter that carries state across the train/future
+        boundary like CatBoostAdapter: transform_train() resets the
+        adapter's retained self._reference_date to the test split's own
+        first date, which would restart the trend index (time_idx) at 0
+        for the test split instead of letting it continue seamlessly
+        from where the training history left off -- silently corrupting
+        the very feature the redesign added, and any subsequent use of
+        the adapter. transform_future() is the correct call here -- it's
+        exactly what a genuine future forecast would do, reusing the
+        reference_date established by the train-split fit. The only
         difference from a real future forecast is that the actual y
         values for this "future" period ARE already known (it's
         held-out historical data, being used for evaluation) -- so

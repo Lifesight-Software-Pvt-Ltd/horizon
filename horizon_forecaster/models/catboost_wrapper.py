@@ -95,8 +95,8 @@ class CatBoostWrapper(BaseModel):
                 constructor (e.g. n_estimators, learning_rate, depth).
                 Should NOT contain wrapper-level settings like
                 min_rows_required or random_seed.
-            min_rows_required: minimum post-warmup training rows required
-                to fit. If None, falls back to a frequency-aware default.
+            min_rows_required: minimum training rows required to fit.
+                If None, falls back to a frequency-aware default.
             random_seed: seed passed to CatBoostRegressor as random_seed,
                 for reproducible training (CatBoost's own fit process has
                 stochastic elements — subsampling, feature permutations —
