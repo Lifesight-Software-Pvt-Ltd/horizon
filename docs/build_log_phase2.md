@@ -467,12 +467,6 @@ confirmed as clean daily/weekly at all.
   case directly, the frequency check against a deliberately mismatched
   daily/weekly dataset pair.
 
-### Known open thread from this step
-
-The Colab notebook this testing was done in (`examples/real_dataset_testing.ipynb`)
-is not yet committed to this repository — it currently lives in Colab
-only. 
-
 ---
 
 ## Phase 2 exit state
@@ -512,5 +506,3 @@ modes rather than hypothetical ones.
   historical-average, linear-trend) remain a documented future
   enhancement, not yet built — worth revisiting once real usage shows
   whether the current default is sufficient.
-- `examples/real_dataset_testing.ipynb` exists in Colab but is not yet
-  committed to this repository.

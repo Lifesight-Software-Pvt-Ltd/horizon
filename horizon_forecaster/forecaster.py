@@ -31,7 +31,11 @@ import yaml
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
-from horizon_forecaster.evaluation.ensemble import EnsembleResult, build_ensemble
+from horizon_forecaster.evaluation.ensemble import (
+    WEIGHTING_STRATEGIES,
+    EnsembleResult,
+    build_ensemble,
+)
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
 from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
@@ -208,9 +212,9 @@ class HorizonForecaster:
         self.target_column = target_column
 
         self.min_mape, self.max_mape = validate_mape_threshold_range(min_mape, max_mape)
-        if ensemble_weighting not in ("inverse_mape", "equal"):
+        if ensemble_weighting not in WEIGHTING_STRATEGIES:
             raise InvalidConfigError(
-                f"ensemble_weighting must be 'inverse_mape' or 'equal' "
+                f"ensemble_weighting must be one of {WEIGHTING_STRATEGIES} "
                 f"(got '{ensemble_weighting}').",
                 param_name="ensemble_weighting",
                 provided_value=ensemble_weighting,

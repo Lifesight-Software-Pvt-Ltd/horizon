@@ -72,8 +72,9 @@ class BaseAdapter(ABC):
             A DataFrame shaped for this specific model's fit() method.
             The exact shape is model-specific (e.g. Prophet wants
             "ds"/"y"; SARIMAX wants a separate exog matrix concept;
-            CatBoost wants lag/rolling features) — see each concrete
-            adapter's docstring for its specific output shape.
+            CatBoost wants a flat table of trend-index and cyclical/
+            calendar features) — see each concrete adapter's docstring
+            for its specific output shape.
         """
         raise NotImplementedError
 

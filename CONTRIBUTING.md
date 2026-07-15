@@ -106,8 +106,8 @@ actually needed them; it's worth checking before adding a new one.
 Prophet and CatBoost are fully implemented (adapter + wrapper +
 config + tests), orchestrated by `HorizonForecaster`, with Phase 4's
 ensemble-weighting logic (`evaluation/ensemble.py`) combining them.
-SARIMAX, PyMC, and NeuralProphet are registered as empty stub files only
-(`data_adapter/`, `models/`) — deliberately not wired into
+SARIMAX, PyMC, and NeuralProphet exist as empty stub files only
+(`data_adapter/`, `models/`) — deliberately not registered in
 `MODEL_REGISTRY` yet. `plotting.py`/`exporters.py` are also still empty
 stubs. See `CHANGELOG.md`'s "Known deferred issues" section for the
 current, honest list of what's not done yet.
