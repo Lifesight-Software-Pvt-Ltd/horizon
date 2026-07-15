@@ -2,7 +2,7 @@
 
 This document records the full first vertical slice of the project: the
 Prophet data adapter, the Prophet model wrapper, its default configuration,
-and the `CustomForecaster` orchestrator that wires them together into
+and the `HorizonForecaster` orchestrator that wires them together into
 `evaluate()` and `forecast()`. It also covers a substantial environment/
 packaging hardening effort that happened partway through this phase,
 triggered by real failures on a machine and in CI. 

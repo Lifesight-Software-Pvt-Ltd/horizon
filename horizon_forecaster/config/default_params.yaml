@@ -3,7 +3,7 @@
 # Structure, per model/frequency block:
 #   hyperparameter_grid: a LIST of candidate hyperparameter sets. When no
 #                        explicit model_params override is given by the
-#                        caller, CustomForecaster.evaluate() fits and
+#                        caller, HorizonForecaster.evaluate() fits and
 #                        evaluates EVERY candidate on the same train/test
 #                        split and automatically selects whichever
 #                        achieves the lowest test-set MAPE.
@@ -36,7 +36,7 @@
 #                        wrapper logic, NOT passed to the underlying
 #                        library (minimum-rows floor, random seed).
 #
-# An explicit `model_params` override (passed to CustomForecaster's
+# An explicit `model_params` override (passed to HorizonForecaster's
 # constructor) always skips the grid search entirely and uses exactly
 # what was passed, merged on top of base_hyperparameters.
 #
@@ -114,7 +114,7 @@ prophet:
 #
 # Structure mirrors the prophet block above exactly (base_hyperparameters
 # / hyperparameter_grid / wrapper_config) — same generic grid-search
-# mechanics in CustomForecaster.evaluate() apply unchanged, which is
+# mechanics in HorizonForecaster.evaluate() apply unchanged, which is
 # itself a real test of whether that mechanism actually generalizes
 # across genuinely different model types, not just a second copy of it.
 #
