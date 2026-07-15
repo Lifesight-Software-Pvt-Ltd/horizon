@@ -4,110 +4,99 @@ Data adapter for CatBoost.
 Unlike Prophet, CatBoost has no native concept of dates, trend, or
 seasonality — it just sees a table of numeric/categorical features and a
 target. All of the time-series structure Prophet gets "for free" has to
-be engineered here as explicit columns: calendar features (day-of-week,
-month, etc.) and lag/rolling-window features derived from the target's
-own history. This is precisely why CatBoost was chosen as the Phase 3
-model: it forces base_adapter.py's contract to prove itself against a
-genuinely different data shape, not just a second wrapper around the
-same ds/y idea.
+be engineered here as explicit columns.
+
+--- Redesigned: lag/rolling features removed (real accuracy finding) ---
+
+The original version of this adapter (Phase 3) engineered lag(1/2/3/7/14)
+and rolling-window(7/14) features from the target's own history. Because
+CatBoostWrapper.predict() is a single batched call (not a per-step
+recursive loop), those features had to be "frozen" once at the end of
+training history and broadcast unchanged across the entire forecast
+horizon (the "direct" multi-horizon strategy).
+
+Real-dataset testing surfaced a serious consequence of that design: on a
+144-day held-out test window, CatBoost's MAPE was 52.6% in the first half
+of the window and 27.3% in the second half — and a targeted breakdown
+showed December_Dip days (a known, flagged demand-drop period in the
+source data) at 67-90% MAPE, far above the ~35-40% baseline on ordinary
+days. Root cause: a frozen snapshot of "recent history" has no way to
+see a sudden target level-shift (a promotional spike or a post-holiday
+dip) coming, and keeps predicting the pre-shift baseline for the entire
+horizon. A separately-built, dedicated CatBoost notebook against the
+same dataset — using an explicit trend index and cyclical (sin/cos)
+seasonality instead of lag/rolling features — achieved ~16% MAPE with no
+such failure mode, because none of ITS features depend on the target's
+own recent history, so none of them need to be frozen in the first
+place.
+
+This version adopts that proven approach: an explicit linear trend index
+(`time_idx`, an absolute day/week offset from a fixed reference date —
+NOT a row-position counter, so it stays continuous and gap-robust across
+the train/future boundary), continuous cyclical encodings of
+yearly/half-yearly seasonality (and, for daily data, weekly/monthly
+seasonality too), plain calendar fields, and independent columns passed
+through as-is. None of these require knowledge of the target's own
+history, so transform_future() computes every one of them directly from
+dates alone — exactly like transform_train() does.
+
+Practical consequence: this adapter is effectively STATELESS again
+(matching ProphetAdapter), except for a single `_reference_date`
+retained across the train/future boundary purely to keep `time_idx`
+continuous. There is no more "frozen feature", no more lag-warmup row
+dropping, and transform_future() no longer depends on real target
+history at all — only on a reference date established by a prior
+transform_train() call.
 """
 
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.exceptions import InvalidConfigError
 
-# Generic, frequency-agnostic defaults. Frequency-aware overrides (e.g.
-# shorter lag sets for weekly data, where a "lag_14" is 14 WEEKS back,
-# not days) belong in config/default_params.yaml's catboost block, added
-# in a later Phase 3 step — this adapter itself has no notion of
-# "daily" vs "weekly" and just operates on whatever lags/windows it's
-# constructed with, exactly like ProphetAdapter has no frequency
-# awareness of its own.
-DEFAULT_LAGS: Sequence[int] = (1, 2, 3, 7, 14)
-DEFAULT_ROLLING_WINDOWS: Sequence[int] = (7, 14)
+_YEARLY_PERIOD_DAYS = 365.25
+_YEARLY_PERIOD_WEEKS = 52.0
 
 class CatBoostAdapter(BaseAdapter):
     """
     Reshapes raw user data into a flat feature table CatBoost can train
-    and predict on: calendar features + independent columns (passed
-    through as-is) + lag features + rolling-window statistics of the
-    target.
-
-    Design decision: this adapter is STATEFUL, unlike ProphetAdapter.
-    transform_train() retains the historical target series
-    (`self._history`) specifically so transform_future() can compute lag
-    and rolling features that reach back into real training data rather
-    than starting from nothing. This is a deliberate, documented
-    deviation from BaseAdapter's implicit stateless-pure-function
-    pattern (established by ProphetAdapter in Phase 2) — CatBoost is the
-    first model in this project whose future-feature construction
-    genuinely requires historical target values, not just historical
-    independent variables. Calling transform_future() before
-    transform_train() raises InvalidConfigError rather than silently
-    operating on no history.
-
-    Design decision: lag/rolling features for the future horizon are
-    computed once, "frozen" as of the end of the training history, and
-    reused identically for every row in the forecast horizon (only the
-    calendar features and independent columns vary per future row).
-    This is the standard "direct" multi-horizon strategy (as opposed to
-    "recursive", which would feed each step's prediction back in as the
-    next step's lag input). Direct was chosen over recursive for v1 to
-    avoid compounding-error risk and to keep CatBoostWrapper.predict()
-    a single batched call, consistent with every other wrapper's
-    predict() signature in this project (one call, not a per-step
-    loop). This mirrors the same reasoning already applied to Prophet's
-    default future-independent-variable strategy in Phase 2 (reuse
-    known history rather than inventing unknown future values) and is
-    documented here as a revisitable v1 choice, not a permanent
-    architectural decision.
+    and predict on: a trend index, cyclical/calendar features, and
+    independent columns passed through as-is.
 
     Args:
         date_column, target_column, independent_columns: see BaseAdapter.
-        lags: which lags (in periods) of the target to include as
-            features, e.g. (1, 7) means "target 1 period ago" and
-            "target 7 periods ago".
-        rolling_windows: window sizes (in periods) for rolling
-            mean/std features of the target, computed using only prior
-            periods (shift(1) before rolling — the current period's own
-            target is never included in its own rolling statistics).
+        frequency: "daily" or "weekly" — controls whether the
+            higher-resolution daily-only features (day-of-week,
+            weekly/monthly cyclicals) are included, and which period
+            length the yearly cyclical uses. Required, since this
+            adapter's feature set is genuinely frequency-dependent
+            (unlike ProphetAdapter, which has no frequency awareness of
+            its own).
     """
-
-    _CALENDAR_FEATURE_NAMES = (
-        "day_of_week",
-        "day_of_month",
-        "day_of_year",
-        "week_of_year",
-        "month",
-        "quarter",
-        "is_month_start",
-        "is_month_end",
-        "is_weekend",
-    )
 
     def __init__(
         self,
         date_column: str,
         target_column: str,
         independent_columns: Optional[List[str]] = None,
-        lags: Sequence[int] = DEFAULT_LAGS,
-        rolling_windows: Sequence[int] = DEFAULT_ROLLING_WINDOWS,
+        frequency: Optional[str] = None,
     ):
-        super().__init__(date_column, target_column, independent_columns)
-        self.lags = list(lags)
-        self.rolling_windows = list(rolling_windows)
-        self._engineered_columns = [f"lag_{lag}" for lag in self.lags] + [
-            f"rolling_mean_{w}" for w in self.rolling_windows
-        ] + [f"rolling_std_{w}" for w in self.rolling_windows]
+        super().__init__(date_column, target_column, independent_columns, frequency=frequency)
+        if frequency not in ("daily", "weekly"):
+            raise InvalidConfigError(
+                f"CatBoostAdapter requires frequency='daily' or 'weekly', got {frequency!r}.",
+                param_name="frequency",
+                provided_value=frequency,
+            )
 
-        # Set by transform_train(); required by transform_future(). Holds
-        # the full ("ds", "y") training history, in chronological order,
-        # BEFORE any NaN-lag rows are dropped — transform_future() needs
-        # the true tail of history, not a truncated one.
-        self._history: Optional[pd.DataFrame] = None
+        # Set by transform_train(); required by transform_future() purely
+        # to keep the trend index (time_idx) continuous and gap-robust
+        # across the train/future boundary. Unlike the old lag/rolling
+        # design, no target history is retained or needed here.
+        self._reference_date: Optional[pd.Timestamp] = None
 
     def transform_train(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         required_columns = [self.date_column, self.target_column] + self.independent_columns
@@ -120,38 +109,18 @@ class CatBoostAdapter(BaseAdapter):
             df[col] = raw_df[col]
 
         df = df.sort_values("ds").reset_index(drop=True)
+        self._reference_date = df["ds"].iloc[0]
 
-        # Retain full pre-drop history for transform_future()'s use,
-        # before this instance mutates/truncates anything further.
-        self._history = df[["ds", "y"]].copy()
-
-        df = self._add_calendar_features(df, date_col="ds")
-        df = self._add_lag_and_rolling_features(df, y=df["y"])
-
-        # Rows at the start of the series don't have enough history to
-        # compute every lag/rolling feature (e.g. lag_14 is NaN for the
-        # first 14 rows). Dropped explicitly and deliberately, rather
-        # than left as NaN or silently imputed — CatBoost can technically
-        # handle NaN natively, but a lag feature that's NaN because there
-        # simply is no history yet is a structurally different kind of
-        # "missing" than a genuinely missing real-world value, and
-        # conflating the two risks teaching the model a spurious pattern
-        # at the start of every series it ever sees.
-        before_drop = len(df)
-        df = df.dropna(subset=self._engineered_columns).reset_index(drop=True)
-        self.n_rows_dropped_for_lag_warmup = before_drop - len(df)
-
-        return df
+        return self._add_features(df)
 
     def transform_future(
         self, future_dates: pd.Series, future_independent_df: Optional[pd.DataFrame] = None
     ) -> pd.DataFrame:
-        if self._history is None:
+        if self._reference_date is None:
             raise InvalidConfigError(
                 "CatBoostAdapter.transform_future() called before transform_train(). "
-                "Lag/rolling features need real target history, which is only "
-                "available after transform_train() has run at least once on this "
-                "adapter instance.",
+                "The trend index (time_idx) needs a reference date established by "
+                "transform_train() first.",
                 param_name="transform_future",
                 provided_value=None,
             )
@@ -171,83 +140,46 @@ class CatBoostAdapter(BaseAdapter):
             for col in self.independent_columns:
                 df[col] = future_independent_df[col].reset_index(drop=True)
 
-        df = self._add_calendar_features(df, date_col="ds")
+        return self._add_features(df)
 
-        # Frozen lag/rolling features (see class docstring): computed
-        # once from the tail of the retained training history, then
-        # broadcast identically across every row of the forecast
-        # horizon.
-        frozen_features = self._compute_frozen_lag_and_rolling_features()
-        for col, value in frozen_features.items():
-            df[col] = value
+    def _add_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        ds = df["ds"]
 
-        return df
+        # Trend: absolute offset from the fixed reference date established
+        # at transform_train() time — deliberately NOT a row-position
+        # counter, so the trend stays continuous and meaningful across the
+        # train/future boundary (and robust to any gaps in the actual date
+        # sequence, e.g. a non-contiguous forecast horizon).
+        day_offset = (ds - self._reference_date).dt.days
+        df["time_idx"] = day_offset if self.frequency == "daily" else day_offset / 7.0
 
-    def _add_calendar_features(self, df: pd.DataFrame, date_col: str) -> pd.DataFrame:
-        ds = df[date_col]
-        df["day_of_week"] = ds.dt.dayofweek
-        df["day_of_month"] = ds.dt.day
-        df["day_of_year"] = ds.dt.dayofyear
         df["week_of_year"] = ds.dt.isocalendar().week.astype(int)
         df["month"] = ds.dt.month
         df["quarter"] = ds.dt.quarter
-        df["is_month_start"] = ds.dt.is_month_start.astype(int)
-        df["is_month_end"] = ds.dt.is_month_end.astype(int)
-        df["is_weekend"] = (ds.dt.dayofweek >= 5).astype(int)
+        df["year"] = ds.dt.year
+
+        # Yearly/half-yearly cyclicals — valid for both frequencies.
+        if self.frequency == "daily":
+            cyclical_position = ds.dt.dayofyear
+            yearly_period = _YEARLY_PERIOD_DAYS
+        else:
+            cyclical_position = ds.dt.isocalendar().week.astype(int)
+            yearly_period = _YEARLY_PERIOD_WEEKS
+
+        df["yearly_sin"] = np.sin(2 * np.pi * cyclical_position / yearly_period)
+        df["yearly_cos"] = np.cos(2 * np.pi * cyclical_position / yearly_period)
+        df["half_yearly_sin"] = np.sin(2 * np.pi * cyclical_position / (yearly_period / 2))
+        df["half_yearly_cos"] = np.cos(2 * np.pi * cyclical_position / (yearly_period / 2))
+
+        if self.frequency == "daily":
+            df["day_of_week"] = ds.dt.dayofweek
+            df["day_of_year"] = ds.dt.dayofyear
+            df["weekly_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
+            df["weekly_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
+            df["monthly_sin"] = np.sin(2 * np.pi * ds.dt.day / 30.5)
+            df["monthly_cos"] = np.cos(2 * np.pi * ds.dt.day / 30.5)
+
         return df
-
-    def _add_lag_and_rolling_features(self, df: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
-        for lag in self.lags:
-            df[f"lag_{lag}"] = y.shift(lag)
-
-        # shift(1) before rolling: a period's rolling stats only ever
-        # summarize STRICTLY PRIOR periods, never (even partially) its
-        # own target value — otherwise this would leak the label into
-        # its own features.
-        shifted = y.shift(1)
-        for window in self.rolling_windows:
-            df[f"rolling_mean_{window}"] = shifted.rolling(window).mean()
-            df[f"rolling_std_{window}"] = shifted.rolling(window).std()
-
-        return df
-
-    def _compute_frozen_lag_and_rolling_features(self) -> dict:
-        """
-        Computes each lag/rolling feature exactly once, anchored to the
-        end of the retained training history — i.e. "as of the last
-        known actual value" — for reuse across every row of the future
-        horizon. See class docstring: this is the "direct" (not
-        recursive) multi-horizon strategy.
-        """
-        y = self._history["y"]
-        features = {}
-
-        for lag in self.lags:
-            if lag > len(y):
-                raise InvalidConfigError(
-                    f"Cannot compute lag_{lag}: only {len(y)} periods of history "
-                    f"are available. Reduce this adapter's `lags` configuration or "
-                    f"provide more training history.",
-                    param_name="lags",
-                    provided_value=lag,
-                )
-            features[f"lag_{lag}"] = y.iloc[-lag]
-
-        for window in self.rolling_windows:
-            trailing = y.iloc[-window:]
-            if len(trailing) < window:
-                raise InvalidConfigError(
-                    f"Cannot compute a {window}-period rolling feature: only "
-                    f"{len(trailing)} periods of history are available. Reduce "
-                    f"this adapter's `rolling_windows` configuration or provide "
-                    f"more training history.",
-                    param_name="rolling_windows",
-                    provided_value=window,
-                )
-            features[f"rolling_mean_{window}"] = trailing.mean()
-            features[f"rolling_std_{window}"] = trailing.std()
-
-        return features
 
     @staticmethod
     def _validate_columns_present(df: pd.DataFrame, required_columns: list) -> None:

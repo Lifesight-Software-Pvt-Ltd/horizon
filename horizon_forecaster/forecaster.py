@@ -335,6 +335,7 @@ class HorizonForecaster:
             date_column=self.date_column,
             target_column=self.target_column,
             independent_columns=self.independent_columns,
+            frequency=self.frequency,
         )
         adapted_train = adapter.transform_train(train_raw)
 
@@ -478,6 +479,7 @@ class HorizonForecaster:
                 date_column=self.date_column,
                 target_column=self.target_column,
                 independent_columns=self.independent_columns,
+                frequency=self.frequency,
             )
             adapted_full = adapter.transform_train(self.raw_df)
 

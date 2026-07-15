@@ -2,12 +2,13 @@
 CatBoost model wrapper.
 
 Expects train_df already shaped by CatBoostAdapter (columns: "ds", "y",
-plus calendar features, lag/rolling-window features, and any
-independent columns — see data_adapter/catboost_adapter.py).
+plus a trend index, cyclical/calendar features, and any independent
+columns — see data_adapter/catboost_adapter.py).
 """
 
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from horizon_forecaster.exceptions import (
@@ -28,16 +29,16 @@ class CatBoostWrapper(BaseModel):
     those columns rather than fabricate them. predict() therefore
     always returns exactly ["ds", "yhat"].
 
-    Design decision: calendar features that are genuinely categorical
-    or cyclical (day_of_week, month, quarter, is_month_start,
-    is_month_end, is_weekend) are passed to CatBoost as declared
-    categorical features, not raw numeric ones — a tree split like
-    "day_of_week <= 3" implies an ordering (Wednesday is "less than"
-    Thursday) that doesn't correspond to anything real, whereas
-    CatBoost's categorical handling uses target statistics instead of
-    assuming order. day_of_month, day_of_year, week_of_year are left
-    numeric, since they carry real ordinal/magnitude information (e.g.
-    day_of_month proximity to typical pay dates).
+    Design decision (revised — see CatBoostAdapter's module docstring for
+    the full finding): no calendar feature is declared categorical.
+    CatBoostAdapter's calendar fields (day_of_week, month, quarter,
+    year, ...) are trained as plain numeric alongside their cyclical
+    sin/cos counterparts. This mirrors a real, independently verified
+    working reference (a dedicated CatBoost notebook against real data,
+    ~16% MAPE) that used the same kind of feature set with no explicit
+    categorical designation — CatBoost's target-statistics encoding for
+    categoricals wasn't shown to help on real data, so this deliberately
+    matches what was empirically proven to work.
 
     KNOWN LIMITATION (confirmed via direct testing, not theoretical):
     tree-based models, including CatBoost, can only predict values
@@ -48,30 +49,35 @@ class CatBoostWrapper(BaseModel):
     — unlike Prophet, which models trend as an explicit continuous
     function. Verified directly: a clean +2/period synthetic trend
     produced a test MAPE of ~9% specifically because of this
-    flattening, not noise or a fitting bug. No fix applied in this
-    wrapper (would require adding an explicit numeric trend/time-index
-    feature, or modeling the differenced series instead of the level)
-    — documented here as a real, load-bearing finding for Phase 4's
-    ensemble weighting to be aware of, not silently absorbed.
+    flattening, not noise or a fitting bug. CatBoostAdapter now includes
+    an explicit numeric `time_idx` trend feature specifically to give
+    the model *some* signal to key its trend-related splits on, but this
+    does not fully remove the underlying limitation — a tree still
+    cannot output a leaf value it never saw in training, no matter what
+    feature drives the split. Documented here as a real, load-bearing
+    finding for Phase 4's ensemble weighting to be aware of, not
+    silently absorbed.
+
+    Non-negative predictions: if every target value seen during fit()
+    was itself non-negative (the common case for revenue/orders/counts
+    data), predict() clips its output to >= 0. This is a data-driven
+    heuristic, not a hardcoded assumption — a target that legitimately
+    goes negative during training (e.g. profit/margin) is left
+    unclipped, since clipping would silently corrupt a real, valid
+    prediction range for that kind of data.
     """
 
     model_name = "catboost"
 
     # Mirrors ProphetWrapper's pattern: frequency-aware fallback floors,
-    # used only if min_rows_required isn't explicitly provided. Counted
-    # AFTER CatBoostAdapter's own lag/rolling warmup-row drop — i.e. this
-    # is "rows with a fully-populated feature set", not raw input rows.
+    # used only if min_rows_required isn't explicitly provided. No longer
+    # a post-warmup count (CatBoostAdapter no longer drops any rows) —
+    # this is now simply the training row count, same as ProphetWrapper.
     _FREQUENCY_MIN_ROWS_DEFAULTS = {"daily": 14, "weekly": 8}
     _FALLBACK_MIN_ROWS = 10
 
-    _CATEGORICAL_CALENDAR_FEATURES = (
-        "day_of_week",
-        "month",
-        "quarter",
-        "is_month_start",
-        "is_month_end",
-        "is_weekend",
-    )
+    # Empty on purpose, not an oversight — see class docstring.
+    _CATEGORICAL_CALENDAR_FEATURES = ()
 
     _NON_FEATURE_COLUMNS = ("ds", "y")
 
@@ -107,6 +113,7 @@ class CatBoostWrapper(BaseModel):
         self.random_seed = random_seed
         self._feature_columns: Optional[List[str]] = None
         self._categorical_feature_names: Optional[List[str]] = None
+        self._target_min: Optional[float] = None
 
     def fit(self, train_df: pd.DataFrame, target_column: str = "y") -> "CatBoostWrapper":
         """
@@ -127,8 +134,7 @@ class CatBoostWrapper(BaseModel):
 
         if len(train_df) < self.min_rows_required:
             raise InsufficientDataError(
-                f"CatBoost requires at least {self.min_rows_required} rows "
-                f"(after lag/rolling warmup rows are dropped) to fit reliably.",
+                f"CatBoost requires at least {self.min_rows_required} rows to fit reliably.",
                 model_name=self.model_name,
                 required_periods=self.min_rows_required,
                 available_periods=len(train_df),
@@ -162,6 +168,7 @@ class CatBoostWrapper(BaseModel):
         self._fitted_model = model
         self._feature_columns = feature_columns
         self._categorical_feature_names = categorical_feature_names
+        self._target_min = float(y.min())
         self.is_fitted = True
         return self
 
@@ -219,6 +226,11 @@ class CatBoostWrapper(BaseModel):
                 original_exception=e,
             )
 
+        # Data-driven, not hardcoded: only clip if the training target
+        # itself was never negative. See class docstring.
+        if self._target_min is not None and self._target_min >= 0:
+            yhat = np.clip(yhat, 0, None)
+
         return pd.DataFrame({"ds": future_exog["ds"].reset_index(drop=True), "yhat": yhat})
 
     def save(self, path: str) -> None:
@@ -248,6 +260,7 @@ class CatBoostWrapper(BaseModel):
             "random_seed": self.random_seed,
             "feature_columns": self._feature_columns,
             "categorical_feature_names": self._categorical_feature_names,
+            "target_min": self._target_min,
             "model_path": model_path,
         }
         with open(path, "w") as f:
@@ -277,5 +290,9 @@ class CatBoostWrapper(BaseModel):
         instance._fitted_model = model
         instance._feature_columns = envelope["feature_columns"]
         instance._categorical_feature_names = envelope["categorical_feature_names"]
+        # .get(), not [...]: tolerates loading an envelope saved before
+        # target_min existed, falling back to no clipping rather than a
+        # hard KeyError on an old file.
+        instance._target_min = envelope.get("target_min")
         instance.is_fitted = True
         return instance

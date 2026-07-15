@@ -34,6 +34,15 @@ class BaseAdapter(ABC):
             (spend, impressions, clicks, promos, organic, etc.) to carry
             through, if any. May be empty/None if the user provides no
             independent variables.
+        frequency: "daily" or "weekly", as validated by
+            HorizonForecaster. Accepted here (rather than passed
+            separately/specially) so forecaster.py's MODEL_REGISTRY-driven
+            instantiation can construct every adapter identically
+            (`AdapterClass(date_column=..., target_column=...,
+            independent_columns=..., frequency=...)`), without
+            special-casing any one model. Adapters that don't need it
+            (e.g. ProphetAdapter, which has no frequency-dependent
+            feature logic) simply ignore it via this base class.
     """
 
     def __init__(
@@ -41,10 +50,12 @@ class BaseAdapter(ABC):
         date_column: str,
         target_column: str,
         independent_columns: Optional[List[str]] = None,
+        frequency: Optional[str] = None,
     ):
         self.date_column = date_column
         self.target_column = target_column
         self.independent_columns = independent_columns or []
+        self.frequency = frequency
 
     @abstractmethod
     def transform_train(self, raw_df: pd.DataFrame) -> pd.DataFrame:

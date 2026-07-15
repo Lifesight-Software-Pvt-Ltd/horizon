@@ -84,22 +84,22 @@ def test_fit_records_feature_columns_excluding_ds_and_y():
     model.fit(make_train_df())
     assert set(model._feature_columns) == {"day_of_week", "feature_a"}
 
-def test_fit_marks_known_calendar_columns_as_categorical():
+def test_fit_marks_no_columns_as_categorical():
+    """
+    No categorical features are declared at all (see class docstring):
+    all calendar features are trained as plain numeric, matching a
+    proven real-data reference notebook that used no explicit
+    categorical designation. This holds regardless of which columns are
+    present in train_df.
+    """
     model = CatBoostWrapper(frequency="daily")
     model.fit(make_train_df())
-    assert model._categorical_feature_names == ["day_of_week"]
-
-def test_fit_does_not_mark_non_calendar_columns_as_categorical():
-    model = CatBoostWrapper(frequency="daily")
-    model.fit(make_train_df())
-    assert "feature_a" not in model._categorical_feature_names
-
-def test_fit_with_no_recognized_categorical_columns():
-    df = make_train_df().drop(columns=["day_of_week"])
-    model = CatBoostWrapper(frequency="daily")
-    model.fit(df)
     assert model._categorical_feature_names == []
-    assert model._feature_columns == ["feature_a"]
+
+def test_fit_records_target_min_for_clipping_decisions():
+    model = CatBoostWrapper(frequency="daily")
+    model.fit(make_train_df())  # y = 10 + i*0.5, always >= 10
+    assert model._target_min == 10.0
 
 def test_fit_accepts_param_overrides():
     model = CatBoostWrapper(frequency="daily", params={"depth": 3, "iterations": 50})
@@ -203,6 +203,39 @@ def test_predict_raises_model_prediction_error_on_genuine_catboost_failure():
         model.predict(horizon=5, future_exog=future)
     assert exc_info.value.original_exception is not None
 
+def test_predict_clips_negative_predictions_when_training_target_was_non_negative():
+    """
+    Data-driven clipping: if fit() only ever saw non-negative target
+    values, predict() clips its raw model output to >= 0. The
+    underlying fitted model's predict() is monkeypatched to return a
+    controlled array (including negative values) so this test is
+    deterministic, rather than depending on CatBoost happening to
+    produce a negative raw value on its own.
+    """
+    model = CatBoostWrapper(frequency="daily")
+    model.fit(make_train_df())  # y always >= 10, so _target_min >= 0
+    assert model._target_min >= 0
+
+    model._fitted_model.predict = lambda X: pd.Series([-5.0, 3.0, -1.0, 0.0, 10.0]).to_numpy()
+    forecast = model.predict(horizon=5, future_exog=make_future_df(n=5))
+    assert forecast["yhat"].tolist() == [0.0, 3.0, 0.0, 0.0, 10.0]
+
+def test_predict_does_not_clip_when_training_target_was_negative():
+    """
+    A target that legitimately goes negative during training (e.g.
+    profit/margin data) must NOT be force-clipped -- that would silently
+    corrupt a real, valid prediction range.
+    """
+    df = make_train_df(n=30)
+    df["y"] = df["y"] - 1000  # shift entirely negative
+    model = CatBoostWrapper(frequency="daily")
+    model.fit(df)
+    assert model._target_min < 0
+
+    model._fitted_model.predict = lambda X: pd.Series([-5.0, 3.0, -1.0]).to_numpy()
+    forecast = model.predict(horizon=3, future_exog=make_future_df(n=3))
+    assert forecast["yhat"].tolist() == [-5.0, 3.0, -1.0]  # untouched
+
 def test_fit_predict_chaining_end_to_end():
     forecast = (
         CatBoostWrapper(frequency="daily")
@@ -247,7 +280,45 @@ def test_save_and_load_preserves_categorical_feature_names(tmp_path):
     original.save(save_path)
 
     reloaded = CatBoostWrapper.load(save_path)
-    assert reloaded._categorical_feature_names == ["day_of_week"]
+    assert reloaded._categorical_feature_names == []
+
+def test_save_and_load_preserves_target_min_for_clipping(tmp_path):
+    """
+    Regression test: target_min must survive the save/load roundtrip,
+    or a reloaded model would silently lose its clipping behavior (fall
+    back to _target_min=None, which skips clipping regardless of what
+    the original model would have done).
+    """
+    save_path = str(tmp_path / "catboost_model.json")
+
+    original = CatBoostWrapper(frequency="daily")
+    original.fit(make_train_df())  # y always >= 10
+    original.save(save_path)
+
+    reloaded = CatBoostWrapper.load(save_path)
+    assert reloaded._target_min == original._target_min == 10.0
+
+def test_load_of_pre_target_min_envelope_falls_back_to_none(tmp_path):
+    """
+    Backward compatibility: an envelope saved before target_min existed
+    (no such key) must load cleanly with _target_min=None (no clipping),
+    not raise a KeyError.
+    """
+    import json
+
+    save_path = str(tmp_path / "catboost_model.json")
+    original = CatBoostWrapper(frequency="daily")
+    original.fit(make_train_df())
+    original.save(save_path)
+
+    with open(save_path) as f:
+        envelope = json.load(f)
+    del envelope["target_min"]
+    with open(save_path, "w") as f:
+        json.dump(envelope, f)
+
+    reloaded = CatBoostWrapper.load(save_path)
+    assert reloaded._target_min is None
 
 def test_loaded_model_is_a_fresh_instance_not_shared_state(tmp_path):
     save_path = str(tmp_path / "catboost_model.json")

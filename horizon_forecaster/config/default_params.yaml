@@ -238,11 +238,11 @@ catboost:
         depth: 3
         l2_leaf_reg: 8
     wrapper_config:
-      # Same floor as Prophet's daily config, and for the same reason:
-      # CatBoostAdapter's own lag-warmup drop (up to 14 rows for the
-      # default lag_14 feature) already consumes history before the
-      # wrapper ever sees a row — this floor applies to what's LEFT
-      # after that drop, not raw input rows.
+      # Same floor as Prophet's daily config. (Previously this floor
+      # applied to rows LEFT AFTER CatBoostAdapter's lag-warmup drop --
+      # that mechanism no longer exists since the adapter's redesign
+      # away from lag/rolling features, so this is now simply a raw
+      # training-row-count floor, identical in meaning to Prophet's.)
       min_rows_required: 14
       random_seed: 42
 

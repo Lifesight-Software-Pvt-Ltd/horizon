@@ -7,6 +7,7 @@ from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
     InsufficientDataError,
     InvalidConfigError,
+    ModelConvergenceError,
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult, MODEL_REGISTRY
@@ -384,29 +385,31 @@ def test_forecast_runs_both_models_by_default():
 
 def test_evaluate_partial_failure_returns_successful_models_and_records_errors():
     """
-    CatBoostAdapter's own lag-warmup drop (14 rows for default lag_14)
-    consumes history before its min_rows_required floor even applies --
-    so on a dataset that satisfies Prophet's floor (14) but not
-    CatBoost's effective floor (14 warmup + 14 = 28), Prophet should
-    succeed while CatBoost fails, and evaluate() should return Prophet's
-    result rather than aborting the whole call.
+    CatBoostAdapter's redesign removed the lag-warmup mechanism that
+    used to give CatBoost a higher EFFECTIVE min-rows floor than
+    Prophet's (see CHANGELOG) -- both models now use the exact same raw
+    row-count check. So a genuine partial failure here needs a real
+    model-family failure, not a data-size coincidence: depth=-1 is a
+    confirmed-empirically-real invalid CatBoost hyperparameter (see
+    test_catboost.py), used here to make CatBoost fail while Prophet
+    (given valid params) succeeds on the same dataset.
     """
-    df = make_raw_df(n=25)  # n_train=20: prophet OK (>=14), catboost post-warmup = 20-14=6 < 14
+    df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
     )
     results = forecaster.evaluate()
     assert set(results.keys()) == {"prophet"}
     assert set(forecaster.evaluate_errors.keys()) == {"catboost"}
-    assert isinstance(forecaster.evaluate_errors["catboost"], InsufficientDataError)
+    assert isinstance(forecaster.evaluate_errors["catboost"], ModelConvergenceError)
 
 
 def test_evaluate_errors_reset_fresh_on_each_call_not_accumulated():
-    df = make_raw_df(n=25)
+    df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
     )
     forecaster.evaluate()
     errors_first_call = dict(forecaster.evaluate_errors)
@@ -437,12 +440,13 @@ def test_grid_search_is_independent_per_model():
 
 def test_catboost_test_split_features_are_anchored_to_train_history_not_test_split():
     """
-    Direct regression test for the Phase 3 architecture fix: the test
-    split's features must be built via transform_future() (reusing the
-    adapter's retained training history), not transform_train() on the
-    test split alone -- the latter would silently compute lag/rolling
-    features from the wrong (short, disconnected) data for a stateful
-    adapter like CatBoostAdapter.
+    Direct regression test for the Phase 3 architecture fix, updated for
+    CatBoostAdapter's redesigned (lag/rolling-free) feature set: the
+    test split's features must be built via transform_future() (reusing
+    the adapter's retained reference_date from transform_train()), not
+    transform_train() on the test split alone -- the latter would reset
+    time_idx back to 0 at the start of the test split instead of
+    continuing the trend seamlessly from where training left off.
     """
     df = make_raw_df(n=90)
     forecaster = HorizonForecaster(
@@ -450,10 +454,10 @@ def test_catboost_test_split_features_are_anchored_to_train_history_not_test_spl
         models=["catboost"], model_params={"catboost": {"iterations": 50, "depth": 3}},
     )
     n_train, n_test, adapted_train, adapted_test_features, y_test = forecaster._prepare_split("catboost")
-    train_last_actual = df["orders"].iloc[n_train - 1]
 
-    assert adapted_test_features["lag_1"].nunique() == 1
-    assert adapted_test_features["lag_1"].iloc[0] == train_last_actual
+    assert adapted_test_features["time_idx"].iloc[0] == adapted_train["time_idx"].iloc[-1] + 1
+    # and time_idx must vary per row across the test split, not be frozen
+    assert adapted_test_features["time_idx"].nunique() == n_test
 
 
 # ---------- forecast() ----------
@@ -619,10 +623,15 @@ def test_forecast_all_models_fail_raises_all_models_rejected_error():
 
 
 def test_forecast_partial_failure_returns_successful_models():
-    df = make_raw_df(n=25)  # prophet OK, catboost fails (see partial-failure evaluate() test above)
+    """
+    See test_evaluate_partial_failure_returns_successful_models_and_records_errors
+    for why depth=-1 (a genuine model-family failure) is used here rather
+    than a data-size coincidence.
+    """
+    df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
     )
     results = forecaster.forecast(horizon=3)
     assert set(results.keys()) == {"prophet"}
