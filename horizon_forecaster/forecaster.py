@@ -1,11 +1,15 @@
 """
 HorizonForecaster: the main orchestration class for horizon_forecaster.
 
-Phase 3 extends this from a single hardcoded model (Prophet) to a
+Phase 3 extended this from a single hardcoded model (Prophet) to a
 registry-driven orchestrator that can run any number of registered
-models in one evaluate()/forecast() call. Still no ensemble here --
-each model's result is independent and parallel; combining them is
-Phase 4's job.
+models in one evaluate()/forecast() call, each independent and
+parallel. Phase 4 adds the actual ensemble combination on top of that:
+evaluate()/forecast() still return the same per-model dict as before
+(unchanged, backward compatible), and additionally populate
+self.evaluate_ensemble / self.forecast_ensemble (an EnsembleResult --
+see evaluation/ensemble.py) as a side effect, mirroring how
+self.evaluate_errors/self.forecast_errors already work.
 
 Adding a new model to this orchestrator should mean adding ONE entry to
 MODEL_REGISTRY below, nothing else in this file. If a new model ever
@@ -27,6 +31,7 @@ import yaml
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
+from horizon_forecaster.evaluation.ensemble import EnsembleResult, build_ensemble
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
 from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
@@ -41,6 +46,7 @@ from horizon_forecaster.utils import (
     clean_zero_variance,
     infer_frequency,
     validate_frequency,
+    validate_mape_threshold_range,
     validate_training_size,
 )
 
@@ -139,6 +145,19 @@ class HorizonForecaster:
             base_hyperparameters). A model with no entry (or if
             model_params is omitted entirely) uses its own grid search
             as normal -- this is independent per model.
+        min_mape, max_mape: accuracy band (1-100) a model's MAPE must
+            fall inside to be included in the ensemble -- a model
+            outside this range, on either side, is excluded and
+            reported in evaluate_ensemble.rejected_models /
+            forecast_ensemble.rejected_models. Defaults (1, 100) are
+            deliberately permissive (accepts virtually any real-world
+            MAPE) so ensembling works out of the box; tighten to
+            actually filter out inaccurate models.
+        ensemble_weighting: "inverse_mape" (default -- models with
+            lower MAPE get proportionally more weight) or "equal"
+            (every model that passes the threshold gets an equal
+            share), passed straight through to
+            evaluation/ensemble.py's build_ensemble().
 
     evaluate()/forecast() ALWAYS return a dict keyed by model name, even
     when only one model is requested -- deliberate, so the return shape
@@ -152,9 +171,21 @@ class HorizonForecaster:
     than aborting the whole call. If EVERY requested model fails,
     AllModelsRejectedError is raised instead of returning an empty dict
     (a silently-empty successful return would hide a real, total
-    failure). This is intentionally a much lighter concept than Phase
-    4's MAPE-threshold-based rejection reporting -- just "did this
-    model produce a result or not."
+    failure). This is a much lighter concept than the MAPE-threshold
+    ensemble rejection below -- just "did this model produce a result
+    or not."
+
+    Ensemble behavior (Phase 4): after evaluate()/forecast() build
+    their per-model dict as above (unchanged), each call additionally
+    populates self.evaluate_ensemble / self.forecast_ensemble (an
+    EnsembleResult, see evaluation/ensemble.py) as a side effect --
+    the returned dict's shape/meaning is untouched. forecast() has no
+    held-out actuals of its own to score model accuracy, so it always
+    reuses evaluate()'s per-model MAPE to decide both the threshold
+    rejection and the weights; if evaluate() hasn't been run yet this
+    session, forecast() runs it internally once (with a warning, since
+    this adds evaluate()'s own train/test-split fit cost on top of
+    forecast()'s full-data refit).
     """
 
     def __init__(
@@ -167,11 +198,24 @@ class HorizonForecaster:
         independent_columns: Optional[List[str]] = None,
         models: Optional[List[str]] = None,
         model_params: Optional[Dict[str, dict]] = None,
+        min_mape: float = 1.0,
+        max_mape: float = 100.0,
+        ensemble_weighting: str = "inverse_mape",
     ):
         self.frequency = validate_frequency(frequency)
         self.training_fraction = validate_training_size(training_size)
         self.date_column = date_column
         self.target_column = target_column
+
+        self.min_mape, self.max_mape = validate_mape_threshold_range(min_mape, max_mape)
+        if ensemble_weighting not in ("inverse_mape", "equal"):
+            raise InvalidConfigError(
+                f"ensemble_weighting must be 'inverse_mape' or 'equal' "
+                f"(got '{ensemble_weighting}').",
+                param_name="ensemble_weighting",
+                provided_value=ensemble_weighting,
+            )
+        self.ensemble_weighting = ensemble_weighting
 
         self.models = self._validate_models(models)
 
@@ -236,6 +280,19 @@ class HorizonForecaster:
 
         self.evaluate_errors: Dict[str, HorizonForecasterError] = {}
         self.forecast_errors: Dict[str, HorizonForecasterError] = {}
+
+        # Phase 4: ensemble side-channel state. evaluate_ensemble/
+        # forecast_ensemble are populated by evaluate()/forecast()
+        # respectively; None until the corresponding method has run at
+        # least once. _evaluate_mape_cache is the per-model MAPE dict
+        # forecast() reuses to weight its own ensemble (see forecast()
+        # docstring) -- None means evaluate() hasn't run yet this
+        # session, {} means it ran but produced zero usable results
+        # (AllModelsRejectedError), distinguishing "not tried" from
+        # "tried and found nothing" so forecast() doesn't retry forever.
+        self.evaluate_ensemble: Optional[EnsembleResult] = None
+        self.forecast_ensemble: Optional[EnsembleResult] = None
+        self._evaluate_mape_cache: Optional[Dict[str, float]] = None
 
     def _validate_models(self, models: Optional[List[str]]) -> List[str]:
         if models is None:
@@ -443,8 +500,17 @@ class HorizonForecaster:
         Always returns a dict keyed by model name (even for a single
         model). See class docstring for partial-failure behavior.
 
+        Also populates self.evaluate_ensemble (an EnsembleResult) and
+        self._evaluate_mape_cache (reused by forecast(), see its
+        docstring) as a side effect -- the returned dict itself is
+        unchanged from Phase 3.
+
         Raises:
             AllModelsRejectedError: if every requested model failed.
+                (Note: this is about fit/predict failing outright: a
+                model that fits fine but scores outside the ensemble's
+                MAPE threshold does NOT raise here -- see
+                evaluate_ensemble.rejected_models instead.)
         """
         results: Dict[str, EvaluationResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
@@ -458,11 +524,24 @@ class HorizonForecaster:
         self.evaluate_errors = errors
 
         if not results:
+            self._evaluate_mape_cache = {}
+            self.evaluate_ensemble = None
             raise AllModelsRejectedError(
                 f"All requested models failed during evaluate(): "
                 f"{ {k: str(v) for k, v in errors.items()} }",
                 rejected_models=list(errors.keys()),
             )
+
+        self._evaluate_mape_cache = {name: r.mape.value for name, r in results.items()}
+        first_result = next(iter(results.values()))
+        self.evaluate_ensemble = build_ensemble(
+            per_model_mape=self._evaluate_mape_cache,
+            per_model_predictions={name: r.test_predictions for name, r in results.items()},
+            min_mape=self.min_mape,
+            max_mape=self.max_mape,
+            weighting=self.ensemble_weighting,
+            actuals=first_result.test_predictions[["ds", "y"]],
+        )
 
         return results
 
@@ -533,6 +612,18 @@ class HorizonForecaster:
         for a single model). See class docstring for partial-failure
         behavior.
 
+        Also populates self.forecast_ensemble (an EnsembleResult) as a
+        side effect -- the returned dict itself is unchanged from
+        Phase 3. Since forecast() has no held-out actuals to score
+        accuracy against, the ensemble's weights (and which models pass
+        the min_mape/max_mape threshold) always come from evaluate()'s
+        MAPE, not anything computed here. If evaluate() hasn't been run
+        yet this session, forecast() runs it internally once (see the
+        warning below) purely to derive those weights -- a separate
+        fit/split from forecast()'s own full-data refit, so it doesn't
+        affect the forecast values themselves, only the ensemble
+        weighting.
+
         Args:
             horizon: number of future periods to forecast.
             future_independent_data: optional DataFrame of real future
@@ -561,6 +652,25 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
+        if self._evaluate_mape_cache is None:
+            warnings.warn(
+                "forecast() is running evaluate() internally, since it hasn't been "
+                "called yet this session, to derive per-model MAPE for ensemble "
+                "weighting. This adds evaluate()'s own train/test-split fit cost on "
+                "top of forecast()'s full-data refit. Call evaluate() explicitly "
+                "first if you'd like to see (or avoid paying twice for) that cost "
+                "separately.",
+                stacklevel=2,
+            )
+            try:
+                self.evaluate()
+            except AllModelsRejectedError:
+                # evaluate() itself couldn't produce a single result. forecast()
+                # still attempts its own full-data fits below (a model that
+                # failed on the smaller train/test split may yet succeed with
+                # more data) -- it just won't have ensemble weights available.
+                self._evaluate_mape_cache = {}
+
         results: Dict[str, ForecastResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
 
@@ -573,11 +683,29 @@ class HorizonForecaster:
         self.forecast_errors = errors
 
         if not results:
+            self.forecast_ensemble = None
             raise AllModelsRejectedError(
                 f"All requested models failed during forecast(): "
                 f"{ {k: str(v) for k, v in errors.items()} }",
                 rejected_models=list(errors.keys()),
             )
+
+        forecast_mape_input = {
+            name: self._evaluate_mape_cache[name]
+            for name in results
+            if name in self._evaluate_mape_cache
+        }
+        if forecast_mape_input:
+            self.forecast_ensemble = build_ensemble(
+                per_model_mape=forecast_mape_input,
+                per_model_predictions={name: results[name].forecast for name in forecast_mape_input},
+                min_mape=self.min_mape,
+                max_mape=self.max_mape,
+                weighting=self.ensemble_weighting,
+                actuals=None,
+            )
+        else:
+            self.forecast_ensemble = None
 
         return results
 

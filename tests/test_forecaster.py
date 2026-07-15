@@ -23,6 +23,25 @@ def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
         df["constant_col"] = 5  # same value every row -> zero variance
     return df
 
+def make_noisy_raw_df(n=90, freq="D", seed=7):
+    """
+    Only for ensemble tests below. make_raw_df()'s perfectly clean,
+    noiseless linear trend lets both models fit it almost exactly
+    (MAPE well under 1%) -- which is BELOW the default min_mape=1.0
+    threshold and gets threshold-rejected as "suspiciously good" (see
+    evaluation/ensemble.py). A little real noise keeps MAPE in a
+    realistic, comfortably-inside-[1,100] range without changing
+    make_raw_df() itself and risking other tests' assumptions.
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    trend = 100 + 2 * np.arange(n)
+    noise = rng.normal(0, 3, n)
+    return pd.DataFrame({
+        "date": pd.date_range("2026-01-01", periods=n, freq=freq),
+        "orders": trend + noise,
+    })
+
 # ---------- constructor validation ----------
 
 def test_constructor_validates_frequency():
@@ -599,8 +618,17 @@ def test_forecast_warns_when_horizon_far_exceeds_history():
 
 
 def test_forecast_does_not_warn_when_horizon_is_reasonable():
+    """
+    Isolates specifically the horizon-vs-history warning (see
+    test_forecast_warns_when_horizon_far_exceeds_history above) from
+    the unrelated Phase 4 "running evaluate() internally" warning --
+    evaluate() is called first, outside the strict block, so its
+    one-time warning doesn't get mistaken for a horizon warning that
+    shouldn't have fired.
+    """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+    forecaster.evaluate()
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes a test failure
         forecaster.forecast(horizon=10)  # well within 2x of 60 rows of history
@@ -636,3 +664,152 @@ def test_forecast_partial_failure_returns_successful_models():
     results = forecaster.forecast(horizon=3)
     assert set(results.keys()) == {"prophet"}
     assert set(forecaster.forecast_errors.keys()) == {"catboost"}
+
+
+# ---------- ensemble (Phase 4) ----------
+
+def test_constructor_defaults_for_ensemble_params():
+    df = make_raw_df()
+    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
+    assert forecaster.min_mape == 1.0
+    assert forecaster.max_mape == 100.0
+    assert forecaster.ensemble_weighting == "inverse_mape"
+    assert forecaster.evaluate_ensemble is None
+    assert forecaster.forecast_ensemble is None
+
+
+def test_constructor_validates_mape_threshold_range():
+    df = make_raw_df()
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", min_mape=50, max_mape=10)
+
+
+def test_constructor_validates_ensemble_weighting():
+    df = make_raw_df()
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", ensemble_weighting="bogus")
+
+
+def test_evaluate_populates_ensemble_with_default_permissive_threshold():
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    forecaster.evaluate()
+    ensemble = forecaster.evaluate_ensemble
+    assert ensemble is not None
+    assert ensemble.combined is not None
+    assert set(ensemble.weights.keys()) == {"prophet", "catboost"}
+    assert abs(sum(ensemble.weights.values()) - 1.0) < 1e-6
+    assert ensemble.mape is not None  # actuals are available in the evaluate() context
+    assert set(ensemble.combined.columns) == {"ds", "yhat"}
+
+
+def test_evaluate_ensemble_uses_configured_weighting_strategy():
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        ensemble_weighting="equal",
+    )
+    forecaster.evaluate()
+    assert forecaster.evaluate_ensemble.weights["prophet"] == pytest.approx(0.5)
+    assert forecaster.evaluate_ensemble.weights["catboost"] == pytest.approx(0.5)
+
+
+def test_evaluate_ensemble_rejects_models_outside_impossible_threshold():
+    """
+    A min_mape of 99 rejects the model from the ensemble regardless of
+    its actual (necessarily much lower, for any real fit) MAPE -- but
+    does NOT affect evaluate()'s own return value -- the per-model
+    result is still returned, only evaluate_ensemble reflects the
+    rejection. This is the key distinction from AllModelsRejectedError
+    (see evaluation/ensemble.py's module docstring). A high min_mape is
+    used here (rather than a near-zero max_mape) specifically because
+    it's valid under validate_mape_threshold_range's [1, 100] floor and
+    doesn't depend on knowing the real MAPE precisely in advance.
+    """
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet"], model_params={"prophet": {"seasonality_mode": "additive"}},
+        min_mape=99.0, max_mape=100.0,
+    )
+    results = forecaster.evaluate()
+    assert "prophet" in results
+    assert forecaster.evaluate_ensemble.combined is None
+    assert forecaster.evaluate_ensemble.weights == {}
+    assert forecaster.evaluate_ensemble.mape is None
+    assert "prophet" in forecaster.evaluate_ensemble.rejected_models
+
+
+def test_forecast_ensemble_reuses_evaluate_weights_and_warns_when_evaluate_not_called_first():
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    assert forecaster._evaluate_mape_cache is None
+    with pytest.warns(UserWarning, match=r"running evaluate\(\) internally"):
+        forecaster.forecast(horizon=5)
+
+    assert forecaster._evaluate_mape_cache is not None
+    assert forecaster.evaluate_ensemble is not None  # populated as a side effect
+    assert forecaster.forecast_ensemble is not None
+    assert forecaster.forecast_ensemble.weights == forecaster.evaluate_ensemble.weights
+    assert set(forecaster.forecast_ensemble.combined.columns) == {"ds", "yhat"}
+    assert len(forecaster.forecast_ensemble.combined) == 5
+    assert forecaster.forecast_ensemble.mape is None  # no actuals exist for the future
+
+
+def test_forecast_does_not_rewarn_or_recompute_evaluate_on_second_call():
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    forecaster.forecast(horizon=5)
+    cache_after_first_call = forecaster._evaluate_mape_cache
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning now fails the test
+        forecaster.forecast(horizon=8)
+
+    assert forecaster._evaluate_mape_cache is cache_after_first_call  # same object, not recomputed
+
+
+def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
+    df = make_noisy_raw_df()
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+    )
+    forecaster.evaluate()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        forecaster.forecast(horizon=5)  # must not warn -- evaluate() already ran
+
+
+def test_forecast_ensemble_is_none_when_internal_evaluate_totally_fails():
+    """
+    n=16 -> evaluate()'s 80% train split is 12 rows, below the daily
+    floor of 14 (fails outright), but forecast()'s own full-data refit
+    uses all 16 rows, which clears the floor. This confirms forecast()
+    still attempts (and succeeds at) its own fits even when the
+    internal evaluate() call it runs for ensemble weights finds nothing
+    at all -- a model failing on the smaller train/test split doesn't
+    block forecast() from succeeding with more data.
+    """
+    df = make_raw_df(n=16)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet"], model_params={"prophet": {"seasonality_mode": "additive"}},
+    )
+    with pytest.warns(UserWarning, match=r"running evaluate\(\) internally"):
+        results = forecaster.forecast(horizon=3)
+
+    assert "prophet" in results
+    assert forecaster._evaluate_mape_cache == {}
+    assert forecaster.forecast_ensemble is None
