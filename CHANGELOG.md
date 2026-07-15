@@ -46,4 +46,4 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 
 - 24 CVEs in `torch`/`pytorch-lightning`, forced by `neuralprophet==0.8.0`'s own version constraints — consciously deferred to Phase 6 rather than pinning an untested pre-release NeuralProphet.
 - PyMC and NeuralProphet still need their own `save()`/`load()` overrides (Phase 6).
-- `examples/real_dataset_testing.ipynb` exists in Colab but is not yet committed to this repository, pending GitHub PAT/org-admin access.
+- `examples/real_dataset_testing.ipynb` exists in Colab but is not yet committed to this repository.
