@@ -25,13 +25,14 @@ def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
 
 def make_noisy_raw_df(n=90, freq="D", seed=7):
     """
-    Only for ensemble tests below. make_raw_df()'s perfectly clean,
-    noiseless linear trend lets both models fit it almost exactly
-    (MAPE well under 1%) -- which is BELOW the default min_mape=1.0
-    threshold and gets threshold-rejected as "suspiciously good" (see
-    evaluation/ensemble.py). A little real noise keeps MAPE in a
-    realistic, comfortably-inside-[1,100] range without changing
-    make_raw_df() itself and risking other tests' assumptions.
+    Used by the ensemble tests below. make_raw_df()'s perfectly clean,
+    noiseless linear trend lets both models fit it almost exactly (MAPE
+    well under 1%). A little real noise lifts MAPE into a realistic,
+    few-percent range -- which the rejection test below depends on, since
+    it needs a real fit to score ABOVE a deliberately low mape_threshold
+    to be excluded (a sub-0.5% fit would pass the 0.5 threshold the
+    rejection test uses). Kept separate from make_raw_df() so other tests'
+    assumptions aren't disturbed.
     """
     import numpy as np
     rng = np.random.default_rng(seed)
@@ -671,17 +672,16 @@ def test_forecast_partial_failure_returns_successful_models():
 def test_constructor_defaults_for_ensemble_params():
     df = make_raw_df()
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
-    assert forecaster.min_mape == 1.0
-    assert forecaster.max_mape == 100.0
+    assert forecaster.mape_threshold == 40.0
     assert forecaster.ensemble_weighting == "inverse_mape"
     assert forecaster.evaluate_ensemble is None
     assert forecaster.forecast_ensemble is None
 
 
-def test_constructor_validates_mape_threshold_range():
+def test_constructor_validates_mape_threshold():
     df = make_raw_df()
     with pytest.raises(InvalidConfigError):
-        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", min_mape=50, max_mape=10)
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", mape_threshold=150)
 
 
 def test_constructor_validates_ensemble_weighting():
@@ -718,23 +718,23 @@ def test_evaluate_ensemble_uses_configured_weighting_strategy():
     assert forecaster.evaluate_ensemble.weights["catboost"] == pytest.approx(0.5)
 
 
-def test_evaluate_ensemble_rejects_models_outside_impossible_threshold():
+def test_evaluate_ensemble_rejects_model_above_threshold():
     """
-    A min_mape of 99 rejects the model from the ensemble regardless of
-    its actual (necessarily much lower, for any real fit) MAPE -- but
-    does NOT affect evaluate()'s own return value -- the per-model
-    result is still returned, only evaluate_ensemble reflects the
-    rejection. This is the key distinction from AllModelsRejectedError
-    (see evaluation/ensemble.py's module docstring). A high min_mape is
-    used here (rather than a near-zero max_mape) specifically because
-    it's valid under validate_mape_threshold_range's [1, 100] floor and
-    doesn't depend on knowing the real MAPE precisely in advance.
+    A mape_threshold of 0.5 rejects any model
+    scoring above 0.5% MAPE from the ensemble -- which, on the noisy
+    dataset, a real fit does -- but does NOT affect evaluate()'s own
+    return value: the per-model result is still returned, only
+    evaluate_ensemble reflects the rejection. This is the key
+    distinction from AllModelsRejectedError (see evaluation/ensemble.py's
+    module docstring). The noisy dataset is used specifically so the real
+    MAPE lands above 0.5% (a clean fit could score under 0.5% and slip
+    past this deliberately low threshold).
     """
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
         models=["prophet"], model_params={"prophet": {"seasonality_mode": "additive"}},
-        min_mape=99.0, max_mape=100.0,
+        mape_threshold=0.5,
     )
     results = forecaster.evaluate()
     assert "prophet" in results

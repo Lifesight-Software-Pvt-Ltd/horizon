@@ -50,7 +50,7 @@ from horizon_forecaster.utils import (
     clean_zero_variance,
     infer_frequency,
     validate_frequency,
-    validate_mape_threshold_range,
+    validate_mape_threshold,
     validate_training_size,
 )
 
@@ -149,14 +149,14 @@ class HorizonForecaster:
             base_hyperparameters). A model with no entry (or if
             model_params is omitted entirely) uses its own grid search
             as normal -- this is independent per model.
-        min_mape, max_mape: accuracy band (1-100) a model's MAPE must
-            fall inside to be included in the ensemble -- a model
-            outside this range, on either side, is excluded and
-            reported in evaluate_ensemble.rejected_models /
-            forecast_ensemble.rejected_models. Defaults (1, 100) are
-            deliberately permissive (accepts virtually any real-world
-            MAPE) so ensembling works out of the box; tighten to
-            actually filter out inaccurate models.
+        mape_threshold: accuracy cutoff (0-100, default 40) a model's
+            MAPE must be at or below to be included in the ensemble. A
+            model scoring above it is excluded and reported in
+            evaluate_ensemble.rejected_models /
+            forecast_ensemble.rejected_models. This is an upper bound
+            only -- an unusually low MAPE is never rejected. Lower it to
+            filter more aggressively; raise it (up to 100) to be more
+            permissive.
         ensemble_weighting: "inverse_mape" (default -- models with
             lower MAPE get proportionally more weight) or "equal"
             (every model that passes the threshold gets an equal
@@ -202,8 +202,7 @@ class HorizonForecaster:
         independent_columns: Optional[List[str]] = None,
         models: Optional[List[str]] = None,
         model_params: Optional[Dict[str, dict]] = None,
-        min_mape: float = 1.0,
-        max_mape: float = 100.0,
+        mape_threshold: float = 40.0,
         ensemble_weighting: str = "inverse_mape",
     ):
         self.frequency = validate_frequency(frequency)
@@ -211,7 +210,7 @@ class HorizonForecaster:
         self.date_column = date_column
         self.target_column = target_column
 
-        self.min_mape, self.max_mape = validate_mape_threshold_range(min_mape, max_mape)
+        self.mape_threshold = validate_mape_threshold(mape_threshold)
         if ensemble_weighting not in WEIGHTING_STRATEGIES:
             raise InvalidConfigError(
                 f"ensemble_weighting must be one of {WEIGHTING_STRATEGIES} "
@@ -543,8 +542,7 @@ class HorizonForecaster:
         self.evaluate_ensemble = build_ensemble(
             per_model_mape=self._evaluate_mape_cache,
             per_model_predictions={name: r.test_predictions for name, r in results.items()},
-            min_mape=self.min_mape,
-            max_mape=self.max_mape,
+            mape_threshold=self.mape_threshold,
             weighting=self.ensemble_weighting,
             actuals=first_result.test_predictions[["ds", "y"]],
         )
@@ -622,7 +620,7 @@ class HorizonForecaster:
         side effect -- the returned dict itself is unchanged from
         Phase 3. Since forecast() has no held-out actuals to score
         accuracy against, the ensemble's weights (and which models pass
-        the min_mape/max_mape threshold) always come from evaluate()'s
+        the mape_threshold) always come from evaluate()'s
         MAPE, not anything computed here. If evaluate() hasn't been run
         yet this session, forecast() runs it internally once (see the
         warning below) purely to derive those weights -- a separate
@@ -705,8 +703,7 @@ class HorizonForecaster:
             self.forecast_ensemble = build_ensemble(
                 per_model_mape=forecast_mape_input,
                 per_model_predictions={name: results[name].forecast for name in forecast_mape_input},
-                min_mape=self.min_mape,
-                max_mape=self.max_mape,
+                mape_threshold=self.mape_threshold,
                 weighting=self.ensemble_weighting,
                 actuals=None,
             )

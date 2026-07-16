@@ -2,8 +2,8 @@
 Ensemble combination logic for horizon_forecaster (Phase 4).
 
 Combines multiple models' per-period "yhat" predictions into a single
-weighted ensemble, after filtering out any model whose MAPE falls
-outside an accuracy band [min_mape, max_mape]. Deliberately a pure,
+weighted ensemble, after filtering out any model whose MAPE exceeds an
+accuracy cutoff (`mape_threshold`). Deliberately a pure,
 standalone module -- like evaluation/metrics.py, it has no dependency
 on forecaster.py, HorizonForecaster, or any model/adapter class.
 forecaster.py (HorizonForecaster.evaluate()/forecast()) is the only
@@ -20,7 +20,7 @@ ForecastResult for individual-model plots/CSVs.
 
 Why a model can be "rejected" from the ensemble without evaluate()/
 forecast() failing: a model that fits and predicts successfully but
-scores outside [min_mape, max_mape] is not a failure in the same sense
+scores above mape_threshold is not a failure in the same sense
 as InsufficientDataError/ModelConvergenceError (see
 forecaster.py's evaluate_errors/forecast_errors) -- it produced a real
 result, it just isn't accurate enough to be trusted in the combined
@@ -77,13 +77,12 @@ class EnsembleResult:
         combined: DataFrame with columns ["ds", "yhat"] -- the weighted
             ensemble prediction, a genuinely new value (not any single
             model's own yhat). None if no model survived the
-            [min_mape, max_mape] threshold, i.e. no ensemble could be
-            formed.
+            mape_threshold, i.e. no ensemble could be formed.
         weights: normalized weight (summing to 1.0) per surviving
             model, e.g. {"prophet": 0.55, "catboost": 0.45}. Empty if
             combined is None.
         rejected_models: ThresholdRejectionError per model whose MAPE
-            fell outside [min_mape, max_mape] (or was NaN -- see
+            exceeded mape_threshold (or was NaN -- see
             build_ensemble()). Distinct from forecaster.py's
             evaluate_errors/forecast_errors: these models fit and
             predicted successfully, they just weren't accurate enough
@@ -149,8 +148,7 @@ def _combine_predictions(
 def build_ensemble(
     per_model_mape: Dict[str, float],
     per_model_predictions: Dict[str, pd.DataFrame],
-    min_mape: float,
-    max_mape: float,
+    mape_threshold: float,
     weighting: str = "inverse_mape",
     actuals: Optional[pd.DataFrame] = None,
 ) -> EnsembleResult:
@@ -167,12 +165,11 @@ def build_ensemble(
             at least ["ds", "yhat"], for the SAME set of ds values
             across every model (the same test split, or the same
             future horizon dates).
-        min_mape, max_mape: accuracy band (validated upstream by
-            utils.validate_mape_threshold_range). A model with MAPE
-            outside this range -- including a MAPE below min_mape,
-            not just above max_mape -- is excluded and reported in
-            rejected_models, per validate_mape_threshold_range's
-            symmetric range design.
+        mape_threshold: accuracy cutoff (validated upstream by
+            utils.validate_mape_threshold). A model whose MAPE exceeds
+            this threshold is excluded and reported in rejected_models.
+            This is an upper bound only -- an unusually low MAPE is NOT
+            rejected; every model at or below the threshold is kept.
         weighting: "inverse_mape" (lower-MAPE models get more weight)
             or "equal" (every surviving model weighted equally).
         actuals: optional DataFrame with ["ds", "y"] real actual
@@ -193,22 +190,20 @@ def build_ensemble(
         if is_nan:
             rejected[model_name] = ThresholdRejectionError(
                 f"{model_name}'s MAPE is NaN (likely every test-set actual was zero), "
-                f"so it can't be compared against the [{min_mape}, {max_mape}] threshold.",
+                f"so it can't be compared against the mape_threshold of {mape_threshold}%.",
                 model_name=model_name,
                 mape_value=mape_value,
-                allowed_min=min_mape,
-                allowed_max=max_mape,
+                allowed_max=mape_threshold,
             )
             continue
 
-        if not (min_mape <= mape_value <= max_mape):
+        if mape_value > mape_threshold:
             rejected[model_name] = ThresholdRejectionError(
-                f"{model_name}'s MAPE ({mape_value:.2f}%) is outside the allowed "
-                f"[{min_mape}, {max_mape}] ensemble threshold range.",
+                f"{model_name}'s MAPE ({mape_value:.2f}%) exceeds the mape_threshold "
+                f"of {mape_threshold}%.",
                 model_name=model_name,
                 mape_value=mape_value,
-                allowed_min=min_mape,
-                allowed_max=max_mape,
+                allowed_max=mape_threshold,
             )
             continue
 

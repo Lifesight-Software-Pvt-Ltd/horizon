@@ -118,25 +118,30 @@ def validate_training_size(training_size: float) -> float:
         )
     return value
 
-def validate_mape_threshold_range(min_mape: float, max_mape: float) -> Tuple[float, float]:
-    """
-    Validate the ensemble MAPE threshold range against the allowed 1-100
-    range (per project spec).
-    """
-    for name, value in (("min_mape", min_mape), ("max_mape", max_mape)):
-        if not (1.0 <= value <= 100.0):
-            raise InvalidConfigError(
-                f"{name} must be between 1 and 100 (got {value}).",
-                param_name=name,
-                provided_value=value,
-                valid_range=(1, 100),
-            )
+# The user-facing mape_threshold is constrained to this range. 0.01 and
+# 100 are fixed internal bounds, NOT user-settable: a floor of 0.01%
+# rejects a threshold of 0 (and negatives), which would admit only a
+# literally perfect model and is almost never what's intended, while
+# leaving every realistic low threshold valid; a MAPE above 100% already
+# signals a degenerate fit, so a higher ceiling would add nothing useful.
+MAPE_THRESHOLD_MIN = 0.01
+MAPE_THRESHOLD_MAX = 100.0
 
-    if min_mape >= max_mape:
+def validate_mape_threshold(mape_threshold: float) -> float:
+    """
+    Validate the ensemble `mape_threshold` against the allowed
+    [MAPE_THRESHOLD_MIN, MAPE_THRESHOLD_MAX] (0.01-100) range.
+
+    `mape_threshold` is an upper cutoff: a model is included in the
+    ensemble only if its MAPE is at or below it. The bound itself must be
+    a sensible percentage within [0.01, 100].
+    """
+    if not (MAPE_THRESHOLD_MIN <= mape_threshold <= MAPE_THRESHOLD_MAX):
         raise InvalidConfigError(
-            f"min_mape ({min_mape}) must be less than max_mape ({max_mape}).",
-            param_name="min_mape/max_mape",
-            provided_value=(min_mape, max_mape),
+            f"mape_threshold must be between {MAPE_THRESHOLD_MIN:g} and "
+            f"{MAPE_THRESHOLD_MAX:g} (got {mape_threshold}).",
+            param_name="mape_threshold",
+            provided_value=mape_threshold,
+            valid_range=(MAPE_THRESHOLD_MIN, MAPE_THRESHOLD_MAX),
         )
-
-    return min_mape, max_mape
+    return mape_threshold

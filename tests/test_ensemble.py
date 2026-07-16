@@ -17,8 +17,7 @@ def test_inverse_mape_weighting_favors_lower_mape_model():
             "a": make_predictions(ds, [1, 2, 3]),
             "b": make_predictions(ds, [4, 5, 6]),
         },
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         weighting="inverse_mape",
     )
     assert result.weights["a"] > result.weights["b"]
@@ -33,8 +32,7 @@ def test_equal_weighting_ignores_mape_differences():
             "a": make_predictions(ds, [1, 2, 3]),
             "b": make_predictions(ds, [4, 5, 6]),
         },
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         weighting="equal",
     )
     assert result.weights == {"a": 0.5, "b": 0.5}
@@ -42,11 +40,10 @@ def test_equal_weighting_ignores_mape_differences():
 
 def test_inverse_mape_weighting_does_not_divide_by_zero_on_perfect_mape():
     """
-    build_ensemble() itself doesn't enforce validate_mape_threshold_range's
-    [1, 100] floor on min_mape (that's forecaster.py's job, at
-    construction time) -- min_mape=0.0 here is deliberately used to
-    exercise a literal 0% MAPE without it being threshold-rejected,
-    specifically to prove _compute_weights' divide-by-zero guard works.
+    A literal 0% MAPE is included in the ensemble -- mape_threshold is an
+    upper bound only, so an unusually low score is never rejected. That
+    means _compute_weights must not divide by zero when it takes the
+    inverse-MAPE weight of a perfect model; this exercises that guard.
     """
     ds = pd.date_range("2023-01-01", periods=2, freq="D")
     result = build_ensemble(
@@ -55,8 +52,7 @@ def test_inverse_mape_weighting_does_not_divide_by_zero_on_perfect_mape():
             "a": make_predictions(ds, [1, 2]),
             "b": make_predictions(ds, [3, 4]),
         },
-        min_mape=0.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         weighting="inverse_mape",
     )
     assert result.combined is not None
@@ -69,8 +65,7 @@ def test_unknown_weighting_strategy_raises_value_error():
         build_ensemble(
             per_model_mape={"a": 10.0},
             per_model_predictions={"a": make_predictions(ds, [1, 2])},
-            min_mape=1.0,
-            max_mape=100.0,
+            mape_threshold=100.0,
             weighting="bogus",
         )
 
@@ -84,8 +79,7 @@ def test_combined_yhat_is_the_correct_weighted_sum():
             "a": make_predictions(ds, [10.0, 20.0]),
             "b": make_predictions(ds, [30.0, 40.0]),
         },
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         weighting="inverse_mape",
     )
     # equal MAPE -> 0.5/0.5 weights -> simple average
@@ -97,8 +91,7 @@ def test_single_surviving_model_ensemble_equals_that_models_own_predictions():
     result = build_ensemble(
         per_model_mape={"a": 10.0},
         per_model_predictions={"a": make_predictions(ds, [10.0, 20.0])},
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
     )
     assert result.weights == {"a": 1.0}
     assert list(result.combined["yhat"]) == [10.0, 20.0]
@@ -114,13 +107,12 @@ def test_misaligned_ds_between_models_raises_value_error():
                 "a": make_predictions(ds_a, [1, 2, 3]),
                 "b": make_predictions(ds_b, [4, 5, 6]),
             },
-            min_mape=1.0,
-            max_mape=100.0,
+            mape_threshold=100.0,
         )
 
 # ---------- threshold rejection ----------
 
-def test_model_above_max_mape_is_rejected():
+def test_model_above_threshold_is_rejected():
     ds = pd.date_range("2023-01-01", periods=2, freq="D")
     result = build_ensemble(
         per_model_mape={"good": 5.0, "bad": 90.0},
@@ -128,20 +120,20 @@ def test_model_above_max_mape_is_rejected():
             "good": make_predictions(ds, [1, 2]),
             "bad": make_predictions(ds, [1, 2]),
         },
-        min_mape=1.0,
-        max_mape=50.0,
+        mape_threshold=50.0,
     )
     assert "bad" in result.rejected_models
     assert isinstance(result.rejected_models["bad"], ThresholdRejectionError)
     assert result.rejected_models["bad"].mape_value == 90.0
+    assert result.rejected_models["bad"].allowed_max == 50.0
     assert result.weights == {"good": 1.0}
 
 
-def test_model_below_min_mape_is_also_rejected():
+def test_unusually_low_mape_is_kept_not_rejected():
     """
-    validate_mape_threshold_range treats [min_mape, max_mape] as a
-    symmetric inclusion band -- a MAPE below min_mape is excluded too,
-    not just one above max_mape.
+    mape_threshold is an upper bound only. A suspiciously low MAPE -- which
+    the old symmetric [min_mape, max_mape] band used to reject -- is now
+    kept, since there is no lower bound anymore.
     """
     ds = pd.date_range("2023-01-01", periods=2, freq="D")
     result = build_ensemble(
@@ -150,11 +142,10 @@ def test_model_below_min_mape_is_also_rejected():
             "suspiciously_good": make_predictions(ds, [1, 2]),
             "normal": make_predictions(ds, [1, 2]),
         },
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
     )
-    assert "suspiciously_good" in result.rejected_models
-    assert result.weights == {"normal": 1.0}
+    assert "suspiciously_good" not in result.rejected_models
+    assert set(result.weights.keys()) == {"suspiciously_good", "normal"}
 
 
 def test_nan_mape_is_rejected_not_crashed_on():
@@ -165,8 +156,7 @@ def test_nan_mape_is_rejected_not_crashed_on():
             "nan_model": make_predictions(ds, [1, 2]),
             "normal": make_predictions(ds, [1, 2]),
         },
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
     )
     assert "nan_model" in result.rejected_models
     assert result.weights == {"normal": 1.0}
@@ -187,8 +177,7 @@ def test_all_models_rejected_returns_empty_result_without_raising():
             "a": make_predictions(ds, [1, 2]),
             "b": make_predictions(ds, [1, 2]),
         },
-        min_mape=1.0,
-        max_mape=50.0,
+        mape_threshold=50.0,
     )
     assert isinstance(result, EnsembleResult)
     assert result.combined is None
@@ -203,8 +192,7 @@ def test_ensemble_mape_is_computed_when_actuals_provided():
     result = build_ensemble(
         per_model_mape={"a": 10.0},
         per_model_predictions={"a": make_predictions(ds, [10.0, 20.0, 30.0])},
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         actuals=actuals,
     )
     assert result.mape is not None
@@ -216,8 +204,7 @@ def test_ensemble_mape_is_none_without_actuals():
     result = build_ensemble(
         per_model_mape={"a": 10.0},
         per_model_predictions={"a": make_predictions(ds, [1, 2])},
-        min_mape=1.0,
-        max_mape=100.0,
+        mape_threshold=100.0,
         actuals=None,
     )
     assert result.mape is None
@@ -231,7 +218,6 @@ def test_ensemble_mape_raises_on_misaligned_actuals():
         build_ensemble(
             per_model_mape={"a": 10.0},
             per_model_predictions={"a": make_predictions(ds, [10.0, 20.0, 30.0])},
-            min_mape=1.0,
-            max_mape=100.0,
+            mape_threshold=100.0,
             actuals=actuals,
         )

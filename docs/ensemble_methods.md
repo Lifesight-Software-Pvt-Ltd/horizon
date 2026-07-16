@@ -26,27 +26,25 @@ forecast_ensemble = forecaster.forecast_ensemble   # EnsembleResult for the futu
 
 ## Configuring it
 
-Three constructor parameters, all optional:
+Two constructor parameters, both optional:
 
 ```python
 HorizonForecaster(
     df, date_column="date", target_column="revenue", frequency="daily",
-    min_mape=1.0,                    # default
-    max_mape=100.0,                  # default
+    mape_threshold=40.0,                # default
     ensemble_weighting="inverse_mape",  # default; "equal" is the other option
 )
 ```
 
-- **`min_mape` / `max_mape`** (1–100, `min_mape < max_mape`): the
-  accuracy band a model's MAPE must fall inside to be included in the
-  ensemble. This is a **symmetric** band — a model can be excluded for
-  scoring *below* `min_mape` too, not just above `max_mape`. A
-  suspiciously perfect MAPE on real data is often a sign of something
-  worth checking (data leakage, an unrealistically clean synthetic test
-  set) rather than something to trust blindly; the threshold treats it
-  the same way it treats a genuinely inaccurate model. Defaults are
-  deliberately permissive so ensembling works out of the box — tighten
-  them to actually filter models out.
+- **`mape_threshold`** (0.01–100, default `40`): the accuracy cutoff a
+  model's MAPE must be **at or below** to be included in the ensemble.
+  A model scoring above it is excluded and reported in
+  `rejected_models`. This is an **upper bound only** — an unusually low
+  MAPE is never rejected. Lower it to filter more aggressively; raise it
+  (up to 100) to be more permissive. The `0.01` and `100` limits are
+  fixed internally and only constrain the value you're allowed to pass,
+  not which models qualify (the `0.01` floor rejects a threshold of `0`,
+  which would admit only a literally perfect model).
 - **`ensemble_weighting`**: `"inverse_mape"` (default) gives lower-MAPE
   models proportionally more weight (`weight ∝ 1 / MAPE`, normalized to
   sum to 1). `"equal"` gives every surviving model an equal share
@@ -61,7 +59,7 @@ Both `evaluate_ensemble` and `forecast_ensemble` are an `EnsembleResult`
 |---|---|
 | `combined` | `DataFrame["ds", "yhat"]` — the weighted combination. `None` if no model survived the threshold. |
 | `weights` | `{"prophet": 0.7, "catboost": 0.3}` — normalized weights for surviving models. Empty if `combined` is `None`. |
-| `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per excluded model, with its actual MAPE and the allowed range. |
+| `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per excluded model, with its actual MAPE and the threshold it exceeded. |
 | `weighting` | Which strategy was used. |
 | `mape` | The ensemble's own `MapeResult`, scored against real actuals. Only set in the `evaluate()` context (held-out actuals exist); always `None` for `forecast_ensemble`, since there's no ground truth for the future yet. |
 

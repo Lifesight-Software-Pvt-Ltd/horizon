@@ -122,7 +122,7 @@ output, per the project's original spec (README: "Automatic model
 selection via MAPE threshold-based ensemble weighting", "Transparent
 reporting of rejected models with their MAPE scores"). Most of the
 spec was already implied by earlier phases before this work started:
-`utils.validate_mape_threshold_range()` (Phase 1, unused until now),
+`utils.validate_mape_threshold()` (Phase 1, unused until now),
 `exceptions.ThresholdRejectionError` (Phase 1, unused until now),
 `evaluation/ensemble.py` (empty stub file), and an explicit design
 constraint already documented in `models/base.py` — ensemble
@@ -135,15 +135,15 @@ never propagated into it.
   dependency on `forecaster.py`/`HorizonForecaster`/any model or
   adapter class, mirroring `evaluation/metrics.py`'s standalone
   `mape()`), plus `EnsembleResult`. Filters out any model whose MAPE
-  falls outside `[min_mape, max_mape]` — on *either* side, not just
-  above the max, per `validate_mape_threshold_range`'s existing
-  symmetric-range design — then combines the survivors' `yhat` values
+  exceeds `mape_threshold` — an upper cutoff only, so an unusually low
+  MAPE is never rejected — then combines the survivors' `yhat` values
   using one of two weighting strategies: `inverse_mape` (lower-MAPE
   models get proportionally more weight) or `equal` (every surviving
   model weighted equally).
-- `HorizonForecaster` gained `min_mape`/`max_mape` (default `1.0`/
-  `100.0`, deliberately permissive) and `ensemble_weighting` (default
-  `"inverse_mape"`) constructor parameters. `evaluate()`/`forecast()`
+- `HorizonForecaster` gained `mape_threshold` (default `40`; `0.01` and
+  `100` are fixed internal bounds on the value the user can pass) and
+  `ensemble_weighting` (default `"inverse_mape"`) constructor
+  parameters. `evaluate()`/`forecast()`
   keep their exact Phase 3 return shape (`Dict[str, EvaluationResult]`/
   `Dict[str, ForecastResult]`, unchanged), and additionally populate
   `self.evaluate_ensemble`/`self.forecast_ensemble` as a side effect —

@@ -7,7 +7,7 @@ from horizon_forecaster.utils import (
     infer_frequency,
     validate_frequency,
     validate_training_size,
-    validate_mape_threshold_range,
+    validate_mape_threshold,
 )
 
 # ---------- clean_zero_variance ----------
@@ -88,18 +88,15 @@ def test_validate_training_size_rejects_out_of_range(value):
     with pytest.raises(InvalidConfigError):
         validate_training_size(value)
 
-# ---------- validate_mape_threshold_range ----------
+# ---------- validate_mape_threshold ----------
 
-def test_validate_mape_threshold_range_accepts_valid_range():
-    assert validate_mape_threshold_range(1, 100) == (1, 100)
-    assert validate_mape_threshold_range(5, 50) == (5, 50)
+def test_validate_mape_threshold_accepts_valid_values():
+    assert validate_mape_threshold(0.5) == 0.5
+    assert validate_mape_threshold(40) == 40  # the default
+    assert validate_mape_threshold(100) == 100
 
-def test_validate_mape_threshold_range_rejects_out_of_bounds():
+def test_validate_mape_threshold_rejects_out_of_bounds():
     with pytest.raises(InvalidConfigError):
-        validate_mape_threshold_range(0, 100)
+        validate_mape_threshold(0)       
     with pytest.raises(InvalidConfigError):
-        validate_mape_threshold_range(1, 150)
-
-def test_validate_mape_threshold_range_rejects_min_greater_than_max():
-    with pytest.raises(InvalidConfigError):
-        validate_mape_threshold_range(80, 20)
+        validate_mape_threshold(150)  # above the internal ceiling of 100

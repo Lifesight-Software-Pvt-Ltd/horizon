@@ -108,8 +108,9 @@ Generic, model-agnostic helpers:
   daily-vs-weekly spacing in a date column
 - `validate_training_size()` — enforces the 50–100% range from the project
   spec, accepting either fraction (0.8) or percentage (80) input
-- `validate_mape_threshold_range()` — enforces the 1–100% range from the
-  project spec for ensemble MAPE thresholds
+- `validate_mape_threshold()` — enforces the 0.01–100% range from the
+  project spec for the ensemble `mape_threshold` (the upper MAPE cutoff a
+  model must be at or below to join the ensemble)
 
 #### 3. `evaluation/metrics.py`
 Pure, model-independent metric functions:
@@ -164,8 +165,8 @@ The abstract `BaseModel` class every wrapper must inherit from:
    after:
    - `test_exceptions.py` — 10 tests, including a critical contract test
      confirming every subclass is catchable as the shared base exception.
-   - `test_utils.py` — 21 tests, including edge cases (all-NaN columns,
-     boundary values on the 50/100 and 1/100 ranges).
+   - `test_utils.py` — 20 tests, including edge cases (all-NaN columns,
+     boundary values on the 50/100 and 0.01/100 ranges).
    - `test_metrics.py` — 18 tests, with explicit coverage of the zero-actual
      edge case (all-zero actuals, partial zero actuals, both handling
      strategies).
