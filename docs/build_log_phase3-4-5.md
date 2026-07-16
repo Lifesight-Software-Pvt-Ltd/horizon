@@ -271,7 +271,12 @@ starting a new one.
   `plot_forecast()` (per-model forecast, optional history behind it,
   optional ensemble overlay), and `plot_model_comparison()` (a MAPE bar
   chart making the "ensemble is not automatically better than the best
-  single model" fact from Phase 4 visible at a glance).
+  single model" fact from Phase 4 visible at a glance). All three flag
+  the "ensemble requested but none formed" case (every model above
+  `mape_threshold`) with a visible red note, while still drawing the
+  individual-model results -- rejection from the blend is a trust signal,
+  not a reason to hide a real forecast, so the fix is loud labeling, not
+  suppression.
 - **`exporters.py`** — `export_forecast_csvs()` writing three files
   (final/blended, per-model long table, rejected-models table) plus the
   three pure `build_*_table()` functions behind them.
@@ -304,14 +309,16 @@ starting a new one.
 
 ### How this was verified
 
-- 26 new tests: 15 in `tests/test_plotting.py` (line/bar counts, legend
+- 30 new tests: 19 in `tests/test_plotting.py` (line/bar counts, legend
   labels incl. MAPE, bounds-shading only when present, ensemble overlay
-  presence/absence, empty-input `ValueError`, drawing onto a supplied
-  `Axes`) and 11 in `tests/test_exporters.py` (table columns/contents,
-  bounds preserved with NaN-fill for models lacking them, NaN-MAPE
-  rejected rows, `tmp_path` CSV round-trips, nested-dir creation, custom
-  prefix, and the empty-input header-only-files case). All 26 pass in
-  the sandbox (Prophet-free, ~2s), alongside the confirmed import
+  presence/absence, the "no ensemble formed" red-note flag appearing only
+  when an ensemble was requested but none formed, empty-input
+  `ValueError`, drawing onto a supplied `Axes`) and 11 in
+  `tests/test_exporters.py` (table columns/contents, bounds preserved
+  with NaN-fill for models lacking them, NaN-MAPE rejected rows,
+  `tmp_path` CSV round-trips, nested-dir creation, custom prefix, and the
+  empty-input header-only-files case). All 30 pass in the sandbox
+  (Prophet-free, ~1s), alongside the confirmed import
   decoupling check above.
 - These modules don't fit or predict, so unlike the Prophet-dependent
   suites they run fully in-sandbox; no local-only gap for Phase 5.

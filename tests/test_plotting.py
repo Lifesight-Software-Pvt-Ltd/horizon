@@ -97,6 +97,24 @@ def test_plot_evaluation_empty_raises():
         plot_evaluation({})
 
 
+def _has_no_ensemble_note(ax):
+    return any("No ensemble formed" in t.get_text() for t in ax.texts)
+
+
+def test_plot_evaluation_flags_when_no_ensemble_formed():
+    results = {"prophet": make_eval_result(5.0)}
+    ax = plot_evaluation(results, ensemble=make_ensemble(combined=False))
+    assert _has_no_ensemble_note(ax)
+    # individual model line is still drawn (diagnosis, not suppressed)
+    assert any("prophet" in ln.get_label() for ln in ax.get_lines())
+
+
+def test_plot_evaluation_no_note_when_ensemble_formed_or_absent():
+    results = {"prophet": make_eval_result(5.0)}
+    assert not _has_no_ensemble_note(plot_evaluation(results, ensemble=make_ensemble()))
+    assert not _has_no_ensemble_note(plot_evaluation(results))
+
+
 # ---------- plot_forecast ----------
 
 def test_plot_forecast_one_line_per_model_no_history():
@@ -124,6 +142,12 @@ def test_plot_forecast_empty_raises():
         plot_forecast({})
 
 
+def test_plot_forecast_flags_when_no_ensemble_formed():
+    results = {"prophet": make_forecast_result()}
+    ax = plot_forecast(results, ensemble=make_ensemble(combined=False))
+    assert _has_no_ensemble_note(ax)
+
+
 # ---------- plot_model_comparison ----------
 
 def test_plot_model_comparison_one_bar_per_model():
@@ -143,6 +167,14 @@ def test_plot_model_comparison_no_ensemble_bar_without_mape():
     results = {"prophet": make_eval_result(5.0)}
     ax = plot_model_comparison(results, ensemble=make_ensemble(with_mape=False))
     assert len(ax.patches) == 1
+
+
+def test_plot_model_comparison_flags_when_no_ensemble_formed():
+    results = {"prophet": make_eval_result(5.0)}
+    # all-rejected: no combined series and no ensemble MAPE
+    ax = plot_model_comparison(results, ensemble=make_ensemble(combined=False, with_mape=False))
+    assert _has_no_ensemble_note(ax)
+    assert len(ax.patches) == 1  # only the individual model bar, no ensemble bar
 
 
 def test_plot_model_comparison_empty_raises():

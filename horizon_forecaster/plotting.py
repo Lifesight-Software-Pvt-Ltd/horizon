@@ -46,6 +46,16 @@ _ACTUAL_COLOR = "black"
 _HISTORY_COLOR = "gray"
 _BOUND_ALPHA = 0.15
 
+# Shown when an ensemble was requested but none could be formed (every
+# model exceeded mape_threshold). The individual-model lines are still
+# drawn -- a rejected model still produced a real forecast -- but this
+# note makes it unmistakable that those lines are for diagnosis, NOT a
+# blessed/trusted result, so a rejected model isn't mistaken for one.
+_NO_ENSEMBLE_NOTE = (
+    "No ensemble formed — all models above mape_threshold;\n"
+    "individual forecasts shown for diagnosis only"
+)
+
 
 def _new_ax(ax: "Optional[Axes]", figsize=(12, 5)) -> "Axes":
     if ax is None:
@@ -70,6 +80,28 @@ def _draw_bounds(ax: "Axes", df: "pd.DataFrame", color) -> None:
         )
 
 
+def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> None:
+    """
+    Draw the "no ensemble formed" note when an ensemble was requested but
+    every model was rejected (ensemble.combined is None). Draws nothing
+    when no ensemble was passed at all, or when one was formed -- so it is
+    always safe to call unconditionally.
+    """
+    if ensemble is not None and ensemble.combined is None:
+        ax.text(
+            0.5,
+            0.97,
+            _NO_ENSEMBLE_NOTE,
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            color=_ENSEMBLE_COLOR,
+            fontsize=9,
+            fontweight="bold",
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor=_ENSEMBLE_COLOR, alpha=0.85),
+        )
+
+
 def plot_evaluation(
     evaluation_results: "Dict[str, EvaluationResult]",
     ensemble: "Optional[EnsembleResult]" = None,
@@ -85,7 +117,10 @@ def plot_evaluation(
     legend label, plus a shaded uncertainty band for any model that has
     one. If `ensemble` is given and an ensemble was actually formed
     (combined is not None), it is overlaid as a red dashed line, with its
-    own MAPE in the label when available.
+    own MAPE in the label when available. If an ensemble was given but
+    none could be formed (every model exceeded mape_threshold), the
+    individual lines are still drawn and a visible red note flags that
+    they are for diagnosis only -- not a trusted/blended result.
 
     Args:
         evaluation_results: the dict returned by HorizonForecaster.evaluate(),
@@ -139,6 +174,8 @@ def plot_evaluation(
             linestyle="--",
             marker="x",
         )
+    else:
+        _annotate_no_ensemble(ax, ensemble)
 
     return _finalize(ax, title)
 
@@ -168,7 +205,9 @@ def plot_forecast(
         ensemble: the forecaster's forecast_ensemble (EnsembleResult), or
             None to skip the ensemble overlay. The forecast ensemble never
             carries its own MAPE (no future actuals exist), so no MAPE is
-            shown in its label.
+            shown in its label. If an ensemble was given but none could be
+            formed, a visible red note flags the individual forecasts as
+            diagnosis-only (see plot_evaluation).
         ax: an existing Axes to draw on; a new figure/Axes is created if
             omitted.
         title: chart title.
@@ -205,6 +244,8 @@ def plot_forecast(
             color=_ENSEMBLE_COLOR,
             linestyle="--",
         )
+    else:
+        _annotate_no_ensemble(ax, ensemble)
 
     return _finalize(ax, title)
 
@@ -257,5 +298,6 @@ def plot_model_comparison(
     ax.bar_label(bars, fmt="%.2f%%", padding=3)
     ax.set_ylabel("MAPE (%)")
     ax.set_title(title)
+    _annotate_no_ensemble(ax, ensemble)
     ax.figure.tight_layout()
     return ax
