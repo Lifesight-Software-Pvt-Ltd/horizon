@@ -8,8 +8,12 @@ from types import SimpleNamespace
 
 from horizon_forecaster.plotting import (
     plot_evaluation,
+    plot_evaluation_grid,
     plot_forecast,
+    plot_forecast_grid,
     plot_model_comparison,
+    save_evaluation_plots,
+    save_forecast_plots,
 )
 from horizon_forecaster.evaluation.ensemble import EnsembleResult
 from horizon_forecaster.evaluation.metrics import MapeResult
@@ -180,6 +184,77 @@ def test_plot_model_comparison_flags_when_no_ensemble_formed():
 def test_plot_model_comparison_empty_raises():
     with pytest.raises(ValueError):
         plot_model_comparison({})
+
+
+# ---------- faceted grids ----------
+
+def _visible_axes(fig):
+    return [a for a in fig.axes if a.get_visible()]
+
+
+def test_plot_evaluation_grid_one_panel_per_model():
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
+    fig = plot_evaluation_grid(results)
+    assert len(_visible_axes(fig)) == 2
+
+
+def test_plot_evaluation_grid_adds_ensemble_panel_when_formed():
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
+    fig = plot_evaluation_grid(results, ensemble=make_ensemble())
+    assert len(_visible_axes(fig)) == 3
+
+
+def test_plot_evaluation_grid_flags_and_omits_panel_when_no_ensemble():
+    results = {"prophet": make_eval_result(5.0)}
+    fig = plot_evaluation_grid(results, ensemble=make_ensemble(combined=False))
+    assert len(_visible_axes(fig)) == 1  # no ensemble panel
+    assert any("No ensemble formed" in t.get_text() for t in fig.texts)
+
+
+def test_plot_evaluation_grid_empty_raises():
+    with pytest.raises(ValueError):
+        plot_evaluation_grid({})
+
+
+def test_plot_forecast_grid_one_panel_per_model_plus_ensemble():
+    results = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
+    fig = plot_forecast_grid(results, ensemble=make_ensemble())
+    assert len(_visible_axes(fig)) == 3
+
+
+def test_plot_forecast_grid_empty_raises():
+    with pytest.raises(ValueError):
+        plot_forecast_grid({})
+
+
+# ---------- saving to disk ----------
+
+def test_save_evaluation_plots_writes_three_pngs(tmp_path):
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
+    written = save_evaluation_plots(results, make_ensemble(), output_dir=str(tmp_path))
+    assert set(written) == {"overlay", "mape_comparison", "grid"}
+    for path in written.values():
+        assert path.endswith(".png")
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+
+def test_save_forecast_plots_writes_two_pngs(tmp_path):
+    results = {"prophet": make_forecast_result()}
+    written = save_forecast_plots(results, ensemble=make_ensemble(), output_dir=str(tmp_path))
+    assert set(written) == {"overlay", "grid"}
+    for path in written.values():
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+
+def test_save_forecast_plots_creates_nested_dir(tmp_path):
+    target = tmp_path / "plots" / "run1"
+    save_forecast_plots({"prophet": make_forecast_result()}, output_dir=str(target))
+    assert (target / "forecast_overlay.png").exists()
+
+
+def test_save_evaluation_plots_empty_raises(tmp_path):
+    with pytest.raises(ValueError):
+        save_evaluation_plots({}, output_dir=str(tmp_path))
 
 
 # ---------- shared behavior ----------

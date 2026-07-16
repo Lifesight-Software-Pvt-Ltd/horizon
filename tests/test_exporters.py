@@ -8,6 +8,7 @@ from horizon_forecaster.exporters import (
     build_final_forecast_table,
     build_per_model_forecast_table,
     build_rejected_models_table,
+    export_forecast,
     export_forecast_csvs,
 )
 from horizon_forecaster.evaluation.ensemble import EnsembleResult
@@ -161,3 +162,31 @@ def test_export_still_writes_all_files_when_empty(tmp_path):
     for path in written.values():
         df = pd.read_csv(path)
         assert len(df) == 0
+
+
+# ---------- export_forecast bundle (CSVs + plots) ----------
+
+def test_export_forecast_writes_csvs_and_plots(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
+    written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
+    # CSV keys + plot keys
+    assert {"final", "per_model", "rejected"} <= set(written)
+    assert {"plot_overlay", "plot_grid"} <= set(written)
+    for name in ("forecast_final.csv", "forecast_overlay.png", "forecast_grid.png"):
+        assert (tmp_path / name).exists()
+
+
+def test_export_forecast_save_plots_false_writes_only_csvs(tmp_path):
+    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
+    written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path), save_plots=False)
+    assert set(written) == {"final", "per_model", "rejected"}
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_export_forecast_empty_still_writes_csvs_no_plots(tmp_path):
+    # No forecasts: CSVs written (header-only), plots skipped rather than raising.
+    written = export_forecast({}, None, output_dir=str(tmp_path))
+    assert set(written) == {"final", "per_model", "rejected"}
+    assert not list(tmp_path.glob("*.png"))

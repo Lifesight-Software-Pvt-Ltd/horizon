@@ -265,21 +265,34 @@ starting a new one.
 
 ### What was built
 
-- **`plotting.py`** — `plot_evaluation()` (actuals once + one line per
-  model with its MAPE in the legend + shaded bands where a model has
-  them + optional red-dashed ensemble overlay carrying its own MAPE),
-  `plot_forecast()` (per-model forecast, optional history behind it,
-  optional ensemble overlay), and `plot_model_comparison()` (a MAPE bar
-  chart making the "ensemble is not automatically better than the best
-  single model" fact from Phase 4 visible at a glance). All three flag
-  the "ensemble requested but none formed" case (every model above
-  `mape_threshold`) with a visible red note, while still drawing the
-  individual-model results -- rejection from the blend is a trust signal,
-  not a reason to hide a real forecast, so the fix is loud labeling, not
-  suppression.
+- **`plotting.py`** — two chart families at each stage. Overlay charts
+  `plot_evaluation()` (actuals once + one line per model with its MAPE in
+  the legend + shaded bands where a model has them + optional red-dashed
+  ensemble overlay carrying its own MAPE) and `plot_forecast()`
+  (per-model forecast, optional history behind it, optional ensemble
+  overlay) are compact but crowd as models are added or when models
+  agree and their lines coincide. Faceted grids
+  `plot_evaluation_grid()`/`plot_forecast_grid()` (added after real-use
+  feedback that the overlay was already busy at 2 models) give each model
+  and the ensemble its own panel via shared-axis small multiples, staying
+  legible at any model count; they return a `Figure` rather than a single
+  `Axes`. `plot_model_comparison()` is a MAPE bar chart making the
+  "ensemble is not automatically better than the best single model" fact
+  from Phase 4 visible at a glance. All of them flag the "ensemble
+  requested but none formed" case (every model above `mape_threshold`)
+  with a visible red note, while still drawing the individual-model
+  results -- rejection from the blend is a trust signal, not a reason to
+  hide a real forecast, so the fix is loud labeling, not suppression.
 - **`exporters.py`** — `export_forecast_csvs()` writing three files
   (final/blended, per-model long table, rejected-models table) plus the
-  three pure `build_*_table()` functions behind them.
+  three pure `build_*_table()` functions behind them. `plotting.py` also
+  gained `save_evaluation_plots()`/`save_forecast_plots()` (render the
+  charts and write them as PNGs, closing each figure), and
+  `exporters.py` a one-call `export_forecast()` bundle that writes the
+  CSVs and the forecast plots into one folder. The bundle imports
+  matplotlib lazily, so `export_forecast_csvs()` on its own stays
+  matplotlib-free (verified: importing `exporters` does not load
+  matplotlib).
 
 ### Key design decisions (carried from the Phase 1/4 house style)
 
@@ -309,16 +322,19 @@ starting a new one.
 
 ### How this was verified
 
-- 30 new tests: 19 in `tests/test_plotting.py` (line/bar counts, legend
+- 43 new tests: 29 in `tests/test_plotting.py` (line/bar counts, legend
   labels incl. MAPE, bounds-shading only when present, ensemble overlay
   presence/absence, the "no ensemble formed" red-note flag appearing only
-  when an ensemble was requested but none formed, empty-input
-  `ValueError`, drawing onto a supplied `Axes`) and 11 in
-  `tests/test_exporters.py` (table columns/contents, bounds preserved
-  with NaN-fill for models lacking them, NaN-MAPE rejected rows,
-  `tmp_path` CSV round-trips, nested-dir creation, custom prefix, and the
-  empty-input header-only-files case). All 30 pass in the sandbox
-  (Prophet-free, ~1s), alongside the confirmed import
+  when an ensemble was requested but none formed, the faceted grids'
+  one-visible-panel-per-model-plus-ensemble counts, the `save_*_plots`
+  PNG-writing + nested-dir + empty-input cases, empty-input `ValueError`,
+  drawing onto a supplied `Axes`) and 14 in `tests/test_exporters.py`
+  (table columns/contents, bounds preserved with NaN-fill for models
+  lacking them, NaN-MAPE rejected rows, `tmp_path` CSV round-trips,
+  nested-dir creation, custom prefix, the empty-input header-only-files
+  case, and the `export_forecast` bundle writing CSVs+PNGs / CSV-only /
+  empty-skips-plots paths). All 43 pass in the sandbox (Prophet-free,
+  ~2s), alongside the confirmed import
   decoupling check above.
 - These modules don't fit or predict, so unlike the Prophet-dependent
   suites they run fully in-sandbox; no local-only gap for Phase 5.

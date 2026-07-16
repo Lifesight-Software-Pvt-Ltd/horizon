@@ -2,7 +2,19 @@
 Plotting helpers for horizon_forecaster (Phase 5, output layer).
 
 Turns the outputs of HorizonForecaster.evaluate()/forecast() into
-matplotlib charts. Like evaluation/metrics.py and evaluation/ensemble.py,
+matplotlib charts. Two families are provided at each stage:
+
+- Overlay charts (plot_evaluation / plot_forecast) put every model on a
+  single Axes -- compact, good for a quick side-by-side, but they get
+  crowded as models are added or when models agree and their lines sit
+  on top of each other.
+- Faceted "small multiples" grids (plot_evaluation_grid /
+  plot_forecast_grid) give each model (and the ensemble) its own panel,
+  so every series stays readable no matter how many models there are.
+  These return a Figure rather than a single Axes.
+
+plot_model_comparison sits alongside both as a one-number-per-model MAPE
+bar chart. Like evaluation/metrics.py and evaluation/ensemble.py,
 this is a pure, standalone module: it never imports forecaster.py or any
 model/adapter class, so importing it (e.g. just to draw a chart) does not
 pull in the heavy Prophet/CatBoost stack. It reaches into the result
@@ -30,6 +42,8 @@ Design choices, all deliberate:
 
 from __future__ import annotations
 
+import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
 
 import matplotlib.pyplot as plt
@@ -37,6 +51,7 @@ import matplotlib.pyplot as plt
 if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy stack)
     import pandas as pd
     from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
     from horizon_forecaster.evaluation.ensemble import EnsembleResult
     from horizon_forecaster.forecaster import EvaluationResult, ForecastResult
@@ -305,3 +320,274 @@ def plot_model_comparison(
     _annotate_no_ensemble(ax, ensemble)
     ax.figure.tight_layout()
     return ax
+
+
+def _grid_axes(n_panels: int, ncols: int, panel_size=(6.0, 3.2)):
+    """
+    Build a subplot grid sized to hold exactly n_panels, returning the
+    figure and the first n_panels axes (extra cells are hidden). x and y
+    are shared so panels are directly comparable at a glance.
+    """
+    ncols = max(1, min(ncols, n_panels))
+    nrows = math.ceil(n_panels / ncols)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(panel_size[0] * ncols, panel_size[1] * nrows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    flat = axes.flatten()
+    for extra in flat[n_panels:]:
+        extra.set_visible(False)
+    return fig, list(flat[:n_panels])
+
+
+def _grid_no_ensemble_note(fig: "Figure", ensemble: "Optional[EnsembleResult]") -> None:
+    if ensemble is not None and ensemble.combined is None:
+        fig.text(
+            0.5,
+            0.995,
+            _NO_ENSEMBLE_NOTE.replace("\n", " "),
+            ha="center",
+            va="top",
+            color=_ENSEMBLE_COLOR,
+            fontsize=9,
+            fontweight="bold",
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor=_ENSEMBLE_COLOR, alpha=0.9),
+        )
+
+
+def plot_evaluation_grid(
+    evaluation_results: "Dict[str, EvaluationResult]",
+    ensemble: "Optional[EnsembleResult]" = None,
+    *,
+    ncols: int = 2,
+    title: str = "Test set: actual vs predicted (one panel per model)",
+) -> "Figure":
+    """
+    Faceted version of plot_evaluation: one panel per model (plus one for
+    the ensemble when formed), each showing the held-out actuals against
+    that single model's predictions with its bounds and MAPE. Small
+    multiples stay readable no matter how many models are present, unlike
+    the single-Axes overlay.
+
+    Args:
+        evaluation_results: {model_name: EvaluationResult} from evaluate().
+        ensemble: evaluate_ensemble (EnsembleResult), or None. When an
+            ensemble was formed it gets its own panel; when one was
+            requested but not formed, a red note flags that.
+        ncols: number of columns in the panel grid.
+        title: figure-level title (suptitle).
+
+    Returns:
+        The matplotlib Figure (never shown -- the caller decides).
+
+    Raises:
+        ValueError: if evaluation_results is empty.
+    """
+    if not evaluation_results:
+        raise ValueError("plot_evaluation_grid: evaluation_results is empty, nothing to plot.")
+
+    # (label, prediction_df, mape_value, is_ensemble)
+    panels = [
+        (name, r.test_predictions, r.mape.value, False)
+        for name, r in evaluation_results.items()
+    ]
+    if ensemble is not None and ensemble.combined is not None:
+        ens_mape = ensemble.mape.value if ensemble.mape is not None else None
+        panels.append(("ensemble", ensemble.combined, ens_mape, True))
+
+    fig, axes = _grid_axes(len(panels), ncols)
+    actual = next(iter(evaluation_results.values())).test_predictions[["ds", "y"]]
+
+    for ax, (label, df, mape_value, is_ensemble) in zip(axes, panels):
+        ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
+        color = _ENSEMBLE_COLOR if is_ensemble else None
+        line, = ax.plot(
+            df["ds"], df["yhat"], label=label, color=color,
+            marker="x" if is_ensemble else "o", linestyle="--" if is_ensemble else "-",
+        )
+        _draw_bounds(ax, df, line.get_color())
+        panel_title = label + (f" — MAPE {mape_value:.2f}%" if mape_value is not None else "")
+        ax.set_title(panel_title, fontsize=10)
+        ax.legend(fontsize=8)
+        ax.tick_params(axis="x", rotation=45)
+
+    fig.suptitle(title)
+    _grid_no_ensemble_note(fig, ensemble)
+    fig.tight_layout()
+    return fig
+
+
+def _savefig(fig: "Figure", path: Path, dpi: int) -> str:
+    """Write a figure to disk (tight bbox) and close it to free memory."""
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return str(path)
+
+
+def plot_forecast_grid(
+    forecast_results: "Dict[str, ForecastResult]",
+    *,
+    history: "Optional[pd.DataFrame]" = None,
+    date_column: str = "ds",
+    target_column: str = "y",
+    ensemble: "Optional[EnsembleResult]" = None,
+    ncols: int = 2,
+    title: str = "History + forecast (one panel per model)",
+) -> "Figure":
+    """
+    Faceted version of plot_forecast: one panel per model (plus one for
+    the ensemble when formed), each showing that single model's forecast,
+    optionally over the shared history.
+
+    Args:
+        forecast_results: {model_name: ForecastResult} from forecast().
+        history: optional raw history DataFrame drawn behind each panel's
+            forecast; date_column/target_column name its columns.
+        date_column, target_column: column names in `history`.
+        ensemble: forecast_ensemble (EnsembleResult), or None. Formed
+            ensemble gets its own panel; a requested-but-not-formed one is
+            flagged with a red note.
+        ncols: number of columns in the panel grid.
+        title: figure-level title (suptitle).
+
+    Returns:
+        The matplotlib Figure (never shown -- the caller decides).
+
+    Raises:
+        ValueError: if forecast_results is empty.
+    """
+    if not forecast_results:
+        raise ValueError("plot_forecast_grid: forecast_results is empty, nothing to plot.")
+
+    panels = [(name, r.forecast, False) for name, r in forecast_results.items()]
+    if ensemble is not None and ensemble.combined is not None:
+        panels.append(("ensemble", ensemble.combined, True))
+
+    fig, axes = _grid_axes(len(panels), ncols)
+
+    for ax, (label, fc, is_ensemble) in zip(axes, panels):
+        if history is not None:
+            ax.plot(history[date_column], history[target_column], label="History", color=_HISTORY_COLOR)
+        color = _ENSEMBLE_COLOR if is_ensemble else None
+        line, = ax.plot(
+            fc["ds"], fc["yhat"], label=f"{label} forecast", color=color,
+            linestyle="--" if is_ensemble else "-",
+        )
+        _draw_bounds(ax, fc, line.get_color())
+        ax.set_title(label, fontsize=10)
+        ax.legend(fontsize=8)
+        ax.tick_params(axis="x", rotation=45)
+
+    fig.suptitle(title)
+    _grid_no_ensemble_note(fig, ensemble)
+    fig.tight_layout()
+    return fig
+
+
+def save_evaluation_plots(
+    evaluation_results: "Dict[str, EvaluationResult]",
+    ensemble: "Optional[EnsembleResult]" = None,
+    *,
+    output_dir: str = ".",
+    prefix: str = "evaluation",
+    ncols: int = 2,
+    dpi: int = 100,
+) -> Dict[str, str]:
+    """
+    Render and save the evaluation charts to disk (PNG).
+
+    Writes three files into output_dir (created if missing): the overlay
+    ("{prefix}_overlay.png"), the MAPE bar comparison
+    ("{prefix}_mape_comparison.png"), and the per-model grid
+    ("{prefix}_grid.png"). Each figure is closed after writing so this is
+    safe to call in a loop without leaking figures.
+
+    Returns:
+        {"overlay": path, "mape_comparison": path, "grid": path}.
+
+    Raises:
+        ValueError: if evaluation_results is empty.
+    """
+    if not evaluation_results:
+        raise ValueError("save_evaluation_plots: evaluation_results is empty, nothing to save.")
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    written: Dict[str, str] = {}
+    written["overlay"] = _savefig(
+        plot_evaluation(evaluation_results, ensemble).figure, out / f"{prefix}_overlay.png", dpi
+    )
+    written["mape_comparison"] = _savefig(
+        plot_model_comparison(evaluation_results, ensemble).figure,
+        out / f"{prefix}_mape_comparison.png",
+        dpi,
+    )
+    written["grid"] = _savefig(
+        plot_evaluation_grid(evaluation_results, ensemble, ncols=ncols),
+        out / f"{prefix}_grid.png",
+        dpi,
+    )
+    return written
+
+
+def save_forecast_plots(
+    forecast_results: "Dict[str, ForecastResult]",
+    *,
+    history: "Optional[pd.DataFrame]" = None,
+    date_column: str = "ds",
+    target_column: str = "y",
+    ensemble: "Optional[EnsembleResult]" = None,
+    output_dir: str = ".",
+    prefix: str = "forecast",
+    ncols: int = 2,
+    dpi: int = 100,
+) -> Dict[str, str]:
+    """
+    Render and save the forecast charts to disk (PNG).
+
+    Writes two files into output_dir (created if missing): the overlay
+    ("{prefix}_overlay.png") and the per-model grid ("{prefix}_grid.png").
+    Each figure is closed after writing.
+
+    Returns:
+        {"overlay": path, "grid": path}.
+
+    Raises:
+        ValueError: if forecast_results is empty.
+    """
+    if not forecast_results:
+        raise ValueError("save_forecast_plots: forecast_results is empty, nothing to save.")
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    written: Dict[str, str] = {}
+    written["overlay"] = _savefig(
+        plot_forecast(
+            forecast_results,
+            history=history,
+            date_column=date_column,
+            target_column=target_column,
+            ensemble=ensemble,
+        ).figure,
+        out / f"{prefix}_overlay.png",
+        dpi,
+    )
+    written["grid"] = _savefig(
+        plot_forecast_grid(
+            forecast_results,
+            history=history,
+            date_column=date_column,
+            target_column=target_column,
+            ensemble=ensemble,
+            ncols=ncols,
+        ),
+        out / f"{prefix}_grid.png",
+        dpi,
+    )
+    return written

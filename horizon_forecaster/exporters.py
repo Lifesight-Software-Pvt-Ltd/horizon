@@ -153,3 +153,64 @@ def export_forecast_csvs(
         table.to_csv(path, index=False)
         written[key] = str(path)
     return written
+
+
+def export_forecast(
+    forecast_results: "Dict[str, ForecastResult]",
+    ensemble: "Optional[EnsembleResult]" = None,
+    *,
+    history=None,
+    date_column: str = "ds",
+    target_column: str = "y",
+    output_dir: str = ".",
+    prefix: str = "forecast",
+    save_plots: bool = True,
+    dpi: int = 100,
+) -> Dict[str, str]:
+    """
+    One-call export of a forecast run: the three CSVs AND (by default) the
+    forecast charts, all into the same output_dir.
+
+    Writes the CSVs via export_forecast_csvs(), then — unless
+    save_plots=False, or there are no forecasts to plot — the overlay and
+    per-model grid PNGs via horizon_forecaster.plotting.save_forecast_plots().
+    matplotlib is imported lazily here, so the CSV-only export_forecast_csvs()
+    path never pays that import cost.
+
+    Args:
+        forecast_results: {model_name: ForecastResult} from forecast().
+        ensemble: forecast_ensemble (EnsembleResult), or None.
+        history: optional raw history DataFrame drawn behind the forecast
+            plots; date_column/target_column name its columns.
+        date_column, target_column: column names in `history`.
+        output_dir: directory for every file (created if missing).
+        prefix: shared filename prefix.
+        save_plots: set False to write only the CSVs.
+        dpi: resolution for the saved plots.
+
+    Returns:
+        A merged dict of every path written: the CSV keys ("final",
+        "per_model", "rejected") plus, when plots were saved, plot keys
+        ("plot_overlay", "plot_grid").
+    """
+    written = export_forecast_csvs(
+        forecast_results, ensemble, output_dir=output_dir, prefix=prefix
+    )
+
+    if save_plots and forecast_results:
+        # Lazy import: keeps the CSV-only path free of the matplotlib dependency.
+        from horizon_forecaster.plotting import save_forecast_plots
+
+        plot_paths = save_forecast_plots(
+            forecast_results,
+            history=history,
+            date_column=date_column,
+            target_column=target_column,
+            ensemble=ensemble,
+            output_dir=output_dir,
+            prefix=prefix,
+            dpi=dpi,
+        )
+        written.update({f"plot_{key}": path for key, path in plot_paths.items()})
+
+    return written
