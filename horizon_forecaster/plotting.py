@@ -88,9 +88,13 @@ def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> N
     always safe to call unconditionally.
     """
     if ensemble is not None and ensemble.combined is None:
+        # Reserve headroom at the top so the note never sits on top of the
+        # bars/lines (or their value labels); then drop the note into it.
+        bottom, top = ax.get_ylim()
+        ax.set_ylim(bottom, top + (top - bottom) * 0.25)
         ax.text(
             0.5,
-            0.97,
+            0.98,
             _NO_ENSEMBLE_NOTE,
             transform=ax.transAxes,
             ha="center",
@@ -98,7 +102,7 @@ def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> N
             color=_ENSEMBLE_COLOR,
             fontsize=9,
             fontweight="bold",
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor=_ENSEMBLE_COLOR, alpha=0.85),
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor=_ENSEMBLE_COLOR, alpha=0.9),
         )
 
 
