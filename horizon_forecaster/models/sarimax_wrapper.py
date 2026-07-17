@@ -208,7 +208,33 @@ class SARIMAXWrapper(BaseModel):
         z = norm.ppf(1.0 - self.alpha / 2.0)
         sigma = float(np.sqrt(self._resid_var))
         cap = self._train_max_log + self.log_clip_headroom
-        yhat = np.expm1(np.clip(mean_log + self._resid_var / 2.0, 0.0, cap))
+        corrected_log = mean_log + self._resid_var / 2.0
+
+        # Divergence guard. A SARIMAX fit can blow up in log space -- an
+        # (near-)explosive AR root, or an exogenous coefficient extrapolating
+        # on out-of-range future values -- so the log forecast runs far past
+        # the explosion clip and expm1() would emit a degenerate flat line
+        # pinned at the cap (observed on real spiky weekly data: a ~3.8e6 flat
+        # forecast, 1400% MAPE). The clip prevents infinities but not garbage.
+        # When the clip binds on a majority of the horizon, the fit has
+        # genuinely diverged, so we reject it as a prediction failure (the
+        # orchestrator records it in evaluate_errors/forecast_errors and drops
+        # the model) rather than returning a misleading "result". This is
+        # distinct from a merely-inaccurate model, which stays a real result
+        # and is handled by the ensemble's MAPE threshold.
+        n_saturated = int(np.sum(corrected_log >= cap))
+        if n_saturated >= max(1, int(np.ceil(0.5 * len(corrected_log)))):
+            raise ModelPredictionError(
+                f"SARIMAX forecast diverged: the log-space forecast exceeded the "
+                f"explosion clip on {n_saturated}/{len(corrected_log)} of the horizon, "
+                f"so the back-transformed prediction would be a degenerate flat line "
+                f"(pinned at ~{np.expm1(cap):.3g}). Rejecting this fit rather than "
+                f"emitting garbage. Likely an (near-)explosive AR root or exogenous "
+                f"extrapolation on this data.",
+                model_name=self.model_name,
+            )
+
+        yhat = np.expm1(np.clip(corrected_log, 0.0, cap))
         yhat_lower = np.expm1(np.clip(mean_log - z * sigma, 0.0, cap))
         yhat_upper = np.expm1(np.clip(mean_log + z * sigma, 0.0, cap))
 

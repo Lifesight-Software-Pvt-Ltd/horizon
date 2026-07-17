@@ -66,6 +66,18 @@ def test_prediction_interval_is_a_stable_band_not_exploding(fitted):
     assert ratio.max() / ratio.min() < 1.5
 
 
+def test_divergence_guard_rejects_clip_saturated_forecast():
+    # A fit whose forecast runs past the explosion clip on most of the horizon
+    # is a divergence, not a result: predict() must reject it (so the
+    # orchestrator drops the model) rather than emit a degenerate flat line.
+    train, future, _ = make_adapted()
+    model = SARIMAXWrapper("daily", {}, min_rows_required=35)
+    model.fit(train)
+    model._train_max_log = -5.0  # force the clip cap far below any real forecast
+    with pytest.raises(ModelPredictionError):
+        model.predict(horizon=len(future), future_exog=future)
+
+
 def test_predict_produces_reasonable_mape(fitted):
     from horizon_forecaster.evaluation.metrics import mape
     model, _, future, y_test = fitted

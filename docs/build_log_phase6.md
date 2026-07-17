@@ -84,7 +84,20 @@ very-high MAPE).
   `enforce_stationarity=False`. So the winning order is refit with
   `enforce_stationarity=True` (falling back to `False` only if that fit
   fails), making the clip a rare last-resort guard rather than a routine
-  crutch.
+  crutch. **Divergence guard (added after a real-data edge case).** Even
+  with the above, a fit can still blow up in log space on messy real data
+  — a near-explosive AR root or an exogenous coefficient extrapolating on
+  out-of-range future values — so the log forecast runs far past the clip
+  and `expm1` emits a degenerate flat line pinned at the cap (observed on
+  real spiky weekly data: a ~3.8e6 flat forecast, ~1400% MAPE, while
+  Prophet/CatBoost were ~20-30%). The clip prevents infinities but not
+  garbage. So when the clip binds on a majority of the horizon, `predict()`
+  now raises `ModelPredictionError`; the orchestrator catches it per model
+  and records SARIMAX in `evaluate_errors`/`forecast_errors`, dropping it
+  entirely rather than surfacing a misleading flat-line result. This is
+  deliberately distinct from a merely-inaccurate model (a real result the
+  ensemble's MAPE threshold excludes) — a clip-saturated forecast is a
+  genuine divergence, not a weak prediction.
 
 - **Bias correction with the right variance.** `expm1` of the log-space
   mean returns the lognormal median, biasing forecasts low. The point
@@ -116,10 +129,10 @@ very-high MAPE).
 
 ### How this was verified
 
-- 25 new tests: 11 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
+- 26 new tests: 11 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
   shapes, auto-log detection, train-stat reuse into the future, the
   short-history Fourier-omission guard, missing-exog and pre-train
-  errors) and 14 in `tests/test_sarimax.py` (fit/predict shapes + bounds +
+  errors) and 15 in `tests/test_sarimax.py` (fit/predict shapes + bounds +
   non-negativity, a reasonable-MAPE sanity floor, the full error contract,
   the all-candidates-fail convergence path, and unit tests for the bias
   correction, the clip, and ADF `d` — plus an end-to-end integration test
