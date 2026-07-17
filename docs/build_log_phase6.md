@@ -123,16 +123,31 @@ very-high MAPE).
   linear, then standardises all exog. Standardisation is done manually
   (store train mean/std) to avoid adding a scikit-learn dependency.
 
+- **Future exog clamped to the training range (added after the same
+  edge case as the divergence guard).** The Section-5b diagnostic isolated
+  the real-data divergence to the exogenous variables: the identical series
+  fit fine at ~52% MAPE with `independent_columns=None` but diverged with
+  them. Cause: a test-window spend spike (far above any training value)
+  standardises to a large number and, multiplied by SARIMAX's fitted
+  coefficient, blows up the log-linear predictor. So `transform_train()`
+  records the standardised min/max per column and `transform_future()`
+  clamps future exog to that range — SARIMAX is linear in the exog, so
+  extrapolating a coefficient beyond the trained range is unreliable
+  anyway. Verified: a synthetic series with a 40x spend spike across the
+  test window (which diverged before) now fits at ~17% MAPE. The divergence
+  guard stays as defense-in-depth for any other cause.
+
 - **Default `save`/`load`.** statsmodels pickles reliably, so unlike
   Prophet (and unlike the upcoming torch/PyMC parts) SARIMAX needs no
   serialization override.
 
 ### How this was verified
 
-- 26 new tests: 11 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
-  shapes, auto-log detection, train-stat reuse into the future, the
-  short-history Fourier-omission guard, missing-exog and pre-train
-  errors) and 15 in `tests/test_sarimax.py` (fit/predict shapes + bounds +
+- 27 new tests: 12 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
+  shapes, auto-log detection, train-stat reuse into the future, future-exog
+  clamping to the training range, the short-history Fourier-omission guard,
+  missing-exog and pre-train errors) and 15 in `tests/test_sarimax.py`
+  (fit/predict shapes + bounds +
   non-negativity, a reasonable-MAPE sanity floor, the full error contract,
   the all-candidates-fail convergence path, and unit tests for the bias
   correction, the clip, and ADF `d` — plus an end-to-end integration test

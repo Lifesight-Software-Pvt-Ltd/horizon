@@ -70,6 +70,17 @@ def test_transform_future_reuses_train_stats_and_shape():
     assert out["spend"].nunique() == 1
 
 
+def test_transform_future_clamps_out_of_range_exog():
+    adapter = SARIMAXAdapter("date", "orders", ["spend"], "daily")
+    adapter.transform_train(make_raw(60))  # train spend ~ normal(100, 20)
+    fut_dates = pd.Series(pd.date_range("2022-03-05", periods=3, freq="D"))
+    fut = pd.DataFrame({"spend": [1e6, 1e6, 1e6]})  # wildly out of training range
+    out = adapter.transform_future(fut_dates, fut)
+    # clamped down to the standardised training max, not extrapolated
+    assert (out["spend"] <= adapter._std_max["spend"] + 1e-9).all()
+    assert abs(out["spend"].iloc[0] - adapter._std_max["spend"]) < 1e-9
+
+
 def test_transform_future_before_train_raises():
     adapter = SARIMAXAdapter("date", "orders", ["spend"], "daily")
     with pytest.raises(InvalidConfigError):

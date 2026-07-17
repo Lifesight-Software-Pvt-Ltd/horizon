@@ -18,7 +18,10 @@ narrower and specific to how SARIMAX behaves best in practice:
      non-binary -- is log1p'd first (matching the project owner's proven
      notebook approach); 0/1 flags are left as-is. Detection is automatic
      because the library's `independent_columns` is a flat list with no
-     spend/flag metadata.
+     spend/flag metadata. Future exog is clamped to the standardised
+     training range, so an out-of-range test value can't extrapolate a
+     fitted coefficient into a log-space blow-up (a real divergence cause
+     -- see transform_train).
    - Annual seasonality is added as Fourier terms (a DeterministicProcess),
      for BOTH frequencies. This is the only place yearly seasonality comes
      from for weekly data (a real SARIMAX seasonal_order of s=52 is
@@ -94,6 +97,8 @@ class SARIMAXAdapter(BaseAdapter):
         self._log_columns: Optional[List[str]] = None       # independents to log1p
         self._means: Optional[pd.Series] = None             # train mean per independent (post-log)
         self._stds: Optional[pd.Series] = None              # train std per independent (post-log)
+        self._std_min: Optional[pd.Series] = None           # per-col min of standardised TRAIN exog
+        self._std_max: Optional[pd.Series] = None           # per-col max of standardised TRAIN exog
         self._dp: Optional[DeterministicProcess] = None     # annual Fourier process (None if omitted)
         self._fourier_columns: List[str] = []
         self._exog_columns: List[str] = []                  # final exog order (independents + fourier)
@@ -119,6 +124,15 @@ class SARIMAXAdapter(BaseAdapter):
             self._means = exog_ind.mean()
             self._stds = exog_ind.std(ddof=0).replace(0.0, 1.0)  # guard constant columns
             standardized = (exog_ind - self._means) / self._stds
+            # Record the standardised training range per column. transform_future()
+            # clamps future exog to this range so an out-of-range test value (e.g.
+            # a spend spike far above anything seen in training) can't extrapolate
+            # the fitted coefficient into a log-space blow-up. SARIMAX is a linear
+            # model in the exog, so extrapolating a coefficient beyond the trained
+            # range is unreliable anyway -- confirmed on real data: with exog the
+            # forecast diverged (clip-pinned), without it the same series fit fine.
+            self._std_min = standardized.min()
+            self._std_max = standardized.max()
             for col in self.independent_columns:
                 df[col] = standardized[col].to_numpy()
 
@@ -169,6 +183,9 @@ class SARIMAXAdapter(BaseAdapter):
             future_ind = future_independent_df[self.independent_columns].reset_index(drop=True)
             future_ind = future_ind.apply(pd.to_numeric, errors="coerce")
             standardized = (self._apply_log(future_ind) - self._means) / self._stds
+            # Clamp to the standardised training range (see transform_train): no
+            # exog extrapolation beyond what the model was trained on.
+            standardized = standardized.clip(lower=self._std_min, upper=self._std_max, axis=1)
             for col in self.independent_columns:
                 df[col] = standardized[col].to_numpy()
 
