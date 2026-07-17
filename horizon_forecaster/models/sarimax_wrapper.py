@@ -181,9 +181,10 @@ class SARIMAXWrapper(BaseModel):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                forecast = self._results.get_forecast(steps=horizon, exog=exog)
-                mean_log = np.asarray(forecast.predicted_mean, dtype=float)
-                conf_int = np.asarray(forecast.conf_int(alpha=self.alpha), dtype=float)
+                mean_log = np.asarray(
+                    self._results.get_forecast(steps=horizon, exog=exog).predicted_mean,
+                    dtype=float,
+                )
         except Exception as e:
             raise ModelPredictionError(
                 "SARIMAX failed during prediction.",
@@ -191,10 +192,25 @@ class SARIMAXWrapper(BaseModel):
                 original_exception=e,
             )
 
+        # Prediction interval from the CONSTANT innovation variance (sigma^2),
+        # NOT get_forecast()'s horizon-growing forecast variance. Over a long
+        # horizon the growing variance makes the log-space interval enormous,
+        # and back-transforming it with expm1 produces absurd raw-scale upper
+        # bounds (e.g. a [8k, 700k] band around an 80k point forecast, then
+        # mangled further by the clip). A constant band gives a readable,
+        # roughly-multiplicative "typical error" interval instead -- the same
+        # constant-variance philosophy used for the bias correction. Trade-off:
+        # it does not widen formally with horizon; it is a typical-error band,
+        # not a textbook expanding predictive interval. (The ensemble ignores
+        # bounds entirely, so this only affects per-model plots/CSVs.)
+        from scipy.stats import norm
+
+        z = norm.ppf(1.0 - self.alpha / 2.0)
+        sigma = float(np.sqrt(self._resid_var))
         cap = self._train_max_log + self.log_clip_headroom
         yhat = np.expm1(np.clip(mean_log + self._resid_var / 2.0, 0.0, cap))
-        yhat_lower = np.expm1(np.clip(conf_int[:, 0], 0.0, cap))
-        yhat_upper = np.expm1(np.clip(conf_int[:, 1], 0.0, cap))
+        yhat_lower = np.expm1(np.clip(mean_log - z * sigma, 0.0, cap))
+        yhat_upper = np.expm1(np.clip(mean_log + z * sigma, 0.0, cap))
 
         return pd.DataFrame(
             {

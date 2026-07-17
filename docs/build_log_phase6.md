@@ -46,10 +46,21 @@ very-high MAPE).
   model. The transform lives in the wrapper, not the adapter, for exactly
   that reason.
 
-- **First model with native prediction intervals.** `predict()` returns
-  `yhat_lower`/`yhat_upper` from `get_forecast().conf_int()`. This is the
-  first model to exercise the bounds path end-to-end (per-model
-  plots/CSVs); the ensemble still ignores bounds by design.
+- **First model with prediction intervals — as a constant-variance band.**
+  `predict()` returns `yhat_lower`/`yhat_upper`, the first model to
+  exercise the bounds path end-to-end (per-model plots/CSVs; the ensemble
+  still ignores bounds by design). The interval is `mean ± z·σ` in log
+  space using the model's CONSTANT innovation variance `σ²`, NOT
+  `get_forecast().conf_int()`'s horizon-growing forecast variance.
+  Discovered on real data: with the growing variance, a 144-step-ahead
+  forecast produced a `[8k, 700k]` raw-scale band around an accurate ~80k
+  point forecast (the log-space variance balloons over the horizon and
+  `expm1` amplifies the upper bound, then the clip mangles it). The
+  constant band gives a readable, roughly-multiplicative typical-error
+  interval whose width stays stable across the horizon — the same
+  constant-variance philosophy as the bias correction. Trade-off: it does
+  not widen formally with horizon; it is a typical-error band, not a
+  textbook expanding predictive interval.
 
 - **No forecaster-level grid search.** SARIMAX's config carries no
   `hyperparameter_grid`, so the orchestrator (already supporting this —
@@ -105,10 +116,10 @@ very-high MAPE).
 
 ### How this was verified
 
-- 24 new tests: 11 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
+- 25 new tests: 11 in `tests/test_data_adapter_sarimax.py` (exog/Fourier
   shapes, auto-log detection, train-stat reuse into the future, the
   short-history Fourier-omission guard, missing-exog and pre-train
-  errors) and 13 in `tests/test_sarimax.py` (fit/predict shapes + bounds +
+  errors) and 14 in `tests/test_sarimax.py` (fit/predict shapes + bounds +
   non-negativity, a reasonable-MAPE sanity floor, the full error contract,
   the all-candidates-fail convergence path, and unit tests for the bias
   correction, the clip, and ADF `d` — plus an end-to-end integration test

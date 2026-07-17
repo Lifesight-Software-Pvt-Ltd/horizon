@@ -55,6 +55,17 @@ def test_predict_shape_bounds_and_nonnegative(fitted):
     assert (out["yhat_lower"] <= out["yhat_upper"]).all()
 
 
+def test_prediction_interval_is_a_stable_band_not_exploding(fitted):
+    model, _, future, _ = fitted
+    out = model.predict(horizon=len(future), future_exog=future)
+    ratio = (out["yhat_upper"] / out["yhat"]).to_numpy()
+    # Constant-variance band: the upper bound stays a bounded multiple of the
+    # point forecast at every step (no horizon blow-up), and the ratio is
+    # ~constant across steps rather than ballooning far out.
+    assert (ratio < 20).all()
+    assert ratio.max() / ratio.min() < 1.5
+
+
 def test_predict_produces_reasonable_mape(fitted):
     from horizon_forecaster.evaluation.metrics import mape
     model, _, future, y_test = fitted
