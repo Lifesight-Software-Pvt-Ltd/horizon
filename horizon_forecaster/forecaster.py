@@ -31,6 +31,7 @@ import yaml
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
+from horizon_forecaster.data_adapter.sarimax_adapter import SARIMAXAdapter
 from horizon_forecaster.evaluation.ensemble import (
     WEIGHTING_STRATEGIES,
     EnsembleResult,
@@ -46,6 +47,7 @@ from horizon_forecaster.exceptions import (
 from horizon_forecaster.models.base import BaseModel
 from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
+from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
 from horizon_forecaster.utils import (
     clean_zero_variance,
     infer_frequency,
@@ -60,12 +62,13 @@ _FREQUENCY_OFFSETS = {"daily": "D", "weekly": "7D"}
 _HORIZON_WARNING_MULTIPLE = 2
 
 # Every model this orchestrator can run. Only models with a real
-# adapter/wrapper implementation belong here -- sarimax/pymc/
-# neuralprophet are still empty stub files (Phase 6) and are
-# deliberately NOT registered yet.
+# adapter/wrapper implementation belong here. SARIMAX landed in Phase 6
+# (Part 1); pymc/neuralprophet are still empty stub files (Phase 6
+# Parts 2-3) and are deliberately NOT registered yet.
 MODEL_REGISTRY: Dict[str, dict] = {
     "prophet": {"adapter": ProphetAdapter, "wrapper": ProphetWrapper},
     "catboost": {"adapter": CatBoostAdapter, "wrapper": CatBoostWrapper},
+    "sarimax": {"adapter": SARIMAXAdapter, "wrapper": SARIMAXWrapper},
 }
 
 @dataclass

@@ -140,7 +140,7 @@ def test_models_defaults_to_every_registered_model():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert set(forecaster.models) == set(MODEL_REGISTRY.keys())
-    assert set(forecaster.models) == {"prophet", "catboost"}
+    assert set(forecaster.models) == {"prophet", "catboost", "sarimax"}
 
 def test_models_can_be_restricted_to_a_subset():
     df = make_raw_df(n=60)
@@ -150,8 +150,8 @@ def test_models_can_be_restricted_to_a_subset():
 def test_models_raises_on_unknown_model_name():
     df = make_raw_df(n=60)
     with pytest.raises(InvalidConfigError) as exc_info:
-        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet", "sarimax"])
-    assert "sarimax" in str(exc_info.value)
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet", "nonexistent_model"])
+    assert "nonexistent_model" in str(exc_info.value)
 
 def test_models_raises_on_empty_list():
     df = make_raw_df(n=60)
@@ -385,9 +385,10 @@ def test_evaluate_runs_both_models_by_default():
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
     )
     results = forecaster.evaluate()
-    assert set(results.keys()) == {"prophet", "catboost"}
+    assert set(results.keys()) == set(MODEL_REGISTRY.keys())  # every registered model runs by default
     assert isinstance(results["prophet"], EvaluationResult)
     assert isinstance(results["catboost"], EvaluationResult)
+    assert isinstance(results["sarimax"], EvaluationResult)
 
 
 def test_forecast_runs_both_models_by_default():
@@ -397,7 +398,7 @@ def test_forecast_runs_both_models_by_default():
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
     )
     results = forecaster.forecast(horizon=5)
-    assert set(results.keys()) == {"prophet", "catboost"}
+    assert set(results.keys()) == set(MODEL_REGISTRY.keys())  # every registered model runs by default
     for result in results.values():
         assert isinstance(result, ForecastResult)
         assert len(result.forecast) == 5
@@ -417,6 +418,7 @@ def test_evaluate_partial_failure_returns_successful_models_and_records_errors()
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet", "catboost"],  # focused 2-model partial-failure case
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
     )
     results = forecaster.evaluate()
@@ -439,11 +441,11 @@ def test_evaluate_errors_reset_fresh_on_each_call_not_accumulated():
 
 
 def test_evaluate_all_models_fail_raises_all_models_rejected_error_multi_model():
-    df = make_raw_df(n=10)  # below both models' floors
+    df = make_raw_df(n=10)  # below every model's floor
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     with pytest.raises(AllModelsRejectedError) as exc_info:
         forecaster.evaluate()
-    assert set(exc_info.value.rejected_models) == {"prophet", "catboost"}
+    assert set(exc_info.value.rejected_models) == set(MODEL_REGISTRY.keys())
 
 
 def test_grid_search_is_independent_per_model():
@@ -660,6 +662,7 @@ def test_forecast_partial_failure_returns_successful_models():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet", "catboost"],  # focused 2-model partial-failure case
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
     )
     results = forecaster.forecast(horizon=3)
@@ -694,6 +697,7 @@ def test_evaluate_populates_ensemble_with_default_permissive_threshold():
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet", "catboost"],  # 2-model ensemble weighting math
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
     )
     forecaster.evaluate()
@@ -710,6 +714,7 @@ def test_evaluate_ensemble_uses_configured_weighting_strategy():
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet", "catboost"],  # 2-model equal-weighting check
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
         ensemble_weighting="equal",
     )

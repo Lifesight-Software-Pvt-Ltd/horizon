@@ -329,3 +329,55 @@ catboost:
       # Same floor as Prophet's weekly config.
       min_rows_required: 8
       random_seed: 42
+
+# ---------------------------------------------------------------------------
+# SARIMAX (statsmodels). Phase 6, Part 1.
+#
+# Unlike prophet/catboost, SARIMAX has NO hyperparameter_grid: it self-tunes
+# inside the wrapper (ADF picks the differencing order d, then a small
+# exhaustive order space is scored by MAPE on a validation tail carved out of
+# train). forecaster.py therefore runs no grid search for it -- it fits once
+# and selects internally. Everything under base_hyperparameters is interpreted
+# by SARIMAXWrapper itself (NOT passed to any statsmodels constructor blindly);
+# wrapper_config carries only the two settings forecaster.py forwards
+# explicitly (min_rows_required, random_seed).
+#
+# Annual seasonality is handled by Fourier exog terms built in SARIMAXAdapter
+# (both frequencies). Daily additionally uses a cheap weekly SARIMAX seasonal
+# order (s=7); weekly disables the SARIMAX seasonal order entirely (a real
+# s=52 is prohibitively slow) and leans on the Fourier terms.
+sarimax:
+  daily:
+    base_hyperparameters:
+      alpha: 0.05                 # prediction-interval width (yhat_lower/upper)
+      log_clip_headroom: 1.5      # last-resort explosion guard: cap log yhat at train_max + this
+      p_max: 1                    # AR/MA order caps (kept small: higher is exponentially slower)
+      q_max: 1
+      seasonal_cap: 1             # seasonal P/Q caps
+      seasonal_period: 7          # weekly seasonality for daily data
+      use_seasonal: true
+      validation_fraction: 0.15   # tail of train scored by MAPE to pick the order
+      min_validation_rows: 7
+      maxiter_search: 30          # cheap fits during the order search
+      maxiter_final: 150          # thorough fit of the winning order
+      enforce_stationarity_final: true
+    wrapper_config:
+      min_rows_required: 35
+      random_seed: 42
+  weekly:
+    base_hyperparameters:
+      alpha: 0.05
+      log_clip_headroom: 1.5
+      p_max: 1
+      q_max: 1
+      seasonal_cap: 0
+      seasonal_period: 52
+      use_seasonal: false         # Fourier terms handle the yearly cycle; no s=52 SARIMAX order
+      validation_fraction: 0.15
+      min_validation_rows: 4
+      maxiter_search: 30
+      maxiter_final: 150
+      enforce_stationarity_final: true
+    wrapper_config:
+      min_rows_required: 18
+      random_seed: 42
