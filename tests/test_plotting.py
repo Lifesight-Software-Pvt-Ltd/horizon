@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 from horizon_forecaster.plotting import (
     plot_evaluation,
-    plot_evaluation_grid,
+    plot_evaluation_per_model,
     plot_forecast,
-    plot_forecast_grid,
+    plot_forecast_per_model,
     plot_model_comparison,
     save_evaluation_plots,
     save_forecast_plots,
@@ -186,62 +186,60 @@ def test_plot_model_comparison_empty_raises():
         plot_model_comparison({})
 
 
-# ---------- faceted grids ----------
+# ---------- dedicated per-model figures ----------
 
-def _visible_axes(fig):
-    return [a for a in fig.axes if a.get_visible()]
-
-
-def test_plot_evaluation_grid_one_panel_per_model():
+def test_plot_evaluation_per_model_one_figure_each():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
-    fig = plot_evaluation_grid(results)
-    assert len(_visible_axes(fig)) == 2
+    figs = plot_evaluation_per_model(results)
+    assert set(figs) == {"prophet", "catboost"}  # one full-size figure per model
+    assert all(isinstance(f, plt.Figure) for f in figs.values())
 
 
-def test_plot_evaluation_grid_adds_ensemble_panel_when_formed():
+def test_plot_evaluation_per_model_adds_ensemble_figure_when_formed():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
-    fig = plot_evaluation_grid(results, ensemble=make_ensemble())
-    assert len(_visible_axes(fig)) == 3
+    figs = plot_evaluation_per_model(results, ensemble=make_ensemble())
+    assert set(figs) == {"prophet", "catboost", "ensemble"}
 
 
-def test_plot_evaluation_grid_flags_and_omits_panel_when_no_ensemble():
+def test_plot_evaluation_per_model_flags_and_omits_ensemble_when_not_formed():
     results = {"prophet": make_eval_result(5.0)}
-    fig = plot_evaluation_grid(results, ensemble=make_ensemble(combined=False))
-    assert len(_visible_axes(fig)) == 1  # no ensemble panel
-    assert any("No ensemble formed" in t.get_text() for t in fig.texts)
+    figs = plot_evaluation_per_model(results, ensemble=make_ensemble(combined=False))
+    assert set(figs) == {"prophet"}  # no ensemble figure
+    ax = figs["prophet"].axes[0]
+    assert any("No ensemble formed" in t.get_text() for t in ax.texts)
 
 
-def test_plot_evaluation_grid_empty_raises():
+def test_plot_evaluation_per_model_empty_raises():
     with pytest.raises(ValueError):
-        plot_evaluation_grid({})
+        plot_evaluation_per_model({})
 
 
-def test_plot_forecast_grid_one_panel_per_model_plus_ensemble():
+def test_plot_forecast_per_model_one_figure_each_plus_ensemble():
     results = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
-    fig = plot_forecast_grid(results, ensemble=make_ensemble())
-    assert len(_visible_axes(fig)) == 3
+    figs = plot_forecast_per_model(results, ensemble=make_ensemble())
+    assert set(figs) == {"prophet", "catboost", "ensemble"}
 
 
-def test_plot_forecast_grid_empty_raises():
+def test_plot_forecast_per_model_empty_raises():
     with pytest.raises(ValueError):
-        plot_forecast_grid({})
+        plot_forecast_per_model({})
 
 
 # ---------- saving to disk ----------
 
-def test_save_evaluation_plots_writes_three_pngs(tmp_path):
+def test_save_evaluation_plots_writes_overlay_comparison_and_per_model(tmp_path):
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
     written = save_evaluation_plots(results, make_ensemble(), output_dir=str(tmp_path))
-    assert set(written) == {"overlay", "mape_comparison", "grid"}
+    assert set(written) == {"overlay", "mape_comparison", "prophet", "catboost", "ensemble"}
     for path in written.values():
         assert path.endswith(".png")
         assert (tmp_path / path.split("/")[-1]).exists()
 
 
-def test_save_forecast_plots_writes_two_pngs(tmp_path):
+def test_save_forecast_plots_writes_overlay_and_per_model(tmp_path):
     results = {"prophet": make_forecast_result()}
     written = save_forecast_plots(results, ensemble=make_ensemble(), output_dir=str(tmp_path))
-    assert set(written) == {"overlay", "grid"}
+    assert set(written) == {"overlay", "prophet", "ensemble"}
     for path in written.values():
         assert (tmp_path / path.split("/")[-1]).exists()
 

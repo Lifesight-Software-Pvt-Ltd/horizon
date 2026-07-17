@@ -271,12 +271,12 @@ starting a new one.
   ensemble overlay carrying its own MAPE) and `plot_forecast()`
   (per-model forecast, optional history behind it, optional ensemble
   overlay) are compact but crowd as models are added or when models
-  agree and their lines coincide. Faceted grids
-  `plot_evaluation_grid()`/`plot_forecast_grid()` (added after real-use
-  feedback that the overlay was already busy at 2 models) give each model
-  and the ensemble its own panel via shared-axis small multiples, staying
-  legible at any model count; they return a `Figure` rather than a single
-  `Axes`. `plot_model_comparison()` is a MAPE bar chart making the
+  agree and their lines coincide. Dedicated per-model figures
+  `plot_evaluation_per_model()`/`plot_forecast_per_model()` (added after
+  real-use feedback that the overlay was busy at 2 models, and that a
+  first faceted-grid attempt made each panel too small) give each model
+  and the ensemble its own full-size figure, staying legible at any model
+  count; they return a `{label: Figure}` dict rather than a single `Axes`. `plot_model_comparison()` is a MAPE bar chart making the
   "ensemble is not automatically better than the best single model" fact
   from Phase 4 visible at a glance. All of them flag the "ensemble
   requested but none formed" case (every model above `mape_threshold`)

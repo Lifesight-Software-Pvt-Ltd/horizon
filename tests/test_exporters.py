@@ -171,10 +171,11 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
     matplotlib.use("Agg")
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
-    # CSV keys + plot keys
+    # CSV keys + plot keys (overlay + one dedicated figure per model + ensemble)
     assert {"final", "per_model", "rejected"} <= set(written)
-    assert {"plot_overlay", "plot_grid"} <= set(written)
-    for name in ("forecast_final.csv", "forecast_overlay.png", "forecast_grid.png"):
+    assert {"plot_overlay", "plot_prophet", "plot_ensemble"} <= set(written)
+    for name in ("forecast_final.csv", "forecast_overlay.png",
+                 "forecast_prophet.png", "forecast_ensemble.png"):
         assert (tmp_path / name).exists()
 
 
