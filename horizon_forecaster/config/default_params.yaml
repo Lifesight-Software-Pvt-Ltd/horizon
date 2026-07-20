@@ -383,3 +383,67 @@ sarimax:
     wrapper_config:
       min_rows_required: 18
       random_seed: 42
+
+# ---------------------------------------------------------------------------
+# NeuralProphet (torch / PyTorch Lightning). Phase 6, Part 2.
+#
+# Unlike sarimax, this DOES use the standard forecaster-level grid search --
+# the reference notebook already selected by test MAPE, which is exactly what
+# hyperparameter_grid does, so no self-tuning wrapper is needed.
+#
+# n_lags is fixed at 0 (no autoregression) in v1: NeuralProphet fixes
+# n_forecasts at construction while BaseModel is fit-once/predict-any-horizon,
+# and an AR model scored against a frame containing real test actuals is not
+# comparable to the other models (it would be over-weighted by inverse-MAPE
+# ensembling). See models/neuralprophet_wrapper.py for the full reasoning.
+#
+# Both learning_rate AND epochs are pinned: leaving either as None makes
+# NeuralProphet run a learning-rate range test and auto-size epochs, which is
+# slow and makes two runs on the same data non-comparable.
+#
+# yearly_seasonality is "auto", NOT true -- forcing yearly seasonality on
+# short history has already produced garbage twice in this project (Prophet in
+# Phase 2, SARIMAX's annual Fourier in Phase 6 Part 1).
+neuralprophet:
+  daily:
+    base_hyperparameters:
+      n_lags: 0
+      yearly_seasonality: auto
+      weekly_seasonality: true
+      daily_seasonality: false
+      impute_missing: true
+      accelerator: cpu          # pinned so local (MPS) and CI (CPU) agree
+      freq: auto                # wrapper-level; never passed to the constructor
+    hyperparameter_grid:
+      - learning_rate: 0.01
+        epochs: 50
+      - learning_rate: 0.10
+        epochs: 50
+      - learning_rate: 0.01
+        epochs: 150
+      - learning_rate: 0.10
+        epochs: 150
+    wrapper_config:
+      min_rows_required: 30
+      random_seed: 42
+  weekly:
+    base_hyperparameters:
+      n_lags: 0
+      yearly_seasonality: auto
+      weekly_seasonality: false   # meaningless at weekly granularity
+      daily_seasonality: false
+      impute_missing: true
+      accelerator: cpu
+      freq: auto
+    hyperparameter_grid:
+      - learning_rate: 0.01
+        epochs: 50
+      - learning_rate: 0.10
+        epochs: 50
+      - learning_rate: 0.01
+        epochs: 150
+      - learning_rate: 0.10
+        epochs: 150
+    wrapper_config:
+      min_rows_required: 16
+      random_seed: 42

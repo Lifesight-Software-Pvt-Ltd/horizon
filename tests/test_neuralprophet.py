@@ -1,0 +1,189 @@
+"""
+NeuralProphet wrapper tests.
+
+These require the real NeuralProphet (torch / PyTorch Lightning), so the
+whole module is skipped where it isn't installed. Every test here is
+therefore effectively LOCAL-ONLY -- unlike SARIMAX, whose wrapper could be
+exercised in the sandbox. The adapter is covered separately, and without
+this dependency, in tests/test_data_adapter_neuralprophet.py.
+
+Training is deliberately kept tiny (few epochs, short series) so the suite
+stays tolerable: NeuralProphet is by far the slowest model registered.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+pytest.importorskip("neuralprophet")  # local-only: skips where NP isn't installed
+
+from horizon_forecaster.data_adapter.neural_prophet_adapter import NeuralProphetAdapter
+from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
+from horizon_forecaster.exceptions import (
+    InsufficientDataError,
+    ModelPredictionError,
+)
+
+FAST_PARAMS = {
+    "n_lags": 0,
+    "epochs": 5,               # tiny: these tests check contract, not accuracy
+    "learning_rate": 0.1,
+    "yearly_seasonality": False,
+    "weekly_seasonality": False,
+    "daily_seasonality": False,
+    "accelerator": "cpu",
+}
+
+
+def make_adapted(n=80, with_regressors=True, test_size=10, seed=0, negative=False):
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2022-01-01", periods=n, freq="D")
+    y = 100 + np.arange(n) + rng.normal(0, 3, n)
+    if negative:
+        y = y - 500  # force a signed target, to exercise the clipping decision
+    spend = np.abs(rng.normal(200, 30, n)) + 1.0
+    raw = pd.DataFrame({"date": dates, "orders": y, "spend": spend})
+
+    cols = ["spend"] if with_regressors else []
+    adapter = NeuralProphetAdapter("date", "orders", cols, "daily")
+    train, test = raw.iloc[: n - test_size], raw.iloc[n - test_size:]
+    adapted_train = adapter.transform_train(train)
+    adapted_future = adapter.transform_future(
+        pd.Series(test["date"].to_numpy()), test[cols] if cols else None
+    )
+    return adapted_train, adapted_future, test["orders"].to_numpy()
+
+
+@pytest.fixture(scope="module")
+def fitted():
+    train, future, y_test = make_adapted()
+    model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30, random_seed=42)
+    model.fit(train)
+    return model, train, future, y_test
+
+
+# ---------- fit / predict basics ----------
+
+def test_fit_sets_is_fitted_and_records_regressors(fitted):
+    model, *_ = fitted
+    assert model.is_fitted
+    assert model._regressor_columns == ["spend"]
+
+
+def test_predict_returns_ds_and_yhat_only_without_bounds(fitted):
+    model, _, future, _ = fitted
+    out = model.predict(horizon=len(future), future_exog=future)
+    # v1 deliberately emits no uncertainty bounds (see BaseModel contract)
+    assert list(out.columns) == ["ds", "yhat"]
+    assert len(out) == len(future)
+    assert out["yhat"].notna().all()
+
+
+def test_predict_needs_no_training_history():
+    """
+    With n_lags=0 the future frame is built directly from future_exog, so
+    predict() must work without the wrapper retaining any training data.
+    """
+    train, future, _ = make_adapted()
+    model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30)
+    model.fit(train)
+    assert not hasattr(model, "_train_df")
+    assert len(model.predict(horizon=len(future), future_exog=future)) == len(future)
+
+
+# ---------- error contract ----------
+
+def test_predict_before_fit_raises():
+    model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30)
+    with pytest.raises(ModelPredictionError):
+        model.predict(5, future_exog=None)
+
+
+def test_insufficient_data_raises():
+    train, _, _ = make_adapted()
+    model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30)
+    with pytest.raises(InsufficientDataError):
+        model.fit(train.iloc[:10])
+
+
+def test_predict_with_none_future_exog_raises(fitted):
+    model, *_ = fitted
+    with pytest.raises(ModelPredictionError):
+        model.predict(horizon=5, future_exog=None)
+
+
+def test_predict_horizon_mismatch_raises(fitted):
+    model, _, future, _ = fitted
+    with pytest.raises(ModelPredictionError):
+        model.predict(horizon=len(future) + 3, future_exog=future)
+
+
+def test_predict_missing_regressor_raises(fitted):
+    model, _, future, _ = fitted
+    with pytest.raises(ModelPredictionError):
+        model.predict(horizon=len(future), future_exog=future.drop(columns=["spend"]))
+
+
+# ---------- clipping + determinism ----------
+
+def test_clips_negatives_when_training_target_was_non_negative(fitted):
+    model, _, future, _ = fitted
+    out = model.predict(horizon=len(future), future_exog=future)
+    assert (out["yhat"] >= 0).all()
+
+
+def test_does_not_clip_when_training_target_was_negative():
+    train, future, _ = make_adapted(negative=True)
+    model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30)
+    model.fit(train)
+    assert model._target_min < 0  # clipping decision is data-driven, so it must be off
+
+
+def test_same_seed_gives_identical_predictions():
+    """NeuralProphet is stochastic; without seeding, repeat runs drift."""
+    train, future, _ = make_adapted()
+    preds = []
+    for _ in range(2):
+        model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30, random_seed=7)
+        model.fit(train)
+        preds.append(model.predict(horizon=len(future), future_exog=future)["yhat"].to_numpy())
+    np.testing.assert_allclose(preds[0], preds[1], rtol=1e-5)
+
+
+# ---------- persistence ----------
+
+def test_save_load_roundtrip_preserves_prediction(tmp_path, fitted):
+    model, _, future, _ = fitted
+    path = str(tmp_path / "np_model")
+    model.save(path)
+    loaded = NeuralProphetWrapper.load(path)
+    before = model.predict(len(future), future)["yhat"].to_numpy()
+    after = loaded.predict(len(future), future)["yhat"].to_numpy()
+    np.testing.assert_allclose(before, after, rtol=1e-5)
+    assert loaded._regressor_columns == model._regressor_columns
+
+
+# ---------- integration through the orchestrator ----------
+
+def test_neuralprophet_is_registered_and_flows_through_forecaster():
+    from horizon_forecaster.forecaster import HorizonForecaster, MODEL_REGISTRY
+
+    assert "neuralprophet" in MODEL_REGISTRY
+
+    rng = np.random.default_rng(3)
+    n = 120
+    df = pd.DataFrame({
+        "date": pd.date_range("2022-01-01", periods=n, freq="D"),
+        "orders": np.clip(200 + 1.5 * np.arange(n) + rng.normal(0, 10, n), 1, None),
+    })
+    f = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["neuralprophet"], mape_threshold=100,
+        model_params={"neuralprophet": dict(FAST_PARAMS)},  # skip the grid: keep it fast
+    )
+    results = f.evaluate()
+    assert "neuralprophet" in results
+    assert "yhat_lower" not in results["neuralprophet"].test_predictions.columns
+
+    forecasts = f.forecast(horizon=7)
+    assert len(forecasts["neuralprophet"].forecast) == 7

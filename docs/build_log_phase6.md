@@ -201,8 +201,120 @@ pass, all model-agnostic:
   model's MAPE, ensemble weight and status, so the call is made per run
   with the evidence in hand.
 
-### Deliberately out of scope for Part 1
+### Deliberately out of scope for Part 1 (superseded by Part 2, below)
 
 Parts 2 and 3 (the other two models) are untouched: their adapter/wrapper
 stub files remain empty and unregistered. Phase 7 (future-exogenous-data
 strategies) is still deferred until all five adapters exist.
+
+---
+
+## Part 2 — NeuralProphet (torch / PyTorch Lightning)
+
+### Goal
+
+Add NeuralProphet as the fourth registered model, porting the project
+owner's working notebook grid while fixing an evaluation-comparability
+problem in it, and isolating the two new mechanics (torch serialization,
+stochastic determinism) before PyMC's structural-model complexity in
+Part 3.
+
+### What was built
+
+- `data_adapter/neural_prophet_adapter.py` — a **stateless** adapter,
+  essentially ProphetAdapter (NeuralProphet shares the ds/y convention).
+- `models/neuralprophet_wrapper.py` — the model-specific logic, with
+  overridden `save`/`load` for torch state.
+- `neuralprophet:` config block (daily/weekly) and one `MODEL_REGISTRY`
+  line.
+
+### The problem in the reference notebook, and why it mattered
+
+The notebook grid-searched `n_lags` in {0, 7} and called
+`m.predict(df_all)` — a frame **containing the test period's real `y`
+values**. With `n_lags=0` that's harmless. With `n_lags>0` NeuralProphet
+is autoregressive, so every test point becomes an effectively
+one-step-ahead prediction that has already seen recent actuals.
+
+Ported as-is, that would have been actively harmful here, for three
+reasons:
+
+1. **Not comparable.** Prophet, CatBoost and SARIMAX forecast the whole
+   test window blind. A one-step-ahead-with-actuals MAPE looks far better
+   for reasons unrelated to model quality.
+2. **It would corrupt the ensemble.** That flattered MAPE feeds
+   inverse-MAPE weighting, so NeuralProphet would be systematically
+   over-weighted against honestly-scored models.
+3. **The contract can't express it.** `predict(horizon, future_exog)` has
+   no actuals to hand the model.
+
+There is also a genuine contract tension: NeuralProphet fixes
+`n_forecasts` at construction, whereas `BaseModel` is
+fit-once-then-predict-any-horizon. Supporting AR properly would mean
+refitting per horizon, breaking the cached-refit design — by this
+project's own gate rule, a contract-gap signal rather than something to
+special-case in a wrapper. **v1 therefore uses `n_lags=0`**, and AR is
+deferred to a separate contract discussion.
+
+Consequence to expect on real data: if `n_lags=7` won the notebook grid,
+this implementation will score *worse* than the notebook's number. That is
+the leakage being removed, not a regression.
+
+### Key design decisions
+
+- **Raw pass-through in the adapter.** NeuralProphet normalises
+  internally (`normalize='auto'`), so — in direct contrast to
+  SARIMAXAdapter's log1p + standardise + clamp — transforming here would
+  double-normalise. The adapter does nothing but rename and sort.
+- **Future frame built directly, not via `make_future_dataframe()`.** With
+  `n_lags=0` a prediction depends only on `ds` + regressors, so the frame
+  is just `future_exog` with `y=NaN`. This is why the wrapper retains **no
+  training history**, which keeps `save`/`load` a clean model-only
+  operation instead of also persisting a DataFrame.
+- **Standard forecaster grid search**, unlike SARIMAX. The notebook
+  already selected by test MAPE, which is exactly what
+  `hyperparameter_grid` does — so `learning_rate` × `epochs` (4
+  candidates) drops straight into the existing mechanism.
+- **CPU pinned, logging silenced.** NeuralProphet runs on PyTorch
+  Lightning and will otherwise pick MPS locally and CPU in CI, producing
+  different numbers from identical code. It is also extremely chatty;
+  `progress=False` alone doesn't quiet it.
+- **`epochs` and `learning_rate` both pinned.** If either is `None`,
+  NeuralProphet runs a learning-rate range test and auto-sizes epochs —
+  slow, and it makes two runs on the same data non-comparable.
+- **`yearly_seasonality="auto"`, not the notebook's `True`.** Forcing
+  yearly seasonality on short history has already produced garbage twice
+  in this project (Prophet, Phase 2; SARIMAX's annual Fourier, Part 1).
+- **Seeded** via `set_random_seed` — NeuralProphet is stochastic, and the
+  notebook version drifted between runs. Same bug class as Prophet's
+  unseeded uncertainty intervals in Phase 2.
+- **Data-driven non-negative clipping**, mirroring `CatBoostWrapper`,
+  rather than the notebook's unconditional `np.clip(..., 0, None)`.
+- **No uncertainty bounds in v1**, per `models/base.py`. NeuralProphet can
+  produce them via `quantiles=[...]`, a natural follow-up now the
+  plotting/export layers handle bounds.
+
+### How this was verified
+
+- 8 adapter tests in `tests/test_data_adapter_neuralprophet.py` pass in
+  the sandbox (shapes, raw pass-through, sorting, missing-column errors,
+  statelessness).
+- `tests/test_neuralprophet.py` (wrapper + integration) is guarded by
+  `pytest.importorskip("neuralprophet")` and covers fit/predict shape,
+  **absence** of bounds columns, predicting without retained history, the
+  full error contract, data-driven clipping both ways, seed determinism,
+  `save`/`load` round-trip, and end-to-end flow through the orchestrator.
+
+### Known verification gap
+
+NeuralProphet cannot be installed in the sandbox (torch exceeds the time
+limit), so **every wrapper and integration test here is local-only** — a
+materially bigger gap than Part 1, where SARIMAX ran fully in-sandbox. The
+NeuralProphet constructor kwargs in particular (`accelerator`,
+`impute_missing`) are specced from the 0.8 API but unverified against the
+installed build; the wrapper now embeds the underlying exception text in
+its `ModelConvergenceError` message so a rejected keyword is immediately
+identifiable rather than looking like a convergence failure.
+
+Runtime: 4 candidates × torch training × (evaluate + forecast refit) adds
+meaningfully to the local suite, which was already ~25 minutes.

@@ -140,7 +140,7 @@ def test_models_defaults_to_every_registered_model():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert set(forecaster.models) == set(MODEL_REGISTRY.keys())
-    assert set(forecaster.models) == {"prophet", "catboost", "sarimax"}
+    assert set(forecaster.models) == {"prophet", "catboost", "sarimax", "neuralprophet"}
 
 def test_models_can_be_restricted_to_a_subset():
     df = make_raw_df(n=60)
