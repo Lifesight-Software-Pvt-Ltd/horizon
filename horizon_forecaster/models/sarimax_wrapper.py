@@ -94,6 +94,19 @@ class SARIMAXWrapper(BaseModel):
         self.maxiter_search = p.get("maxiter_search", 30)
         self.maxiter_final = p.get("maxiter_final", 150)
         self.enforce_stationarity_final = p.get("enforce_stationarity_final", True)
+        # Anchor the explosion clip on a high QUANTILE of the training target
+        # rather than its raw max: on spiky data a single outlier max inflates
+        # the cap enormously (a real series with a lone 849k spike gave a 3.8e6
+        # cap, so a diverged forecast could still sit at 3.8e6 before tripping
+        # any guard). A quantile anchor keeps the cap tied to the bulk of the
+        # data. Set to 1.0 to restore the old max-anchored behaviour.
+        self.clip_anchor_quantile = p.get("clip_anchor_quantile", 0.99)
+        # Lognormal bias correction (+sigma^2/2). ON by default, but note the
+        # tension: MAPE -- which this library selects on and reports -- is
+        # minimised by the conditional MEDIAN, and expm1(mean_log) already IS
+        # the median; the correction targets the MEAN. Turn this off for
+        # strictly MAPE-optimal point forecasts.
+        self.bias_correction = p.get("bias_correction", True)
 
     # ---------- fit ----------
 
@@ -141,7 +154,7 @@ class SARIMAXWrapper(BaseModel):
         self._order = order
         self._seasonal_order = seasonal_order
         self._d = d
-        self._train_max_log = float(np.nanmax(y_log))
+        self._clip_anchor_log = float(np.nanquantile(y_log, self.clip_anchor_quantile))
         self._resid_var = self._innovation_variance(results)
         self.is_fitted = True
         return self
@@ -207,8 +220,8 @@ class SARIMAXWrapper(BaseModel):
 
         z = norm.ppf(1.0 - self.alpha / 2.0)
         sigma = float(np.sqrt(self._resid_var))
-        cap = self._train_max_log + self.log_clip_headroom
-        corrected_log = mean_log + self._resid_var / 2.0
+        cap = self._clip_anchor_log + self.log_clip_headroom
+        corrected_log = mean_log + self._bias_shift()
 
         # Divergence guard. A SARIMAX fit can blow up in log space -- an
         # (near-)explosive AR root, or an exogenous coefficient extrapolating
@@ -368,9 +381,15 @@ class SARIMAXWrapper(BaseModel):
         except Exception:
             return None
 
+    def _bias_shift(self, resid_var: Optional[float] = None) -> float:
+        """+sigma^2/2 lognormal correction, or 0 when bias_correction is off."""
+        if not self.bias_correction:
+            return 0.0
+        return (self._resid_var if resid_var is None else resid_var) / 2.0
+
     def _back_transform(self, mean_log, resid_var, train_max_log) -> np.ndarray:
         cap = train_max_log + self.log_clip_headroom
-        return np.expm1(np.clip(mean_log + resid_var / 2.0, 0.0, cap))
+        return np.expm1(np.clip(mean_log + self._bias_shift(resid_var), 0.0, cap))
 
     @staticmethod
     def _innovation_variance(results) -> float:

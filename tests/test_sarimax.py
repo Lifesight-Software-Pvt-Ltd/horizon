@@ -73,7 +73,7 @@ def test_divergence_guard_rejects_clip_saturated_forecast():
     train, future, _ = make_adapted()
     model = SARIMAXWrapper("daily", {}, min_rows_required=35)
     model.fit(train)
-    model._train_max_log = -5.0  # force the clip cap far below any real forecast
+    model._clip_anchor_log = -5.0  # force the clip cap far below any real forecast
     with pytest.raises(ModelPredictionError):
         model.predict(horizon=len(future), future_exog=future)
 
@@ -133,6 +133,25 @@ def test_bias_correction_lifts_point_forecast():
     base = model._back_transform(np.array([2.0, 2.0]), resid_var=0.0, train_max_log=10.0)
     lifted = model._back_transform(np.array([2.0, 2.0]), resid_var=0.5, train_max_log=10.0)
     assert (lifted > base).all()
+
+
+def test_bias_correction_can_be_disabled():
+    off = SARIMAXWrapper("daily", {"log_clip_headroom": 100.0, "bias_correction": False})
+    on = SARIMAXWrapper("daily", {"log_clip_headroom": 100.0})
+    args = (np.array([2.0]), 0.5, 10.0)
+    assert off._back_transform(*args)[0] < on._back_transform(*args)[0]
+    # with the correction off, the point forecast is exactly the median
+    assert off._back_transform(*args)[0] == pytest.approx(np.expm1(2.0))
+
+
+def test_clip_anchor_uses_quantile_not_raw_max():
+    # one huge outlier must not inflate the explosion cap
+    train, _, _ = make_adapted()
+    train = train.copy()
+    train.loc[train.index[0], "y"] = train["y"].max() * 100
+    model = SARIMAXWrapper("daily", {}, min_rows_required=35)
+    model.fit(train)
+    assert model._clip_anchor_log < float(np.log1p(train["y"].max()))
 
 
 def test_clip_prevents_explosion():

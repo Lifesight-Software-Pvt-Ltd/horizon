@@ -636,6 +636,84 @@ def test_forecast_does_not_warn_when_horizon_is_reasonable():
         warnings.simplefilter("error")  # any warning becomes a test failure
         forecaster.forecast(horizon=10)  # well within 2x of 60 rows of history
 
+def test_forecast_warns_once_horizon_exceeds_half_of_history():
+    """
+    The old rule only fired above 2x the ENTIRE history, so forecasting
+    100 periods from 121 was silent -- the case that produced a real
+    implausible forecast. Now half the history is enough to flag.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["catboost"]
+    )
+    with pytest.warns(UserWarning, match="Forecasting 40 periods from only 60 periods"):
+        forecaster.forecast(horizon=40)
+
+
+def test_forecast_warns_when_future_independent_data_is_auto_generated():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["catboost"],
+    )
+    with pytest.warns(UserWarning, match="auto-generated"):
+        forecaster.forecast(horizon=5)
+
+
+def test_forecast_does_not_warn_about_exog_when_it_is_supplied():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["catboost"],
+    )
+    forecaster.evaluate()
+    future_spend = pd.DataFrame({"spend": [200, 201, 202]})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.forecast(horizon=3, future_independent_data=future_spend)
+    assert not any("auto-generated" in str(w.message) for w in caught)
+
+
+def test_warns_when_a_forecast_lands_far_above_history():
+    df = make_raw_df(n=60)  # orders top out at 218
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["catboost"]
+    )
+    absurd = {
+        "catboost": ForecastResult(
+            model_name="catboost",
+            forecast=pd.DataFrame({"ds": pd.date_range("2026-04-01", periods=2), "yhat": [500.0, 900.0]}),
+            horizon=2,
+            used_default_future_strategy=False,
+        )
+    }
+    with pytest.warns(UserWarning, match="more than 50% above"):
+        forecaster._warn_on_forecasts_far_outside_history(absurd)
+
+
+def test_no_range_warning_for_a_normally_trending_forecast():
+    """
+    A trending series legitimately forecasts past its historical max --
+    that must NOT warn, or the check would fire on every healthy trend.
+    """
+    df = make_raw_df(n=60)  # tops out at 218
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["catboost"]
+    )
+    reasonable = {
+        "catboost": ForecastResult(
+            model_name="catboost",
+            forecast=pd.DataFrame({"ds": pd.date_range("2026-04-01", periods=2), "yhat": [220.0, 232.0]}),
+            horizon=2,
+            used_default_future_strategy=False,
+        )
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster._warn_on_forecasts_far_outside_history(reasonable)
+    assert not any("above the highest value" in str(w.message) for w in caught)
+
+
 def test_forecast_weekly_frequency_produces_correct_future_dates():
     df = make_raw_df(n=40, freq="7D")
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])

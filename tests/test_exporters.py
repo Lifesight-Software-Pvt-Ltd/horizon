@@ -5,7 +5,9 @@ import pytest
 from types import SimpleNamespace
 
 from horizon_forecaster.exporters import (
+    build_best_model_forecast_table,
     build_final_forecast_table,
+    build_model_summary_table,
     build_per_model_forecast_table,
     build_rejected_models_table,
     export_forecast,
@@ -89,6 +91,52 @@ def test_build_per_model_table_empty_is_shaped():
     assert len(table) == 0
 
 
+# ---------- best-model forecast table ----------
+
+def test_build_best_model_table_picks_lowest_mape():
+    results = {
+        "prophet": make_forecast_result([1.0, 2.0, 3.0]),
+        "catboost": make_forecast_result([4.0, 5.0, 6.0]),
+    }
+    table = build_best_model_forecast_table(results, {"prophet": 29.7, "catboost": 21.3})
+    assert set(table["model"]) == {"catboost"}  # lower MAPE wins
+    assert list(table["yhat"]) == [4.0, 5.0, 6.0]
+
+
+def test_build_best_model_table_ignores_nan_scores():
+    results = {"a": make_forecast_result([1.0]), "b": make_forecast_result([2.0])}
+    table = build_best_model_forecast_table(results, {"a": float("nan"), "b": 40.0})
+    assert set(table["model"]) == {"b"}
+
+
+def test_build_best_model_table_empty_without_scores():
+    results = {"a": make_forecast_result([1.0])}
+    assert len(build_best_model_forecast_table(results, None)) == 0
+    assert len(build_best_model_forecast_table({}, {"a": 10.0})) == 0
+
+
+# ---------- model summary table ----------
+
+def test_build_model_summary_reports_mape_weight_and_status():
+    err = ThresholdRejectionError("bad", model_name="sarimax", mape_value=1403.0, allowed_max=30.0)
+    ens = make_ensemble(rejected={"sarimax": err})  # weights = {"prophet": 1.0}
+    table = build_model_summary_table(
+        {"prophet": 29.71, "sarimax": 1403.0}, ens, ensemble_mape=22.40
+    )
+    assert list(table.columns) == ["model", "mape", "ensemble_weight", "status"]
+    by_model = table.set_index("model")
+    assert by_model.loc["prophet", "status"] == "in_ensemble"
+    assert by_model.loc["prophet", "ensemble_weight"] == 1.0
+    assert by_model.loc["sarimax", "status"] == "rejected"
+    assert by_model.loc["ensemble", "mape"] == 22.40
+
+
+def test_build_model_summary_empty_is_shaped():
+    table = build_model_summary_table(None, None)
+    assert list(table.columns) == ["model", "mape", "ensemble_weight", "status"]
+    assert len(table) == 0
+
+
 # ---------- rejected models table ----------
 
 def test_build_rejected_models_table_content():
@@ -129,11 +177,11 @@ def test_export_writes_three_readable_files(tmp_path):
 
     written = export_forecast_csvs(results, ens, output_dir=str(tmp_path))
 
-    assert set(written) == {"final", "per_model", "rejected"}
+    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
     for path in written.values():
         assert pd.read_csv(path) is not None  # re-reads without error
 
-    final = pd.read_csv(written["final"])
+    final = pd.read_csv(written["final_ensemble"])
     assert list(final["yhat"]) == [12.0, 20.0, 32.0]
     rejected = pd.read_csv(written["rejected"])
     assert rejected.iloc[0]["model"] == "catboost"
@@ -142,8 +190,8 @@ def test_export_writes_three_readable_files(tmp_path):
 def test_export_creates_missing_nested_dir(tmp_path):
     target = tmp_path / "a" / "b"
     written = export_forecast_csvs({"prophet": make_forecast_result([1.0])}, make_ensemble(), output_dir=str(target))
-    assert (target / "forecast_final.csv").exists()
-    assert written["final"].endswith("forecast_final.csv")
+    assert (target / "forecast_final_ensemble.csv").exists()
+    assert written["final_ensemble"].endswith("forecast_final_ensemble.csv")
 
 
 def test_export_uses_custom_prefix(tmp_path):
@@ -151,7 +199,7 @@ def test_export_uses_custom_prefix(tmp_path):
         {"prophet": make_forecast_result([1.0])}, make_ensemble(),
         output_dir=str(tmp_path), prefix="run42",
     )
-    assert (tmp_path / "run42_final.csv").exists()
+    assert (tmp_path / "run42_final_ensemble.csv").exists()
     assert (tmp_path / "run42_per_model.csv").exists()
     assert (tmp_path / "run42_rejected_models.csv").exists()
 
@@ -172,9 +220,9 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
     # CSV keys + plot keys (overlay + one dedicated figure per model + ensemble)
-    assert {"final", "per_model", "rejected"} <= set(written)
+    assert {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"} <= set(written)
     assert {"plot_overlay", "plot_prophet", "plot_ensemble"} <= set(written)
-    for name in ("forecast_final.csv", "forecast_overlay.png",
+    for name in ("forecast_final_ensemble.csv", "forecast_overlay.png",
                  "forecast_prophet.png", "forecast_ensemble.png"):
         assert (tmp_path / name).exists()
 
@@ -182,12 +230,12 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
 def test_export_forecast_save_plots_false_writes_only_csvs(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path), save_plots=False)
-    assert set(written) == {"final", "per_model", "rejected"}
+    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
     assert not list(tmp_path.glob("*.png"))
 
 
 def test_export_forecast_empty_still_writes_csvs_no_plots(tmp_path):
     # No forecasts: CSVs written (header-only), plots skipped rather than raising.
     written = export_forecast({}, None, output_dir=str(tmp_path))
-    assert set(written) == {"final", "per_model", "rejected"}
+    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
     assert not list(tmp_path.glob("*.png"))

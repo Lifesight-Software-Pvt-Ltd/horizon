@@ -350,7 +350,9 @@ sarimax:
   daily:
     base_hyperparameters:
       alpha: 0.05                 # prediction-interval width (yhat_lower/upper)
-      log_clip_headroom: 1.5      # last-resort explosion guard: cap log yhat at train_max + this
+      log_clip_headroom: 1.5      # last-resort explosion guard: cap log yhat at the anchor + this
+      clip_anchor_quantile: 0.99  # anchor that cap on a high quantile, not the raw max (spike-robust)
+      bias_correction: true       # +sigma^2/2 lognormal lift; set false for strictly MAPE-optimal (median) points
       p_max: 1                    # AR/MA order caps (kept small: higher is exponentially slower)
       q_max: 1
       seasonal_cap: 1             # seasonal P/Q caps

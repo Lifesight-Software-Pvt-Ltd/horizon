@@ -59,7 +59,20 @@ from horizon_forecaster.utils import (
 _CONFIG_PATH = Path(__file__).parent / "config" / "default_params.yaml"
 _FREQUENCY_OFFSETS = {"daily": "D", "weekly": "7D"}
 
-_HORIZON_WARNING_MULTIPLE = 2
+# Warn once the requested horizon exceeds this fraction of the available
+# history. Deliberately strict: the previous rule only fired when the
+# horizon exceeded TWICE the entire history, so forecasting 100 weeks from
+# 121 weeks of data passed silently -- exactly the case that produced an
+# implausible real-world forecast. Forecasting more than half your history
+# ahead is already a stretch and deserves a flag.
+_HORIZON_WARNING_FRACTION = 0.5
+
+# Forecasts are flagged when they peak more than this far above (or bottom
+# this far below) anything ever observed in the target. A trending series
+# legitimately forecasts past its historical max, so a plain
+# "outside the historical range" rule would false-positive constantly --
+# this margin only trips on implausible departures.
+_FORECAST_RANGE_TOLERANCE = 0.5
 
 # Every model this orchestrator can run. Only models with a real
 # adapter/wrapper implementation belong here. SARIMAX landed in Phase 6
@@ -609,6 +622,49 @@ class HorizonForecaster:
             used_default_future_strategy=used_default_strategy,
         )
 
+    def _warn_on_forecasts_far_outside_history(self, results: Dict[str, ForecastResult]) -> None:
+        """
+        Flag any model whose forecast departs implausibly far from every
+        value ever observed in the target.
+
+        A trending series legitimately forecasts past its historical
+        maximum, so this deliberately does NOT warn on merely leaving the
+        historical range -- only on exceeding it by more than
+        _FORECAST_RANGE_TOLERANCE. This is model-agnostic: it catches an
+        over-forecast regardless of which model produced it, including
+        ones driven by auto-generated future independent values.
+        """
+        actuals = pd.to_numeric(self.raw_df[self.target_column], errors="coerce").dropna()
+        if actuals.empty:
+            return
+
+        hist_min, hist_max = float(actuals.min()), float(actuals.max())
+        upper = hist_max * (1 + _FORECAST_RANGE_TOLERANCE) if hist_max > 0 else None
+        lower = hist_min * (1 - _FORECAST_RANGE_TOLERANCE) if hist_min > 0 else None
+        pct = int(_FORECAST_RANGE_TOLERANCE * 100)
+
+        for model_name, result in results.items():
+            yhat = pd.to_numeric(result.forecast["yhat"], errors="coerce").dropna()
+            if yhat.empty:
+                continue
+
+            if upper is not None and float(yhat.max()) > upper:
+                warnings.warn(
+                    f"{model_name}: forecast peaks at {float(yhat.max()):,.0f}, more than "
+                    f"{pct}% above the highest value ever observed ({hist_max:,.0f}). "
+                    f"Sanity-check the inputs before trusting this -- especially any "
+                    f"auto-generated future independent values, and whether the horizon "
+                    f"is too long for the available history.",
+                    stacklevel=3,
+                )
+            elif lower is not None and float(yhat.min()) < lower:
+                warnings.warn(
+                    f"{model_name}: forecast bottoms at {float(yhat.min()):,.0f}, more than "
+                    f"{pct}% below the lowest value ever observed ({hist_min:,.0f}). "
+                    f"Sanity-check the inputs before trusting this.",
+                    stacklevel=3,
+                )
+
     def forecast(
         self, horizon: int, future_independent_data: Optional[pd.DataFrame] = None
     ) -> Dict[str, ForecastResult]:
@@ -650,12 +706,24 @@ class HorizonForecaster:
             )
 
         n_total = len(self.raw_df)
-        if horizon > _HORIZON_WARNING_MULTIPLE * n_total:
+        if horizon > _HORIZON_WARNING_FRACTION * n_total:
             warnings.warn(
                 f"Forecasting {horizon} periods from only {n_total} periods of history. "
                 f"Forecasts this far beyond the available history should be treated with "
                 f"caution — uncertainty intervals may understate the true risk of "
                 f"extrapolating this far.",
+                stacklevel=2,
+            )
+
+        if self.independent_columns and future_independent_data is None:
+            warnings.warn(
+                f"No future_independent_data was supplied, so values for "
+                f"{self.independent_columns} were auto-generated for all {horizon} "
+                f"periods by reusing/cycling historical values. The forecast is only "
+                f"as reliable as those assumed inputs -- for an exogenous-variable-"
+                f"driven model this can dominate the result. Supply real planned "
+                f"values if you have them, and treat this output as a scenario "
+                f"rather than a prediction if you don't.",
                 stacklevel=2,
             )
 
@@ -688,6 +756,7 @@ class HorizonForecaster:
                 errors[model_name] = e
 
         self.forecast_errors = errors
+        self._warn_on_forecasts_far_outside_history(results)
 
         if not results:
             self.forecast_ensemble = None

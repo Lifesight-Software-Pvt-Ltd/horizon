@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy sta
 _FINAL_COLUMNS = ["ds", "yhat"]
 _PER_MODEL_BASE_COLUMNS = ["model", "ds", "yhat"]
 _REJECTED_COLUMNS = ["model", "mape", "mape_threshold", "reason"]
+_SUMMARY_COLUMNS = ["model", "mape", "ensemble_weight", "status"]
 
 
 def build_final_forecast_table(ensemble: "Optional[EnsembleResult]") -> pd.DataFrame:
@@ -87,6 +88,86 @@ def build_per_model_forecast_table(
     return combined[ordered]
 
 
+def build_best_model_forecast_table(
+    forecast_results: "Dict[str, ForecastResult]",
+    per_model_mape: "Optional[Dict[str, float]]" = None,
+) -> pd.DataFrame:
+    """
+    The single best-scoring model's forecast, as a ["model", "ds", "yhat"]
+    table (+ bounds where that model provides them).
+
+    Exists because a weighted ensemble is NOT guaranteed to beat the best
+    individual model (see evaluation/ensemble.py) -- exporting only the
+    blend can mean shipping the worse forecast. This is written alongside
+    the ensemble so the choice can be made per run rather than baked in.
+
+    `per_model_mape` is {model_name: mape} from evaluate(); the lowest
+    finite MAPE wins. Returns a header-only DataFrame when no scores (or
+    no forecasts) are available.
+    """
+    if not forecast_results or not per_model_mape:
+        return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
+
+    scored = {
+        name: value
+        for name, value in per_model_mape.items()
+        if name in forecast_results and value == value  # drop NaN
+    }
+    if not scored:
+        return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
+
+    best = min(scored, key=scored.get)
+    table = forecast_results[best].forecast.copy()
+    table.insert(0, "model", best)
+    ordered = [c for c in _PER_MODEL_BASE_COLUMNS if c in table.columns]
+    ordered += [c for c in ("yhat_lower", "yhat_upper") if c in table.columns]
+    ordered += [c for c in table.columns if c not in ordered]
+    return table[ordered]
+
+
+def build_model_summary_table(
+    per_model_mape: "Optional[Dict[str, float]]" = None,
+    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble_mape: "Optional[float]" = None,
+) -> pd.DataFrame:
+    """
+    One row per model with its MAPE, ensemble weight and status, plus an
+    "ensemble" row when its own score is supplied -- the at-a-glance table
+    for deciding whether to act on the blend or a single model.
+
+    Columns: ["model", "mape", "ensemble_weight", "status"], where status
+    is "in_ensemble", "rejected" (excluded by the MAPE threshold), or
+    "not_in_ensemble".
+    """
+    weights = ensemble.weights if ensemble is not None else {}
+    rejected = ensemble.rejected_models if ensemble is not None else {}
+
+    rows = []
+    for name, value in (per_model_mape or {}).items():
+        if name in weights:
+            status = "in_ensemble"
+        elif name in rejected:
+            status = "rejected"
+        else:
+            status = "not_in_ensemble"
+        rows.append({
+            "model": name,
+            "mape": value,
+            "ensemble_weight": weights.get(name),
+            "status": status,
+        })
+
+    if ensemble_mape is not None:
+        rows.append({
+            "model": "ensemble",
+            "mape": ensemble_mape,
+            "ensemble_weight": 1.0,
+            "status": "ensemble",
+        })
+
+    return pd.DataFrame(rows, columns=_SUMMARY_COLUMNS)
+
+
 def build_rejected_models_table(ensemble: "Optional[EnsembleResult]") -> pd.DataFrame:
     """
     One row per model excluded from the ensemble by the MAPE threshold.
@@ -116,35 +197,59 @@ def export_forecast_csvs(
     forecast_results: "Dict[str, ForecastResult]",
     ensemble: "Optional[EnsembleResult]" = None,
     *,
+    per_model_mape: "Optional[Dict[str, float]]" = None,
+    ensemble_mape: "Optional[float]" = None,
     output_dir: str = ".",
     prefix: str = "forecast",
 ) -> Dict[str, str]:
     """
-    Write the final, per-model, and rejected-models CSVs to disk.
+    Write the run's CSVs to disk.
 
-    All three files are always written (even when a table is empty, so the
-    set of output files is predictable), into output_dir (created if it
-    doesn't exist), named "{prefix}_final.csv", "{prefix}_per_model.csv",
-    and "{prefix}_rejected_models.csv".
+    Five files, always written (even when a table is empty, so the output
+    set is predictable), into output_dir (created if it doesn't exist):
+
+      {prefix}_final_ensemble.csv    the ensemble's blended forecast
+      {prefix}_final_best_model.csv  the single lowest-MAPE model's forecast
+      {prefix}_per_model.csv         every model's forecast, stacked
+      {prefix}_rejected_models.csv   models excluded by the MAPE threshold
+      {prefix}_model_summary.csv     per-model MAPE / weight / status
+
+    Both "final" candidates are written deliberately: a weighted ensemble
+    is not guaranteed to beat the best individual model, so rather than
+    baking that choice in, the run exports both plus the scores needed to
+    choose between them.
 
     Args:
         forecast_results: {model_name: ForecastResult} from forecast().
         ensemble: the forecaster's forecast_ensemble (EnsembleResult), or
-            None. Drives the final-forecast and rejected-models files.
+            None. Drives the ensemble and rejected-models files.
+        per_model_mape: {model_name: mape} from evaluate(), used to pick
+            the best model and populate the summary. Without it those two
+            files are written header-only.
+        ensemble_mape: the ensemble's own MAPE (from evaluate()), added as
+            an "ensemble" row in the summary for direct comparison.
         output_dir: directory to write into (created if missing).
-        prefix: filename prefix for all three files.
+        prefix: filename prefix for all files.
 
     Returns:
-        {"final": path, "per_model": path, "rejected": path} -- the string
-        paths actually written.
+        {"final_ensemble": path, "final_best_model": path, "per_model":
+        path, "rejected": path, "model_summary": path}.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     tables = {
-        "final": (f"{prefix}_final.csv", build_final_forecast_table(ensemble)),
+        "final_ensemble": (f"{prefix}_final_ensemble.csv", build_final_forecast_table(ensemble)),
+        "final_best_model": (
+            f"{prefix}_final_best_model.csv",
+            build_best_model_forecast_table(forecast_results, per_model_mape),
+        ),
         "per_model": (f"{prefix}_per_model.csv", build_per_model_forecast_table(forecast_results)),
         "rejected": (f"{prefix}_rejected_models.csv", build_rejected_models_table(ensemble)),
+        "model_summary": (
+            f"{prefix}_model_summary.csv",
+            build_model_summary_table(per_model_mape, ensemble, ensemble_mape),
+        ),
     }
 
     written: Dict[str, str] = {}
@@ -159,6 +264,8 @@ def export_forecast(
     forecast_results: "Dict[str, ForecastResult]",
     ensemble: "Optional[EnsembleResult]" = None,
     *,
+    per_model_mape: "Optional[Dict[str, float]]" = None,
+    ensemble_mape: "Optional[float]" = None,
     history=None,
     date_column: str = "ds",
     target_column: str = "y",
@@ -194,7 +301,12 @@ def export_forecast(
         ("plot_overlay", "plot_grid").
     """
     written = export_forecast_csvs(
-        forecast_results, ensemble, output_dir=output_dir, prefix=prefix
+        forecast_results,
+        ensemble,
+        per_model_mape=per_model_mape,
+        ensemble_mape=ensemble_mape,
+        output_dir=output_dir,
+        prefix=prefix,
     )
 
     if save_plots and forecast_results:

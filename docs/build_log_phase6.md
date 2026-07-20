@@ -166,6 +166,41 @@ very-high MAPE).
   need cmdstan and exceed the sandbox ceiling — a full local `pytest` run
   is the definitive gate before this part is pushed.
 
+### Post-real-data hardening (orchestrator + exporters)
+
+Running Part 1 against the real dataset surfaced problems that were not
+SARIMAX bugs but genuine gaps in the surrounding layers. Fixed in the same
+pass, all model-agnostic:
+
+- **Horizon warning was far too lenient.** It only fired above *twice the
+  entire history*, so forecasting 100 periods from 121 passed silently —
+  and produced an implausible forecast. Now fires once the horizon exceeds
+  half the available history.
+
+- **Auto-generated future exog was invisible.** With no
+  `future_independent_data` supplied, the forecaster silently invents ~2
+  years of spend by cycling history, and for an exogenous-driven model
+  that can dominate the result. It now warns, naming the columns and
+  horizon, and says to treat the output as a scenario rather than a
+  prediction.
+
+- **No plausibility check on forecasts.** A model can produce a
+  syntactically valid forecast wildly detached from anything ever
+  observed. `_warn_on_forecasts_far_outside_history()` flags a forecast
+  peaking >50% above (or bottoming >50% below) the observed range. The
+  margin matters: an early draft used "entirely outside the historical
+  range", which both **missed** the real case (the tail decayed back
+  inside) and would **false-positive on every healthy trend** — a good
+  reminder to check a rule against the actual data before shipping it.
+
+- **The "final" export baked in a choice it shouldn't.** On the real run
+  the ensemble scored 22.40% while CatBoost alone scored 21.32%, yet
+  `final.csv` was always the ensemble — i.e. the headline deliverable was
+  the worse forecast. Now both are exported (`final_ensemble.csv`,
+  `final_best_model.csv`) alongside `model_summary.csv` carrying each
+  model's MAPE, ensemble weight and status, so the call is made per run
+  with the evidence in hand.
+
 ### Deliberately out of scope for Part 1
 
 Parts 2 and 3 (the other two models) are untouched: their adapter/wrapper
