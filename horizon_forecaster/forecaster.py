@@ -30,7 +30,7 @@ import yaml
 
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
-from horizon_forecaster.data_adapter.neural_prophet_adapter import NeuralProphetAdapter
+from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
 from horizon_forecaster.data_adapter.sarimax_adapter import SARIMAXAdapter
 from horizon_forecaster.evaluation.ensemble import (

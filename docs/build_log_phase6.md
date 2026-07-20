@@ -221,7 +221,7 @@ Part 3.
 
 ### What was built
 
-- `data_adapter/neural_prophet_adapter.py` — a **stateless** adapter,
+- `data_adapter/neuralprophet_adapter.py` — a **stateless** adapter,
   essentially ProphetAdapter (NeuralProphet shares the ds/y convention).
 - `models/neuralprophet_wrapper.py` — the model-specific logic, with
   overridden `save`/`load` for torch state.

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from horizon_forecaster.data_adapter.neural_prophet_adapter import NeuralProphetAdapter
+from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetAdapter
 from horizon_forecaster.exceptions import InvalidConfigError
 
 

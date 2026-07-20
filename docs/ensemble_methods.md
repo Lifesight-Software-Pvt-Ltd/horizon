@@ -107,7 +107,8 @@ This covers the ensemble *combination* logic only. The "plots + CSV"
 output side of the original project spec now lives in `plotting.py` and
 `exporters.py` (Phase 5), which consume the `EnsembleResult` this doc
 describes. The ensemble logic itself is written generically against
-whatever's registered in
-`forecaster.py`'s `MODEL_REGISTRY` — no ensemble code changes should be
-needed when SARIMAX, PyMC, or NeuralProphet are added, but this is only
-tested today with the current 2-model (Prophet/CatBoost) case.
+whatever's registered in `forecaster.py`'s `MODEL_REGISTRY` — and that
+generality has now been confirmed in practice: SARIMAX (Phase 6 Part 1)
+and NeuralProphet (Part 2) were both added with **no changes to this
+module**, and the ensemble has been exercised end-to-end on a real
+4-model run. PyMC (Part 3) is the one model still to come.

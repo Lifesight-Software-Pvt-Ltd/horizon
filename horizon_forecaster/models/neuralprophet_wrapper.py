@@ -61,9 +61,24 @@ from horizon_forecaster.exceptions import (
 )
 from horizon_forecaster.models.base import BaseModel
 
-# NeuralProphet/Lightning emit a large volume of INFO logging that would
-# otherwise drown the orchestrator's own output.
-_NOISY_LOGGERS = ("NP", "neuralprophet", "pytorch_lightning", "lightning", "lightning.pytorch")
+# NeuralProphet/Lightning emit a large volume of logging that would otherwise
+# drown the orchestrator's own output. Silenced at CRITICAL rather than ERROR
+# because NeuralProphet logs genuinely harmless conditions AT error level --
+# e.g. "NP.plotly: Importing plotly failed. Interactive plots will not work.",
+# which is irrelevant here since this library plots via matplotlib. Child
+# loggers are listed explicitly rather than relying on parent inheritance, in
+# case NeuralProphet sets levels on them directly.
+_NOISY_LOGGERS = (
+    "NP",
+    "NP.plotly",
+    "NP.utils",
+    "NP.config",
+    "NP.df_utils",
+    "neuralprophet",
+    "pytorch_lightning",
+    "lightning",
+    "lightning.pytorch",
+)
 
 # Wrapper-level settings that must NOT be forwarded to the NeuralProphet
 # constructor (it would raise on unexpected keyword arguments).
@@ -245,8 +260,11 @@ class NeuralProphetWrapper(BaseModel):
 
     @staticmethod
     def _silence_loggers() -> None:
+        # CRITICAL, not ERROR: NeuralProphet logs harmless conditions at
+        # ERROR level (the plotly import probe), so ERROR would still let
+        # them through.
         for name in _NOISY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.ERROR)
+            logging.getLogger(name).setLevel(logging.CRITICAL)
 
     # ---------- persistence ----------
 

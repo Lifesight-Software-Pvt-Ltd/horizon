@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("neuralprophet")  # local-only: skips where NP isn't installed
 
-from horizon_forecaster.data_adapter.neural_prophet_adapter import NeuralProphetAdapter
+from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetAdapter
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.exceptions import (
     InsufficientDataError,
