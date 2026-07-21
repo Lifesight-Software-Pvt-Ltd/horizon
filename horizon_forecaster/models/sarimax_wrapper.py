@@ -2,39 +2,40 @@
 SARIMAX model wrapper (statsmodels).
 
 Expects train_df already shaped by SARIMAXAdapter: columns "ds", raw "y",
-and an exog matrix (standardised independent columns + annual Fourier
-terms). This wrapper owns everything model-specific:
+and standardised independent columns. Everything model-specific lives
+here -- the log transform, the annual Fourier terms, and the back-transform
+safeguards.
 
-- Target transform: fits in log1p space (variance stabilisation for a
-  strictly-positive metric) and inverts with expm1 on predict, so yhat is
-  returned in RAW units -- forecaster.py scores MAPE against the raw y.
+Selection: SARIMAX uses the SAME forecaster-level grid search as every
+other model. It previously self-tuned via an internal validation-MAPE
+search, which was more statistically honest (it never saw the test split)
+but made SARIMAX the odd one out: Prophet/CatBoost/NeuralProphet all pick
+their hyperparameters by scoring candidates on the test split, so their
+reported MAPE is optimistic while SARIMAX's was not. Comparing those
+numbers head-to-head -- and, worse, deriving inverse-MAPE ensemble weights
+from them -- systematically penalised SARIMAX for being more rigorous. One
+selection mechanism for all four models is the more useful property here,
+so the grid now varies (p, q), the seasonal (P, Q), and the annual Fourier
+order, while `d` stays ADF-derived (a property of the data, not a
+hyperparameter).
 
-- Order selection: ADF picks the differencing order d, then a small
-  exhaustive order space is scored on a validation tail carved out of the
-  TRAINING data (not the reported test split). The lowest-MAPE order wins
-  -- selecting on forecast accuracy, not AIC, which was the root cause of
-  the occasional very-high-MAPE fits in the original notebook. AIC is kept
-  only as a fallback if every candidate fails to produce a scorable
-  validation forecast.
+Annual Fourier lives here, not in the adapter, because that is the only
+way the grid can choose it. Real data made this necessary: on a ~3-year
+daily series annual Fourier was a clear win, while on a ~2-year weekly
+series it was actively harmful (and diverged outright at high order). No
+fixed default serves both.
 
-- Explosion control at the source: the winning order is refit with
-  enforce_stationarity=True (falling back to False only if that fit
-  fails), so explosive AR roots -- the real cause of exponential blow-ups
-  after expm1 -- are prevented up front. A log-space clip to
-  (train_max + headroom) remains as a last-resort guard.
+Key safeguards, all kept from the validation-search era:
 
-- Bias correction: expm1 of the log-space mean systematically
-  under-predicts (it returns the median, not the mean, of a lognormal).
-  The point forecast adds +sigma^2/2 using the model's CONSTANT innovation
-  variance (not the horizon-growing forecast variance, which would feed
-  the very explosion the clip fights). Consequence, by design: the
-  bias-corrected point can sit slightly above the centre of the
-  (uncorrected) prediction interval -- correct lognormal behaviour, since
-  mean > median.
-
-SARIMAX has no forecaster-level grid search (its config carries no
-`hyperparameter_grid`): the internal ADF + validation-MAPE search IS its
-tuning, so it fits once per evaluate()/forecast() and self-selects.
+- log1p fit / expm1 predict, so yhat is returned in RAW units.
+- enforce_stationarity=True on the final fit (falling back to False),
+  stopping explosive AR roots at the source.
+- A log-space clip anchored on a high QUANTILE of the training target
+  (not its raw max, which a single spike inflates enormously).
+- +sigma^2/2 lognormal bias correction, optional via `bias_correction`.
+- A divergence guard: a forecast pinned to the clip is rejected rather
+  than emitted as a degenerate flat line. With the grid now tolerating
+  per-candidate failures, a diverging candidate is simply skipped.
 """
 
 import warnings
@@ -43,7 +44,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from horizon_forecaster.evaluation.metrics import mape
 from horizon_forecaster.exceptions import (
     InsufficientDataError,
     ModelConvergenceError,
@@ -51,15 +51,17 @@ from horizon_forecaster.exceptions import (
 )
 from horizon_forecaster.models.base import BaseModel
 
+# Annual period in DAYS. Fourier terms are built from absolute day offsets
+# for both frequencies -- a year is a year regardless of sampling rate --
+# which also makes them robust to gaps, unlike a positional index.
+_ANNUAL_PERIOD_DAYS = 365.25
+
 
 class SARIMAXWrapper(BaseModel):
     """Wraps statsmodels SARIMAX to the BaseModel contract."""
 
     model_name = "sarimax"
 
-    # Higher than Prophet/CatBoost's floors: order selection carves a
-    # validation tail out of train, so we need enough rows to both fit and
-    # validate. ~5 weeks daily / ~4 months weekly.
     _FREQUENCY_MIN_ROWS_DEFAULTS = {"daily": 35, "weekly": 18}
     _FALLBACK_MIN_ROWS = 20
 
@@ -78,35 +80,22 @@ class SARIMAXWrapper(BaseModel):
         self.min_rows_required = min_rows_required
         self.random_seed = random_seed
 
-        # All wrapper-interpreted config arrives via params (SARIMAX's
-        # base_hyperparameters); nothing here is passed to a library
-        # constructor blindly. Defaults keep the wrapper usable standalone.
         p = self.params
+        # --- grid-selected structure ---
+        self.p = p.get("p", 1)
+        self.q = p.get("q", 1)
+        self.seasonal_p = p.get("P", 0)
+        self.seasonal_q = p.get("Q", 0)
+        self.fourier_order_annual = p.get("fourier_order_annual", 0)
+        self.use_seasonal = p.get("use_seasonal", frequency == "daily")
+        self.seasonal_period = p.get("seasonal_period", 7)
+        # --- back-transform / fitting behaviour ---
         self.alpha = p.get("alpha", 0.05)
         self.log_clip_headroom = p.get("log_clip_headroom", 1.5)
-        self.p_max = p.get("p_max", 1)
-        self.q_max = p.get("q_max", 1)
-        self.seasonal_cap = p.get("seasonal_cap", 1)
-        self.seasonal_period = p.get("seasonal_period", 7)
-        self.use_seasonal = p.get("use_seasonal", frequency == "daily")
-        self.validation_fraction = p.get("validation_fraction", 0.15)
-        self.min_validation_rows = p.get("min_validation_rows", 7 if frequency == "daily" else 4)
-        self.maxiter_search = p.get("maxiter_search", 30)
-        self.maxiter_final = p.get("maxiter_final", 150)
-        self.enforce_stationarity_final = p.get("enforce_stationarity_final", True)
-        # Anchor the explosion clip on a high QUANTILE of the training target
-        # rather than its raw max: on spiky data a single outlier max inflates
-        # the cap enormously (a real series with a lone 849k spike gave a 3.8e6
-        # cap, so a diverged forecast could still sit at 3.8e6 before tripping
-        # any guard). A quantile anchor keeps the cap tied to the bulk of the
-        # data. Set to 1.0 to restore the old max-anchored behaviour.
         self.clip_anchor_quantile = p.get("clip_anchor_quantile", 0.99)
-        # Lognormal bias correction (+sigma^2/2). ON by default, but note the
-        # tension: MAPE -- which this library selects on and reports -- is
-        # minimised by the conditional MEDIAN, and expm1(mean_log) already IS
-        # the median; the correction targets the MEAN. Turn this off for
-        # strictly MAPE-optimal point forecasts.
         self.bias_correction = p.get("bias_correction", True)
+        self.enforce_stationarity_final = p.get("enforce_stationarity_final", True)
+        self.maxiter_final = p.get("maxiter_final", 150)
 
     # ---------- fit ----------
 
@@ -129,23 +118,25 @@ class SARIMAXWrapper(BaseModel):
 
         y_raw = train_df["y"].to_numpy(dtype=float)
         y_log = np.log1p(y_raw)
-        self._exog_columns: List[str] = [c for c in train_df.columns if c not in ("ds", "y")]
-        exog = train_df[self._exog_columns].to_numpy(dtype=float) if self._exog_columns else None
+
+        self._independent_columns: List[str] = [
+            c for c in train_df.columns if c not in ("ds", "y")
+        ]
+        self._reference_date = pd.to_datetime(train_df["ds"]).iloc[0]
+        exog = self._build_exog(train_df)
 
         d = self._adf_differencing_order(y_log)
-        candidates = self._candidate_orders(d)
-
-        order, seasonal_order = self._select_order_by_validation(y_log, exog, y_raw, candidates)
-        if order is None:
-            raise ModelConvergenceError(
-                "SARIMAX: every candidate order failed to fit or produced no scorable forecast.",
-                model_name=self.model_name,
-            )
+        order = (self.p, d, self.q)
+        seasonal_order = (
+            (self.seasonal_p, min(d, 1), self.seasonal_q, self.seasonal_period)
+            if self.use_seasonal
+            else (0, 0, 0, 0)
+        )
 
         results = self._fit_final(y_log, exog, order, seasonal_order)
         if results is None:
             raise ModelConvergenceError(
-                "SARIMAX: the selected order failed to fit on the full training data.",
+                f"SARIMAX failed to fit with order={order} seasonal_order={seasonal_order}.",
                 model_name=self.model_name,
             )
 
@@ -164,32 +155,29 @@ class SARIMAXWrapper(BaseModel):
     def predict(self, horizon: int, future_exog: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         self._check_is_fitted()
 
-        if self._exog_columns:
-            if future_exog is None:
-                raise ModelPredictionError(
-                    "SARIMAX requires future_exog (a DataFrame with 'ds' and the exog "
-                    "columns produced by SARIMAXAdapter) to predict -- received None.",
-                    model_name=self.model_name,
-                )
-            if "ds" not in future_exog.columns:
-                raise ModelPredictionError(
-                    "future_exog must contain a 'ds' column.", model_name=self.model_name
-                )
-            missing = [c for c in self._exog_columns if c not in future_exog.columns]
-            if missing:
-                raise ModelPredictionError(
-                    f"future_exog is missing required exog column(s): {missing}",
-                    model_name=self.model_name,
-                )
-
-        if future_exog is None or len(future_exog) != horizon:
-            got = 0 if future_exog is None else len(future_exog)
+        if future_exog is None:
             raise ModelPredictionError(
-                f"future_exog has {got} rows but horizon={horizon} was requested.",
+                "SARIMAX requires future_exog (a DataFrame with 'ds' and the columns "
+                "produced by SARIMAXAdapter) to predict -- received None.",
+                model_name=self.model_name,
+            )
+        if "ds" not in future_exog.columns:
+            raise ModelPredictionError(
+                "future_exog must contain a 'ds' column.", model_name=self.model_name
+            )
+        missing = [c for c in self._independent_columns if c not in future_exog.columns]
+        if missing:
+            raise ModelPredictionError(
+                f"future_exog is missing required column(s): {missing}",
+                model_name=self.model_name,
+            )
+        if len(future_exog) != horizon:
+            raise ModelPredictionError(
+                f"future_exog has {len(future_exog)} rows but horizon={horizon} was requested.",
                 model_name=self.model_name,
             )
 
-        exog = future_exog[self._exog_columns].to_numpy(dtype=float) if self._exog_columns else None
+        exog = self._build_exog(future_exog)
 
         try:
             with warnings.catch_warnings():
@@ -200,22 +188,15 @@ class SARIMAXWrapper(BaseModel):
                 )
         except Exception as e:
             raise ModelPredictionError(
-                "SARIMAX failed during prediction.",
+                f"SARIMAX failed during prediction ({type(e).__name__}: {e}).",
                 model_name=self.model_name,
                 original_exception=e,
             )
 
-        # Prediction interval from the CONSTANT innovation variance (sigma^2),
-        # NOT get_forecast()'s horizon-growing forecast variance. Over a long
-        # horizon the growing variance makes the log-space interval enormous,
-        # and back-transforming it with expm1 produces absurd raw-scale upper
-        # bounds (e.g. a [8k, 700k] band around an 80k point forecast, then
-        # mangled further by the clip). A constant band gives a readable,
-        # roughly-multiplicative "typical error" interval instead -- the same
-        # constant-variance philosophy used for the bias correction. Trade-off:
-        # it does not widen formally with horizon; it is a typical-error band,
-        # not a textbook expanding predictive interval. (The ensemble ignores
-        # bounds entirely, so this only affects per-model plots/CSVs.)
+        # Interval from the CONSTANT innovation variance, not
+        # get_forecast()'s horizon-growing forecast variance: the latter
+        # makes the log-space interval enormous over a long horizon, and
+        # expm1 turns that into an absurd raw-scale upper bound.
         from scipy.stats import norm
 
         z = norm.ppf(1.0 - self.alpha / 2.0)
@@ -223,27 +204,18 @@ class SARIMAXWrapper(BaseModel):
         cap = self._clip_anchor_log + self.log_clip_headroom
         corrected_log = mean_log + self._bias_shift()
 
-        # Divergence guard. A SARIMAX fit can blow up in log space -- an
-        # (near-)explosive AR root, or an exogenous coefficient extrapolating
-        # on out-of-range future values -- so the log forecast runs far past
-        # the explosion clip and expm1() would emit a degenerate flat line
-        # pinned at the cap (observed on real spiky weekly data: a ~3.8e6 flat
-        # forecast, 1400% MAPE). The clip prevents infinities but not garbage.
-        # When the clip binds on a majority of the horizon, the fit has
-        # genuinely diverged, so we reject it as a prediction failure (the
-        # orchestrator records it in evaluate_errors/forecast_errors and drops
-        # the model) rather than returning a misleading "result". This is
-        # distinct from a merely-inaccurate model, which stays a real result
-        # and is handled by the ensemble's MAPE threshold.
+        # Divergence guard: a forecast pinned to the clip across most of the
+        # horizon is a blown-up fit, not a prediction. Rejecting it lets the
+        # grid search skip this candidate and keep the ones that worked.
         n_saturated = int(np.sum(corrected_log >= cap))
         if n_saturated >= max(1, int(np.ceil(0.5 * len(corrected_log)))):
             raise ModelPredictionError(
                 f"SARIMAX forecast diverged: the log-space forecast exceeded the "
-                f"explosion clip on {n_saturated}/{len(corrected_log)} of the horizon, "
-                f"so the back-transformed prediction would be a degenerate flat line "
-                f"(pinned at ~{np.expm1(cap):.3g}). Rejecting this fit rather than "
-                f"emitting garbage. Likely an (near-)explosive AR root or exogenous "
-                f"extrapolation on this data.",
+                f"explosion clip on {n_saturated}/{len(corrected_log)} of the horizon "
+                f"(order={self._order}, seasonal={self._seasonal_order}, "
+                f"fourier_order={self.fourier_order_annual}), so the back-transformed "
+                f"prediction would be a degenerate flat line pinned at "
+                f"~{np.expm1(cap):.3g}. Rejecting this fit.",
                 model_name=self.model_name,
             )
 
@@ -260,6 +232,43 @@ class SARIMAXWrapper(BaseModel):
             }
         )
 
+    # ---------- exog / Fourier ----------
+
+    def _build_exog(self, frame: pd.DataFrame) -> Optional[np.ndarray]:
+        """
+        Assemble the exog matrix: the adapter's standardised independent
+        columns, plus annual Fourier terms generated here.
+
+        Fourier terms are computed from the absolute day offset against the
+        reference date captured at fit time, so train and future stay
+        phase-aligned and a gap in the date sequence cannot shift the phase
+        (a positional index would).
+        """
+        blocks = []
+        if self._independent_columns:
+            blocks.append(frame[self._independent_columns].to_numpy(dtype=float))
+
+        fourier = self._fourier_terms(frame["ds"])
+        if fourier is not None:
+            blocks.append(fourier)
+
+        if not blocks:
+            return None
+        return np.hstack(blocks)
+
+    def _fourier_terms(self, ds: pd.Series) -> Optional[np.ndarray]:
+        order = int(self.fourier_order_annual or 0)
+        if order <= 0:
+            return None
+        offset_days = (pd.to_datetime(ds).reset_index(drop=True) - self._reference_date)
+        t = offset_days.dt.total_seconds().to_numpy() / 86400.0
+        terms = []
+        for k in range(1, order + 1):
+            angle = 2.0 * np.pi * k * t / _ANNUAL_PERIOD_DAYS
+            terms.append(np.sin(angle))
+            terms.append(np.cos(angle))
+        return np.column_stack(terms)
+
     # ---------- internals ----------
 
     def _adf_differencing_order(self, y_log: np.ndarray) -> int:
@@ -272,27 +281,8 @@ class SARIMAXWrapper(BaseModel):
                 warnings.simplefilter("ignore")
                 p_value = adfuller(series, autolag="AIC")[1]
         except Exception:
-            return 1  # default to one difference if the test itself fails
+            return 1
         return 0 if p_value <= 0.05 else 1
-
-    def _candidate_orders(self, d: int) -> List[tuple]:
-        p_range = range(0, self.p_max + 1)
-        q_range = range(0, self.q_max + 1)
-        if self.use_seasonal:
-            big_d = min(d, 1)
-            seasonal_orders = [
-                (P, big_d, Q, self.seasonal_period)
-                for P in range(0, self.seasonal_cap + 1)
-                for Q in range(0, self.seasonal_cap + 1)
-            ]
-        else:
-            seasonal_orders = [(0, 0, 0, 0)]
-        return [
-            ((p, d, q), seasonal)
-            for p in p_range
-            for q in q_range
-            for seasonal in seasonal_orders
-        ]
 
     def _fit_one(self, y_log, exog, order, seasonal_order, enforce_stationarity, maxiter):
         from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -309,62 +299,8 @@ class SARIMAXWrapper(BaseModel):
             )
             return model.fit(disp=False, maxiter=maxiter, method="lbfgs")
 
-    def _select_order_by_validation(self, y_log, exog, y_raw, candidates):
-        """
-        Score each candidate by MAPE on a validation tail carved out of
-        train, and return the best (order, seasonal_order). Falls back to
-        the lowest-AIC candidate if none produced a scorable forecast.
-        Returns (None, None) if nothing fit at all.
-        """
-        n = len(y_log)
-        val_size = max(self.min_validation_rows, int(np.ceil(self.validation_fraction * n)))
-        val_size = min(val_size, max(1, n // 3))  # keep enough rows for the fit slice
-        fit_n = n - val_size
-
-        y_fit_log = y_log[:fit_n]
-        y_val_raw = y_raw[fit_n:]
-        exog_fit = exog[:fit_n] if exog is not None else None
-        exog_val = exog[fit_n:] if exog is not None else None
-        fit_max_log = float(np.nanmax(y_fit_log))
-
-        best_mape = np.inf
-        best_order = None
-        best_aic = np.inf
-        best_order_by_aic = None
-
-        for order, seasonal_order in candidates:
-            try:
-                res = self._fit_one(
-                    y_fit_log, exog_fit, order, seasonal_order,
-                    enforce_stationarity=False, maxiter=self.maxiter_search,
-                )
-            except Exception:
-                continue
-
-            if np.isfinite(res.aic) and res.aic < best_aic:
-                best_aic = res.aic
-                best_order_by_aic = (order, seasonal_order)
-
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    mean_log = np.asarray(
-                        res.get_forecast(steps=val_size, exog=exog_val).predicted_mean, dtype=float
-                    )
-            except Exception:
-                continue
-
-            yhat_val = self._back_transform(mean_log, self._innovation_variance(res), fit_max_log)
-            score = mape(y_val_raw, yhat_val).value
-            if np.isfinite(score) and score < best_mape:
-                best_mape = score
-                best_order = (order, seasonal_order)
-
-        chosen = best_order if best_order is not None else best_order_by_aic
-        return chosen if chosen is not None else (None, None)
-
     def _fit_final(self, y_log, exog, order, seasonal_order):
-        """Refit the chosen order on full train, enforcing stationarity first."""
+        """Fit with stationarity enforced, falling back to unconstrained."""
         if self.enforce_stationarity_final:
             try:
                 return self._fit_one(
@@ -372,7 +308,7 @@ class SARIMAXWrapper(BaseModel):
                     enforce_stationarity=True, maxiter=self.maxiter_final,
                 )
             except Exception:
-                pass  # fall back to the unconstrained fit below
+                pass
         try:
             return self._fit_one(
                 y_log, exog, order, seasonal_order,
@@ -387,16 +323,15 @@ class SARIMAXWrapper(BaseModel):
             return 0.0
         return (self._resid_var if resid_var is None else resid_var) / 2.0
 
-    def _back_transform(self, mean_log, resid_var, train_max_log) -> np.ndarray:
-        cap = train_max_log + self.log_clip_headroom
+    def _back_transform(self, mean_log, resid_var, anchor_log) -> np.ndarray:
+        cap = anchor_log + self.log_clip_headroom
         return np.expm1(np.clip(mean_log + self._bias_shift(resid_var), 0.0, cap))
 
     @staticmethod
     def _innovation_variance(results) -> float:
         """
         Constant innovation variance (sigma^2) for the lognormal bias
-        correction. Prefers the model's estimated sigma2 parameter; falls
-        back to the residual variance if unavailable.
+        correction and the prediction band.
         """
         try:
             sigma2 = float(results.params[results.param_names.index("sigma2")])

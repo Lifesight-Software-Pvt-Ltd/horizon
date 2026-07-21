@@ -62,13 +62,15 @@ very-high MAPE).
   not widen formally with horizon; it is a typical-error band, not a
   textbook expanding predictive interval.
 
-- **No forecaster-level grid search.** SARIMAX's config carries no
-  `hyperparameter_grid`, so the orchestrator (already supporting this —
-  `use_grid_search = override is None and "hyperparameter_grid" in config`)
-  fits it once and lets the wrapper self-tune. `grid_search_summary` is
-  `None` for SARIMAX. Zero orchestrator changes.
+- **~~No forecaster-level grid search.~~ SUPERSEDED** — see "Uniformity
+  refactor" at the end of this file. SARIMAX originally carried no
+  `hyperparameter_grid` and self-tuned inside the wrapper; it now uses the
+  standard grid search like every other model.
 
-- **Order selection by validation MAPE, not AIC.** ADF picks `d`, then a
+- **~~Order selection by validation MAPE, not AIC.~~ SUPERSEDED** — see
+  "Uniformity refactor" below. Kept here because the reasoning about AIC
+  still stands, and explains why the grid scores candidates by MAPE. ADF
+  picks `d`, then a
   small exhaustive `(p,d,q)(P,D,Q,s)` space (p,q ∈ {0,1}; daily uses a
   weekly `s=7` seasonal order, weekly disables the SARIMAX seasonal order
   and leans on Fourier) is scored by MAPE on a validation tail carved out
@@ -318,3 +320,219 @@ identifiable rather than looking like a convergence failure.
 
 Runtime: 4 candidates × torch training × (evaluate + forecast refit) adds
 meaningfully to the local suite, which was already ~25 minutes.
+
+### What CI caught that local testing could not
+
+The full local suite passed (334/334), and CI then failed one test —
+`test_save_load_roundtrip_preserves_prediction` — on Python 3.10 with a
+newer torch. This is the clearest justification so far for running CI once
+per part rather than batching it to the end of the phase.
+
+**Cause:** PyTorch >= 2.6 changed `torch.load`'s `weights_only` default
+from `False` to `True`. NeuralProphet's `load()` delegates to
+`torch.load()`, and it saves a full Python object rather than a tensor
+state dict, so the new default refuses to unpickle it
+(`UnpicklingError: Unsupported global: GLOBAL
+neuralprophet.forecaster.NeuralProphet was not an allowed global`). The
+local environment had an older torch, so the code was correct there and
+genuinely broken on newer torch — invisible to any amount of local testing.
+
+**Fix:** `NeuralProphetWrapper._load_torch_model()` tries NeuralProphet's
+own loader first (correct on older torch) and falls back to
+`torch.load(..., weights_only=False)`. The alternative,
+`torch.serialization.add_safe_globals()`, was rejected: a saved
+NeuralProphet drags in a tree of its own config classes, so allowlisting
+becomes whack-a-mole across versions. `weights_only=False` is appropriate
+because the file was written by this library's own `save()` — a trusted
+source, which is the exact condition PyTorch's documentation attaches to
+that flag.
+
+Note this bug lives in a code path that only `save`/`load` exercises, and
+would otherwise have surfaced the first time someone tried to reload a
+persisted model in a fresh environment.
+
+---
+
+## Uniformity refactor (post Part 2, driven by real-dataset testing)
+
+Real weekly data exposed two problems at once: SARIMAX scoring 146% where
+Prophet and CatBoost scored ~35%, and no fixed annual-Fourier setting that
+worked for both the daily and the weekly dataset. Investigating produced
+three changes -- and refuted two of my own hypotheses on the way.
+
+### What the data actually said
+
+Isolating each component on the real weekly series:
+
+| exog | annual Fourier | MAPE |
+|---|---|---|
+| off | order 2 | 146.85% |
+| off | off | 106.69% |
+| on | order 2 | 82.81% |
+| on | **off** | **48.74%** |
+
+Order sweep with exog on: order 2 -> 82.81%, order 6 -> 66.96%, order 10 ->
+**diverged** (23/26 of the horizon pinned at the clip).
+
+Two hypotheses died here. **Exogenous variables were not the cause** --
+removing them made things *worse* (48.74% -> 106.69%), the opposite of the
+Part 1 divergence case. **The bias correction was not the cause** -- sigma^2
+was only 0.171, an inflation of x1.09, and disabling it moved MAPE by 0.03
+points. Worse, a synthetic weekly series with a *clean* annual cycle had
+suggested higher Fourier orders were the fix (21.89% at order 10 vs 216.91%
+at order 2); the real series, whose annual pattern is weak across only ~2
+cycles, said the opposite. **Synthetic evidence pointed the wrong way, and
+only the real data settled it** -- worth remembering before trusting a
+generated fixture to justify a default.
+
+### The three changes
+
+1. **Annual Fourier moved from the adapter into the wrapper**, becoming a
+   grid-searchable `fourier_order_annual` (0 = off). There is no correct
+   fixed default -- the daily dataset wants it on, this weekly one wants it
+   off -- so the data has to choose, which requires the setting to be
+   reachable from the grid. It could not be while it lived in the adapter,
+   because `_prepare_split()` builds the exog matrix **once** and every
+   candidate reuses it. Terms are now built from absolute day offsets
+   against a fit-time reference date instead of a positional index, which
+   also makes them gap-robust (the old `DeterministicProcess.out_of_sample()`
+   assumed the future was a contiguous positional continuation).
+
+2. **SARIMAX now uses the standard forecaster grid search.** Its internal
+   validation-MAPE search was *more* honest -- it never touched the test
+   split -- but it made SARIMAX the only model selected on a different
+   criterion. Every other model scores candidates on the test split, so
+   their reported MAPE is optimistic while SARIMAX's was not; comparing
+   them head-to-head, and deriving inverse-MAPE ensemble weights from them,
+   penalised SARIMAX for its own rigour. Uniformity was judged the more
+   useful property. `d` stays ADF-derived (a property of the data, not a
+   hyperparameter); the grid varies `(p, q)`, seasonal `(P, Q)` and
+   `fourier_order_annual`.
+
+3. **The grid search now tolerates per-candidate failures.** Previously one
+   candidate raising killed the whole model -- which would have been fatal
+   here, since diverging Fourier orders are precisely what the grid should
+   *discard*. Failures are now skipped with a warning naming how many, and
+   the model fails only if every candidate does. Model-agnostic.
+
+   The first cut of this got the total-failure case wrong, and the local
+   suite caught it: it wrapped *every* total failure in
+   `ModelConvergenceError`, so a 10-row dataset stopped reporting
+   `InsufficientDataError` and started reporting a convergence problem that
+   did not exist -- losing `required_periods`/`available_periods` with it.
+   Corrected rule: if all candidates fail with the **same** exception type,
+   the cause is not hyperparameter-specific and the original exception is
+   re-raised untouched; only genuinely **mixed** failures aggregate into
+   `ModelConvergenceError`. Worth recording because the bug was invisible in
+   the sandbox -- both affected tests are Prophet-backed, and Prophet does
+   not install there.
+
+### Trade-offs accepted knowingly
+
+- SARIMAX's reported MAPE becomes optimistic like the others. Every number
+  feeding the ensemble is relative, so consistency matters more than
+  absolute honesty here -- but it is a real loss, and worth revisiting if
+  the library ever moves *all* models to validation-based selection.
+- Each candidate is now a full fit; the old search used cheap `maxiter=30`
+  fits and refit only the winner properly. SARIMAX runs are slower.
+- The Part-1 validation machinery that fixed the original "occasional very
+  high MAPE" is gone. The grid should subsume it -- verified on synthetics
+  (weekly spiky 30.49%, daily annual 4.95%, with the grid correctly
+  selecting different Fourier orders per dataset, and skipping 2 of 6
+  diverging candidates on the weekly one) -- but the real daily benchmark
+  of 20.23% is the number to watch.
+
+---
+
+## The NeuralProphet `ConfigValueError` (post Part 2)
+
+### Symptom
+
+On the weekly real dataset, NeuralProphet did not merely score badly -- it
+never fitted. Every grid candidate died with:
+
+```
+ConfigValueError: Unions of containers are not supported:
+loss_func: Union[str, _Loss, Callable]
+```
+
+### Why it looked like a hyperparameter bug (and wasn't)
+
+The message names `loss_func`, which is a training config field, so the
+first instinct was a bad param. Two experiments killed that idea:
+
+1. Constructing `NeuralProphet(**params)` for all four grid candidates
+   succeeded. The failure is inside `fit()`, not the constructor.
+2. Fitting all four candidates on a bare `ds`/`y` frame **succeeded**.
+   Fitting the same four on the adapter frame **failed**.
+
+The discriminator was not the params at all -- it was
+`add_future_regressor()`. Any regressor, any params, guaranteed failure.
+
+### Root cause
+
+`neuralprophet/time_net.py`, in `TimeNet.__init__`:
+
+```python
+# TODO: causes a RuntimeError under certain conditions,
+#       investigate and handle better
+try:
+    self.save_hyperparameters()
+except RuntimeError:
+    pass
+```
+
+PyTorch Lightning's `save_hyperparameters()`, *when omegaconf is
+importable*, converts the captured dataclass hparams through
+`OmegaConf.structured()`. OmegaConf refuses
+`ConfigTrain.loss_func: Union[str, _Loss, Callable]` and raises
+`ConfigValueError`, which subclasses `(OmegaConfBaseException, ValueError)`
+-- **not** `RuntimeError`. NeuralProphet's guard therefore misses it and the
+exception escapes `fit()`. Registering a regressor is what pushes Lightning
+onto the OmegaConf branch, which is exactly the observed discriminator.
+
+This also resolves the daily-vs-weekly puzzle that had been read as a data
+problem. Neither NeuralProphet nor Lightning *declares* omegaconf as a
+dependency -- it arrives transitively. The successful daily run and the
+failing weekly run were different resolved environments, not different data.
+
+### Why `pyproject.toml` was not touched
+
+Both dependency routes were checked against the downloaded package sources
+rather than assumed:
+
+| Candidate fix | Verdict |
+| --- | --- |
+| Bump `neuralprophet` 0.8.0 -> 0.9.0 | **No.** 0.9.0 has the identical `loss_func` annotation and the identical `except RuntimeError` guard. |
+| Pin `omegaconf < 2.2` | **No, worse.** 2.2+ raises "Unions of containers are not supported"; 2.1.x rejects *every* Union ("Union types are not supported"), which would break the no-regressor case that currently works. |
+
+There is no version combination to pin to, so the pins stay as they are and
+the incompatibility is absorbed in the wrapper.
+
+### The fix
+
+`NeuralProphetWrapper._neutralize_lightning_hparam_capture()` replaces
+`TimeNet.save_hyperparameters` with a version that calls the original and
+swallows any exception. Applied once per process, guarded by a module-level
+flag so repeated `fit()` calls don't stack wrappers.
+
+Safe because the call only writes hparams into the Lightning checkpoint,
+which this library never reads -- `save()`/`load()` round-trip the whole
+model through NeuralProphet's own torch-backed utilities. NeuralProphet
+already treats the call as best-effort; this widens a too-narrow `except`
+clause rather than changing intent. The original runs first, so
+environments where hparam capture works are unaffected.
+
+### How this was verified
+
+`tests/test_neuralprophet_hparam_patch.py` -- deliberately **not** in
+`tests/test_neuralprophet.py`, which is `importorskip`'d on the real
+NeuralProphet. The patch is pure monkeypatching, so NeuralProphet is stubbed
+into `sys.modules` and the tests run everywhere, including CI and the
+sandbox where torch is absent. Cover: the exact `ConfigValueError` is
+absorbed; the original is still called; a successful return value passes
+through; the patch is idempotent; and it no-ops both when NeuralProphet is
+missing and when `TimeNet` is renamed upstream.
+
+Remaining gap: as with the rest of Part 2, an end-to-end fit with real
+regressors can only be confirmed locally, not in the sandbox.

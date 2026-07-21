@@ -8,6 +8,7 @@ from horizon_forecaster.exceptions import (
     InsufficientDataError,
     InvalidConfigError,
     ModelConvergenceError,
+    ModelPredictionError,
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult, MODEL_REGISTRY
@@ -712,6 +713,108 @@ def test_no_range_warning_for_a_normally_trending_forecast():
         warnings.simplefilter("always")
         forecaster._warn_on_forecasts_far_outside_history(reasonable)
     assert not any("above the highest value" in str(w.message) for w in caught)
+
+
+def test_grid_search_skips_failing_candidates_and_uses_the_survivors():
+    """
+    One unusable hyperparameter combination must not cost you the whole
+    model when others fit fine -- it is skipped, with a warning naming how
+    many were dropped.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+    )
+    real = forecaster._fit_predict_mape
+    calls = {"n": 0}
+
+    def flaky(model_name, params, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:  # fail every other candidate
+            raise ModelConvergenceError("forced candidate failure", model_name=model_name)
+        return real(model_name, params, *args, **kwargs)
+
+    forecaster._fit_predict_mape = flaky
+    with pytest.warns(UserWarning, match="candidates failed"):
+        result = forecaster.evaluate()["sarimax"]
+
+    assert result.grid_search_summary  # the survivors were still used
+    assert calls["n"] > len(result.grid_search_summary)  # some were genuinely skipped
+
+
+def test_grid_search_fails_the_model_only_when_every_candidate_fails():
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+    )
+
+    def always_fails(model_name, params, *args, **kwargs):
+        raise ModelConvergenceError("forced candidate failure", model_name=model_name)
+
+    forecaster._fit_predict_mape = always_fails
+    with pytest.raises(AllModelsRejectedError):
+        forecaster.evaluate()
+    assert isinstance(forecaster.evaluate_errors["sarimax"], ModelConvergenceError)
+
+
+def test_total_grid_failure_preserves_the_original_exception_type():
+    """
+    When every candidate fails the SAME way, the cause is not
+    hyperparameter-specific -- it belongs to the data or the model. The
+    original exception must be re-raised rather than relabelled, so its type
+    and structured attributes survive for callers that branch on them.
+
+    Regression cover: candidate-skipping originally wrapped every total
+    failure in ModelConvergenceError, which turned a plain "not enough rows"
+    into a misleading convergence error and dropped
+    required_periods/available_periods on the floor.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+    )
+
+    def always_insufficient(model_name, params, *args, **kwargs):
+        raise InsufficientDataError(
+            "forced", model_name=model_name, required_periods=14, available_periods=8
+        )
+
+    forecaster._fit_predict_mape = always_insufficient
+    with pytest.raises(AllModelsRejectedError):
+        forecaster.evaluate()
+
+    error = forecaster.evaluate_errors["sarimax"]
+    assert isinstance(error, InsufficientDataError)
+    assert error.required_periods == 14  # structured attributes survived
+    assert error.available_periods == 8
+
+
+def test_mixed_grid_failures_become_an_aggregate_convergence_error():
+    """
+    The counterpart: when candidates fail in genuinely different ways no
+    single type is representative, so the aggregate ModelConvergenceError is
+    correct -- and its message must name every distinct cause.
+    """
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+    )
+    calls = {"n": 0}
+
+    def alternating_failures(model_name, params, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:
+            raise ModelPredictionError("forced prediction failure", model_name=model_name)
+        raise InsufficientDataError("forced data failure", model_name=model_name)
+
+    forecaster._fit_predict_mape = alternating_failures
+    with pytest.raises(AllModelsRejectedError):
+        forecaster.evaluate()
+
+    error = forecaster.evaluate_errors["sarimax"]
+    assert isinstance(error, ModelConvergenceError)
+    assert "InsufficientDataError" in str(error)
+    assert "ModelPredictionError" in str(error)
 
 
 def test_forecast_weekly_frequency_produces_correct_future_dates():

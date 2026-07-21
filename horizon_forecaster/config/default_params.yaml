@@ -346,23 +346,49 @@ catboost:
 # (both frequencies). Daily additionally uses a cheap weekly SARIMAX seasonal
 # order (s=7); weekly disables the SARIMAX seasonal order entirely (a real
 # s=52 is prohibitively slow) and leans on the Fourier terms.
+# ---------------------------------------------------------------------------
+# SARIMAX (statsmodels). Phase 6, Part 1; converted to the standard grid
+# search after real-dataset testing.
+#
+# SARIMAX originally self-tuned inside its wrapper (ADF for d, then an
+# internal validation-MAPE search over orders) and carried no
+# hyperparameter_grid. That was more statistically honest -- it never saw the
+# test split -- but it made SARIMAX the only model selected differently:
+# prophet/catboost/neuralprophet all pick candidates by scoring on the test
+# split, so their MAPE is optimistic while SARIMAX's was not. Comparing those
+# numbers, and deriving inverse-MAPE ensemble weights from them, penalised
+# SARIMAX for being more rigorous. One mechanism for all four models is the
+# more useful property, so it now uses this grid like everybody else.
+#
+# The grid varies (p, q), the seasonal (P, Q), and fourier_order_annual.
+# `d` is NOT in the grid: it stays ADF-derived inside the wrapper, since it
+# is a property of the data rather than a hyperparameter.
+#
+# fourier_order_annual (0 = no annual seasonality) is in the grid because
+# real data proved no fixed default works: on a ~3-year daily series annual
+# Fourier was a clear win, while on a ~2-year weekly series it was actively
+# harmful, and at order 10 it diverged outright. The data has to choose.
+#
+# Candidates that fail (e.g. a diverging order) are skipped by the grid
+# search rather than failing the whole model.
 sarimax:
   daily:
     base_hyperparameters:
       alpha: 0.05                 # prediction-interval width (yhat_lower/upper)
-      log_clip_headroom: 1.5      # last-resort explosion guard: cap log yhat at the anchor + this
-      clip_anchor_quantile: 0.99  # anchor that cap on a high quantile, not the raw max (spike-robust)
-      bias_correction: true       # +sigma^2/2 lognormal lift; set false for strictly MAPE-optimal (median) points
-      p_max: 1                    # AR/MA order caps (kept small: higher is exponentially slower)
-      q_max: 1
-      seasonal_cap: 1             # seasonal P/Q caps
-      seasonal_period: 7          # weekly seasonality for daily data
-      use_seasonal: true
-      validation_fraction: 0.15   # tail of train scored by MAPE to pick the order
-      min_validation_rows: 7
-      maxiter_search: 30          # cheap fits during the order search
-      maxiter_final: 150          # thorough fit of the winning order
+      log_clip_headroom: 1.5      # explosion guard: cap log yhat at the anchor + this
+      clip_anchor_quantile: 0.99  # anchor that cap on a high quantile, not the raw max
+      bias_correction: true       # +sigma^2/2 lognormal lift; false = median (MAPE-optimal)
       enforce_stationarity_final: true
+      maxiter_final: 150
+      use_seasonal: true
+      seasonal_period: 7          # weekly seasonality for daily data
+    hyperparameter_grid:
+      - {p: 0, q: 1, P: 0, Q: 1, fourier_order_annual: 0}
+      - {p: 1, q: 1, P: 0, Q: 1, fourier_order_annual: 0}
+      - {p: 0, q: 1, P: 1, Q: 1, fourier_order_annual: 2}
+      - {p: 1, q: 1, P: 1, Q: 1, fourier_order_annual: 2}
+      - {p: 1, q: 1, P: 1, Q: 1, fourier_order_annual: 6}
+      - {p: 1, q: 0, P: 0, Q: 0, fourier_order_annual: 6}
     wrapper_config:
       min_rows_required: 35
       random_seed: 42
@@ -370,16 +396,19 @@ sarimax:
     base_hyperparameters:
       alpha: 0.05
       log_clip_headroom: 1.5
-      p_max: 1
-      q_max: 1
-      seasonal_cap: 0
-      seasonal_period: 52
-      use_seasonal: false         # Fourier terms handle the yearly cycle; no s=52 SARIMAX order
-      validation_fraction: 0.15
-      min_validation_rows: 4
-      maxiter_search: 30
-      maxiter_final: 150
+      clip_anchor_quantile: 0.99
+      bias_correction: true
       enforce_stationarity_final: true
+      maxiter_final: 150
+      use_seasonal: false         # a real s=52 order is prohibitively slow; annual
+      seasonal_period: 52         # structure comes from the Fourier terms instead
+    hyperparameter_grid:
+      - {p: 0, q: 1, fourier_order_annual: 0}
+      - {p: 1, q: 1, fourier_order_annual: 0}
+      - {p: 1, q: 0, fourier_order_annual: 0}
+      - {p: 0, q: 1, fourier_order_annual: 2}
+      - {p: 1, q: 1, fourier_order_annual: 2}
+      - {p: 1, q: 1, fourier_order_annual: 6}
     wrapper_config:
       min_rows_required: 18
       random_seed: 42

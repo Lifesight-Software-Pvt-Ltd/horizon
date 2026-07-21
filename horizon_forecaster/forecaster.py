@@ -43,6 +43,7 @@ from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
     HorizonForecasterError,
     InvalidConfigError,
+    ModelConvergenceError,
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.models.base import BaseModel
@@ -465,13 +466,55 @@ class HorizonForecaster:
         config = self._configs[model_name]
         base = config.get("base_hyperparameters", {})
 
+        # A candidate that fails is SKIPPED, not fatal: one unusable
+        # hyperparameter combination should not cost you the whole model when
+        # others fit fine. Only if every candidate fails does the model itself
+        # fail (and then it lands in evaluate_errors like any other failure,
+        # leaving the remaining models untouched). This matters in practice --
+        # e.g. a SARIMAX order whose forecast diverges, or an invalid CatBoost
+        # depth -- and applies to every model, not just the one that surfaced it.
         candidates = []
+        failures: Dict[str, str] = {}
+        failure_exceptions: List[HorizonForecasterError] = []
         for grid_entry in config["hyperparameter_grid"]:
             full_params = {**base, **grid_entry}
-            model, forecast_df, mape_result = self._fit_predict_mape(
-                model_name, full_params, adapted_train, adapted_test_features, y_test
-            )
+            try:
+                model, forecast_df, mape_result = self._fit_predict_mape(
+                    model_name, full_params, adapted_train, adapted_test_features, y_test
+                )
+            except HorizonForecasterError as e:
+                failures[str(grid_entry)] = f"{type(e).__name__}: {e}"
+                failure_exceptions.append(e)
+                continue
             candidates.append((full_params, model, forecast_df, mape_result))
+
+        if not candidates:
+            # When every candidate failed the SAME way, the cause is not
+            # hyperparameter-specific -- it's a property of the data or the
+            # model (too few rows, a missing column), and it would be wrong
+            # to relabel it. Re-raise the original exception so its real
+            # type and structured attributes survive: InsufficientDataError
+            # carries required_periods/available_periods, and callers
+            # (including evaluate_errors consumers) reasonably branch on
+            # type. Only genuinely mixed failures become the aggregate
+            # ModelConvergenceError, where no single type is representative.
+            distinct_types = {type(e) for e in failure_exceptions}
+            if len(distinct_types) == 1:
+                raise failure_exceptions[0]
+            raise ModelConvergenceError(
+                f"All {len(config['hyperparameter_grid'])} hyperparameter candidates "
+                f"failed for {model_name}: {failures}",
+                model_name=model_name,
+            )
+
+        if failures:
+            warnings.warn(
+                f"{model_name}: {len(failures)} of "
+                f"{len(config['hyperparameter_grid'])} hyperparameter candidates failed "
+                f"and were skipped; the best of the {len(candidates)} that succeeded was "
+                f"used. Skipped: {failures}",
+                stacklevel=3,
+            )
 
         def sort_key(candidate):
             val = candidate[3].value
