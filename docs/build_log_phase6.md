@@ -379,8 +379,7 @@ fallback branch never executes locally *at all*. It was effectively
 untested code that only ever ran on the matrix — which is why a bug fix
 landed in it and nothing caught the regression for a full 35-minute cycle.
 
-Closed by `tests/test_neuralprophet_compat.py` (renamed from
-`test_neuralprophet_hparam_patch.py`, now covering both shims), which stubs
+Closed by `tests/test_neuralprophet_compat.py`, which stubs
 `neuralprophet` and `torch` into `sys.modules` and drives the fallback
 directly. It asserts the trainer is restored, that `weights_only=False` and
 `map_location="cpu"` are both passed, that the primary loader is preferred
@@ -509,68 +508,65 @@ The discriminator was not the params at all -- it was
 
 ### Root cause
 
-`neuralprophet/time_net.py`, in `TimeNet.__init__`:
+`trainer.fit()` -> `_run()` -> `_log_hyperparams()` -> `logger.save()` ->
+`save_hparams_to_yaml()` -> `OmegaConf.save()`. OmegaConf then rejects
+`ConfigTrain`'s `loss_func: Union[str, _Loss, Callable]` and `fit()` dies
+before a single epoch runs.
+
+The trigger is the **logger**. `configure_trainer()` contains:
 
 ```python
-# TODO: causes a RuntimeError under certain conditions,
-#       investigate and handle better
-try:
-    self.save_hyperparameters()
-except RuntimeError:
-    pass
+if metrics_enabled:
+    config["logger"] = metrics_logger
+else:
+    config["logger"] = False
 ```
 
-PyTorch Lightning's `save_hyperparameters()`, *when omegaconf is
-importable*, converts the captured dataclass hparams through
-`OmegaConf.structured()`. OmegaConf refuses
-`ConfigTrain.loss_func: Union[str, _Loss, Callable]` and raises
-`ConfigValueError`, which subclasses `(OmegaConfBaseException, ValueError)`
--- **not** `RuntimeError`. NeuralProphet's guard therefore misses it and the
-exception escapes `fit()`. Registering a regressor is what pushes Lightning
-onto the OmegaConf branch, which is exactly the observed discriminator.
+and `collect_metrics` defaults to `True`, so a logger is always attached.
+Lightning only runs `_log_hyperparams()` when a logger exists -- so with no
+logger, the failing path is never reached.
 
-This also resolves the daily-vs-weekly puzzle that had been read as a data
-problem. Neither NeuralProphet nor Lightning *declares* omegaconf as a
-dependency -- it arrives transitively. The successful daily run and the
-failing weekly run were different resolved environments, not different data.
+### A wrong diagnosis, recorded on purpose
 
-### Why `pyproject.toml` was not touched
+The first fix targeted `TimeNet.__init__`, which wraps
+`self.save_hyperparameters()` in `except RuntimeError` (with its own "TODO:
+investigate and handle better"). The theory: OmegaConf raises
+`ConfigValueError`, a `ValueError`, so the guard misses it. A monkeypatch
+widened that guard.
 
-Both dependency routes were checked against the downloaded package sources
-rather than assumed:
+**It didn't work, and the theory was wrong.** `save_hyperparameters()`
+succeeds -- it stores the dataclass without validating it. The failure comes
+much later, when the logger serialises those stored hparams to YAML.
 
-| Candidate fix | Verdict |
-| --- | --- |
-| Bump `neuralprophet` 0.8.0 -> 0.9.0 | **No.** 0.9.0 has the identical `loss_func` annotation and the identical `except RuntimeError` guard. |
-| Pin `omegaconf < 2.2` | **No, worse.** 2.2+ raises "Unions of containers are not supported"; 2.1.x rejects *every* Union ("Union types are not supported"), which would break the no-regressor case that currently works. |
+Two things should have stopped this earlier:
 
-There is no version combination to pin to, so the pins stay as they are and
-the incompatibility is absorbed in the wrapper.
+1. The diagnosis was inferred from reading NeuralProphet's source, never
+   confirmed against a traceback. It was plausible and self-consistent,
+   which is exactly what made it convincing.
+2. Contrary evidence was already visible and got explained away. Daily data
+   fitted fine *with* regressors, which directly contradicts "registering a
+   regressor is the trigger". The real discriminator was never regressors.
 
-### The fix
+The monkeypatch has been removed rather than left in as harmless
+belt-and-braces: it was justified by a false story, and it carried a real
+defect of its own (Lightning locates its caller via
+`inspect.currentframe().f_back`, so the extra wrapper frame made it
+introspect the wrapper instead of `TimeNet.__init__`).
 
-`NeuralProphetWrapper._neutralize_lightning_hparam_capture()` replaces
-`TimeNet.save_hyperparameters` with a version that calls the original and
-swallows any exception. Applied once per process, guarded by a module-level
-flag so repeated `fit()` calls don't stack wrappers.
+Lesson for the rest of the phase: get the traceback before writing the fix.
 
-Safe because the call only writes hparams into the Lightning checkpoint,
-which this library never reads -- `save()`/`load()` round-trip the whole
-model through NeuralProphet's own torch-backed utilities. NeuralProphet
-already treats the call as best-effort; this widens a too-narrow `except`
-clause rather than changing intent. The original runs first, so
-environments where hparam capture works are unaffected.
+### Why `pyproject.toml` was still not touched
+
+The dependency analysis below stands regardless of where the error fires,
+and was checked against downloaded package sources rather than assumed.
 
 ### How this was verified
 
-`tests/test_neuralprophet_hparam_patch.py` -- deliberately **not** in
-`tests/test_neuralprophet.py`, which is `importorskip`'d on the real
-NeuralProphet. The patch is pure monkeypatching, so NeuralProphet is stubbed
-into `sys.modules` and the tests run everywhere, including CI and the
-sandbox where torch is absent. Cover: the exact `ConfigValueError` is
-absorbed; the original is still called; a successful return value passes
-through; the patch is idempotent; and it no-ops both when NeuralProphet is
-missing and when `TimeNet` is renamed upstream.
+`tests/test_data_adapter_neuralprophet.py` asserts `collect_metrics` is
+`False` for **every** frequency block. That per-frequency assertion is not
+padding: the first attempt at this fix landed in the `daily` block only --
+and `weekly` was the frequency actually failing. Verified by deleting the
+weekly entry and watching the test fail.
 
 Remaining gap: as with the rest of Part 2, an end-to-end fit with real
 regressors can only be confirmed locally, not in the sandbox.

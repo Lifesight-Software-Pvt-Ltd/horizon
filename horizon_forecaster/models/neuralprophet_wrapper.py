@@ -41,6 +41,17 @@ project owner's reference notebook:
   hit twice (Prophet producing negative forecasts in Phase 2; SARIMAX's
   annual Fourier swinging MAPE from ~6% to ~65% on under half a year).
 
+- **collect_metrics is disabled** (in default_params.yaml). This is a
+  correctness requirement, not a tuning choice. NeuralProphet attaches a
+  Lightning logger whenever metrics are enabled, and a logger makes
+  trainer.fit() run _log_hyperparams() -> save_hparams_to_yaml() ->
+  OmegaConf.save(). OmegaConf then rejects ConfigTrain's
+  `loss_func: Union[str, _Loss, Callable]` with ConfigValueError and fit()
+  dies before training. Disabling metrics makes configure_trainer() set
+  `logger = False`, so the path never runs. Costs nothing here: MAPE is
+  computed by the orchestrator, and NeuralProphet's own docs note that
+  collecting metrics slows training.
+
 - **No uncertainty bounds in v1**, per models/base.py's contract note.
   NeuralProphet can produce them via `quantiles=[...]`, which is a natural
   follow-up now that the plotting/export layers handle bounds, but it adds
@@ -83,9 +94,6 @@ _NOISY_LOGGERS = (
 # Wrapper-level settings that must NOT be forwarded to the NeuralProphet
 # constructor (it would raise on unexpected keyword arguments).
 _NON_CONSTRUCTOR_PARAMS = ("freq",)
-
-# Guard so the TimeNet patch below is applied at most once per process.
-_HPARAM_CAPTURE_PATCHED = False
 
 
 class NeuralProphetWrapper(BaseModel):
@@ -150,7 +158,6 @@ class NeuralProphetWrapper(BaseModel):
             from neuralprophet import NeuralProphet, set_random_seed
 
             self._silence_loggers()
-            self._neutralize_lightning_hparam_capture()
             set_random_seed(self.random_seed)
 
             model = NeuralProphet(**constructor_params)
@@ -261,97 +268,6 @@ class NeuralProphetWrapper(BaseModel):
             f"NeuralProphet returned no yhat column. Got: {list(forecast_df.columns)}",
             model_name=NeuralProphetWrapper.model_name,
         )
-
-    @staticmethod
-    def _neutralize_lightning_hparam_capture() -> None:
-        """
-        Widen NeuralProphet's own guard around ``save_hyperparameters()``.
-
-        Symptom
-        -------
-        ``fit()`` dies with::
-
-            ConfigValueError: Unions of containers are not supported:
-            loss_func: Union[str, _Loss, Callable]
-
-        but ONLY when future regressors are registered. The same params on a
-        bare ``ds``/``y`` frame fit fine, which is what made this look like a
-        bad hyperparameter for a while. It isn't -- adding a regressor is what
-        pushes Lightning down the OmegaConf branch when hashing hparams.
-
-        Cause
-        -----
-        ``TimeNet.__init__`` calls ``self.save_hyperparameters()`` inside::
-
-            # TODO: causes a RuntimeError under certain conditions,
-            #       investigate and handle better
-            try:
-                self.save_hyperparameters()
-            except RuntimeError:
-                pass
-
-        PyTorch Lightning, *if omegaconf happens to be importable*, tries to
-        convert the captured dataclass hparams via ``OmegaConf.structured()``.
-        ``ConfigTrain.loss_func`` is annotated ``Union[str, _Loss, Callable]``,
-        which OmegaConf rejects -- raising ``ConfigValueError``, a subclass of
-        ``(OmegaConfBaseException, ValueError)``. That is **not** a
-        ``RuntimeError``, so NeuralProphet's guard misses it and the exception
-        escapes ``fit()``.
-
-        Why not fix it in pyproject.toml
-        --------------------------------
-        Both routes were checked against the actual package sources:
-
-        - **Bumping NeuralProphet does not help.** 0.9.0 carries the identical
-          annotation and the identical ``except RuntimeError`` guard as the
-          pinned 0.8.0.
-        - **No omegaconf version works.** >= 2.2 raises "Unions of containers
-          are not supported"; 2.1.x is stricter still and rejects *every*
-          Union ("Union types are not supported"), which would break the
-          no-regressor case too. There is no version to pin to. Note also that
-          neither NeuralProphet nor Lightning *declares* omegaconf -- it
-          arrives transitively, which is why this reproduced on one dataset
-          and not another: the two runs had different resolved environments,
-          not different data.
-
-        So the dependency pins stay as they are and the incompatibility is
-        absorbed here.
-
-        Why this is safe
-        ----------------
-        ``save_hyperparameters()`` only records init args into the Lightning
-        checkpoint. This library never reads them: ``save()``/``load()`` above
-        round-trip the whole model object through NeuralProphet's own
-        torch-backed utilities. NeuralProphet already treats the call as
-        best-effort (it swallows RuntimeError and continues), so broadening
-        which exception types are swallowed keeps its intent and merely fixes
-        the too-narrow ``except`` clause. The original is still called first,
-        so environments where it works are unaffected.
-        """
-        global _HPARAM_CAPTURE_PATCHED
-        if _HPARAM_CAPTURE_PATCHED:
-            return
-
-        try:
-            from neuralprophet import time_net
-        except Exception:  # pragma: no cover - import chain unavailable
-            return
-
-        time_net_class = getattr(time_net, "TimeNet", None)
-        if time_net_class is None:  # pragma: no cover - upstream rename
-            return
-
-        original = time_net_class.save_hyperparameters
-
-        def _tolerant_save_hyperparameters(self, *args, **kwargs):
-            try:
-                return original(self, *args, **kwargs)
-            except Exception:
-                # Checkpoint hparam capture is optional; see docstring.
-                return None
-
-        time_net_class.save_hyperparameters = _tolerant_save_hyperparameters
-        _HPARAM_CAPTURE_PATCHED = True
 
     @staticmethod
     def _silence_loggers() -> None:

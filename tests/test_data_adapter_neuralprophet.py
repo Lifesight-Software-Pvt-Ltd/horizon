@@ -80,3 +80,29 @@ def test_transform_future_is_stateless_and_needs_no_prior_train_call():
     out = adapter.transform_future(pd.Series(pd.date_range("2022-02-10", periods=3, freq="D")))
     assert list(out.columns) == ["ds"]
     assert len(out) == 3
+
+
+def test_collect_metrics_is_disabled_for_every_frequency():
+    """
+    Correctness requirement, not tuning. With metrics enabled NeuralProphet
+    attaches a Lightning logger, which makes trainer.fit() run
+    _log_hyperparams() -> save_hparams_to_yaml() -> OmegaConf.save().
+    OmegaConf rejects ConfigTrain's `loss_func: Union[str, _Loss, Callable]`
+    and fit() dies before training.
+
+    Asserted per frequency because the first attempt at this fix landed in
+    the daily block only -- and weekly was the frequency actually failing.
+    """
+    import yaml
+    from pathlib import Path
+
+    import horizon_forecaster
+
+    config_path = Path(horizon_forecaster.__file__).parent / "config" / "default_params.yaml"
+    neuralprophet = yaml.safe_load(config_path.read_text())["neuralprophet"]
+
+    assert set(neuralprophet) >= {"daily", "weekly"}
+    for frequency, block in neuralprophet.items():
+        assert block["base_hyperparameters"]["collect_metrics"] is False, (
+            f"{frequency} must disable collect_metrics, or NeuralProphet cannot fit"
+        )

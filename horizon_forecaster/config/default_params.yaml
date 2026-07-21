@@ -442,6 +442,16 @@ neuralprophet:
       daily_seasonality: false
       impute_missing: true
       accelerator: cpu          # pinned so local (MPS) and CI (CPU) agree
+      # REQUIRED, not an optimisation. With metrics enabled, NeuralProphet
+      # attaches a Lightning logger, which makes trainer.fit() run
+      # _log_hyperparams() -> save_hparams_to_yaml() -> OmegaConf.save().
+      # OmegaConf then rejects ConfigTrain's
+      # `loss_func: Union[str, _Loss, Callable]` and fit() dies outright.
+      # False makes configure_trainer() set `logger = False`, so that path
+      # never runs. We compute MAPE in the orchestrator and never read
+      # NeuralProphet's training metrics, so nothing is lost -- and NP's own
+      # docs note metrics collection slows training down.
+      collect_metrics: false
       freq: auto                # wrapper-level; never passed to the constructor
     hyperparameter_grid:
       - learning_rate: 0.01
@@ -463,6 +473,7 @@ neuralprophet:
       daily_seasonality: false
       impute_missing: true
       accelerator: cpu
+      collect_metrics: false    # required -- see the daily block's note
       freq: auto
     hyperparameter_grid:
       - learning_rate: 0.01
