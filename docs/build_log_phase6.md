@@ -351,6 +351,44 @@ Note this bug lives in a code path that only `save`/`load` exercises, and
 would otherwise have surfaced the first time someone tried to reload a
 persisted model in a fresh environment.
 
+#### ...and then CI caught the fix itself
+
+The next CI run failed the *same test* again, on a different cause — this
+time inside the fallback added above:
+
+```
+AttributeError: 'NoneType' object has no attribute 'predict'
+  neuralprophet/forecaster.py:2922  result = self.trainer.predict(...)
+```
+
+**Cause:** NeuralProphet's `save()` deliberately sets `forecaster.trainer`
+and `forecaster.model._trainer` to `None` before writing, because a PyTorch
+Lightning `Trainer` is not picklable. Its `load()` then calls
+`m.restore_trainer(...)` to rebuild one. The fallback did a bare
+`torch.load()` and skipped that step, so the model came back structurally
+complete but without a trainer, and died on the *next* `predict()` rather
+than at load time.
+
+**Fix:** the fallback now mirrors `np_load()`'s post-load step, calling
+`restore_trainer(accelerator="cpu")` (explicit `"cpu"` rather than `None`,
+to stay consistent with the `map_location="cpu"` immediately above).
+
+**The real lesson is about the test gap, not the bug.** Both failures were
+CI-only for the same structural reason: local torch is < 2.6, so the
+fallback branch never executes locally *at all*. It was effectively
+untested code that only ever ran on the matrix — which is why a bug fix
+landed in it and nothing caught the regression for a full 35-minute cycle.
+
+Closed by `tests/test_neuralprophet_compat.py` (renamed from
+`test_neuralprophet_hparam_patch.py`, now covering both shims), which stubs
+`neuralprophet` and `torch` into `sys.modules` and drives the fallback
+directly. It asserts the trainer is restored, that `weights_only=False` and
+`map_location="cpu"` are both passed, that the primary loader is preferred
+when it works, and that a model without `restore_trainer` doesn't crash.
+These run on **any** torch version, including the sandbox where torch isn't
+installed. Verified by reverting the fix: `test_fallback_restores_the_trainer`
+fails with "fallback returned an unusable model", and passes once restored.
+
 ---
 
 ## Uniformity refactor (post Part 2, driven by real-dataset testing)

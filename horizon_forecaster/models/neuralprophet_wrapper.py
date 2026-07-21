@@ -439,6 +439,20 @@ class NeuralProphetWrapper(BaseModel):
         appropriate here because the file was written by this library's own
         save() -- a trusted source, which is precisely the condition PyTorch's
         documentation attaches to that flag.
+
+        **The fallback must also restore the trainer.** NeuralProphet's
+        `save()` deliberately sets `forecaster.trainer` and
+        `forecaster.model._trainer` to None before writing, because a
+        PyTorch Lightning `Trainer` is not picklable; its `load()` then calls
+        `restore_trainer()` to rebuild one. A bare `torch.load()` skips that
+        step, so the model comes back with `trainer = None` and the next
+        `predict()` dies deep inside NeuralProphet with a bare
+        `AttributeError: 'NoneType' object has no attribute 'predict'`.
+
+        This is the second CI-only failure on this same method, from the same
+        cause: the fallback path silently diverged from what NeuralProphet's
+        own loader does. Local runs (torch < 2.6) never reach the fallback,
+        so only the CI matrix exercises it.
         """
         from neuralprophet import load as np_load
 
@@ -447,4 +461,12 @@ class NeuralProphetWrapper(BaseModel):
         except Exception:
             import torch
 
-            return torch.load(path, map_location="cpu", weights_only=False)
+            model = torch.load(path, map_location="cpu", weights_only=False)
+            # Mirror np_load()'s own post-load step. "cpu" (rather than
+            # None, which would defer to the model's stored accelerator) to
+            # stay consistent with map_location above -- this branch has
+            # just pinned everything to CPU.
+            restore_trainer = getattr(model, "restore_trainer", None)
+            if restore_trainer is not None:  # pragma: no branch - upstream rename guard
+                restore_trainer(accelerator="cpu")
+            return model
