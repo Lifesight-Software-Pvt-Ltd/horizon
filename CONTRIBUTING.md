@@ -1,7 +1,7 @@
 # Contributing to Horizon Forecaster
 
 This document reflects how the project has actually been built so far
-(Phases 0–4), not a generic template — the conventions below are the ones
+(Phases 0–6), not a generic template — the conventions below are the ones
 already in use throughout the codebase. Following them keeps a
 contribution consistent with everything already here, rather than adding
 a second style alongside the existing one.

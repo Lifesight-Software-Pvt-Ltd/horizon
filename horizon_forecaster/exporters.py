@@ -275,12 +275,12 @@ def export_forecast(
     dpi: int = 100,
 ) -> Dict[str, str]:
     """
-    One-call export of a forecast run: the three CSVs AND (by default) the
+    One-call export of a forecast run: the five CSVs AND (by default) the
     forecast charts, all into the same output_dir.
 
     Writes the CSVs via export_forecast_csvs(), then — unless
     save_plots=False, or there are no forecasts to plot — the overlay and
-    per-model grid PNGs via horizon_forecaster.plotting.save_forecast_plots().
+    per-model PNGs via horizon_forecaster.plotting.save_forecast_plots().
     matplotlib is imported lazily here, so the CSV-only export_forecast_csvs()
     path never pays that import cost.
 
@@ -296,9 +296,10 @@ def export_forecast(
         dpi: resolution for the saved plots.
 
     Returns:
-        A merged dict of every path written: the CSV keys ("final",
-        "per_model", "rejected") plus, when plots were saved, plot keys
-        ("plot_overlay", "plot_grid").
+        A merged dict of every path written: the CSV keys ("final_ensemble",
+        "final_best_model", "per_model", "rejected", "model_summary") plus,
+        when plots were saved, "plot_"-prefixed plot keys ("plot_overlay",
+        "plot_ensemble", and one "plot_<model>" per model).
     """
     written = export_forecast_csvs(
         forecast_results,
