@@ -487,3 +487,62 @@ neuralprophet:
     wrapper_config:
       min_rows_required: 16
       random_seed: 42
+
+# ---------------------------------------------------------------------------
+# Bayesian PyMC (NUTS/MCMC). Phase 6, Part 3.
+#
+# A Bayesian structural model: linear trend + Fourier seasonality (annual
+# for both frequencies, plus a weekly cycle for daily) + a linear regression
+# on the independent columns, observed through a Student-T likelihood. All
+# of that lives in models/bayesianpymc_wrapper.py; the adapter only hands
+# over "ds", raw "y", and standardised exog.
+#
+# Like the other models it uses the standard forecaster-level grid search,
+# but NUTS sampling is expensive, so the grid is deliberately SMALL and
+# varies only the two settings that matter most on real data: the Fourier
+# order (n_fourier) and the sampler's target_accept. Every candidate is
+# sampled at FULL draws -- there is no cheap-selection shortcut -- so a
+# candidate's MAPE reflects the exact posterior it would produce in a real
+# forecast. Expect this model to take meaningfully longer than the others.
+#
+# The sampler settings (draws/tune/chains/max_treedepth/init) are the
+# reference notebook's, pinned in base_hyperparameters so every candidate
+# and the final full-data refit sample identically. cores=1 keeps runs
+# reproducible and avoids multiprocessing issues under CI.
+bayesianpymc:
+  daily:
+    base_hyperparameters:
+      draws: 2000
+      tune: 2000
+      chains: 2
+      cores: 1
+      max_treedepth: 15
+      init: adapt_diag
+      use_short_seasonal: true    # weekly cycle, meaningful for daily data
+      ci_lower_pct: 3
+      ci_upper_pct: 97
+    hyperparameter_grid:
+      - {n_fourier: 4, target_accept: 0.95}
+      - {n_fourier: 2, target_accept: 0.95}
+      - {n_fourier: 6, target_accept: 0.90}
+    wrapper_config:
+      min_rows_required: 35
+      random_seed: 42
+  weekly:
+    base_hyperparameters:
+      draws: 2000
+      tune: 2000
+      chains: 2
+      cores: 1
+      max_treedepth: 15
+      init: adapt_diag
+      use_short_seasonal: false   # no sub-weekly cycle at weekly granularity
+      ci_lower_pct: 3
+      ci_upper_pct: 97
+    hyperparameter_grid:
+      - {n_fourier: 4, target_accept: 0.95}
+      - {n_fourier: 2, target_accept: 0.95}
+      - {n_fourier: 3, target_accept: 0.90}
+    wrapper_config:
+      min_rows_required: 18
+      random_seed: 42

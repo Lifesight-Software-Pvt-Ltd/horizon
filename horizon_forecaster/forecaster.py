@@ -29,6 +29,7 @@ import pandas as pd
 import yaml
 
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
+from horizon_forecaster.data_adapter.bayesianpymc_adapter import BayesianPyMCAdapter
 from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
@@ -47,6 +48,7 @@ from horizon_forecaster.exceptions import (
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.models.base import BaseModel
+from horizon_forecaster.models.bayesianpymc_wrapper import BayesianPyMCWrapper
 from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
@@ -79,13 +81,13 @@ _FORECAST_RANGE_TOLERANCE = 0.5
 
 # Every model this orchestrator can run. Only models with a real
 # adapter/wrapper implementation belong here. SARIMAX landed in Phase 6
-# (Part 1) and NeuralProphet in Part 2; pymc is still an empty stub file
-# (Phase 6 Part 3) and is deliberately NOT registered yet.
+# (Part 1), NeuralProphet in Part 2, and Bayesian PyMC in Part 3.
 MODEL_REGISTRY: Dict[str, dict] = {
     "prophet": {"adapter": ProphetAdapter, "wrapper": ProphetWrapper},
     "catboost": {"adapter": CatBoostAdapter, "wrapper": CatBoostWrapper},
     "sarimax": {"adapter": SARIMAXAdapter, "wrapper": SARIMAXWrapper},
     "neuralprophet": {"adapter": NeuralProphetAdapter, "wrapper": NeuralProphetWrapper},
+    "bayesianpymc": {"adapter": BayesianPyMCAdapter, "wrapper": BayesianPyMCWrapper},
 }
 
 @dataclass

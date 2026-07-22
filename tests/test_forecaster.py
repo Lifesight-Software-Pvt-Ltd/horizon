@@ -13,6 +13,15 @@ from horizon_forecaster.exceptions import (
 )
 from horizon_forecaster.forecaster import HorizonForecaster, EvaluationResult, ForecastResult, MODEL_REGISTRY
 
+# Tests that run the DEFAULT model set (every registered model) would
+# otherwise sample Bayesian PyMC at its production draws (2000 tune + 2000
+# draws x 2 chains, per grid candidate) -- minutes per test. These settings
+# make its NUTS run trivially cheap while still exercising the real fit ->
+# predict path through the orchestrator; the same way prophet/catboost/
+# neuralprophet are given fast, deterministic params in these tests. Passed
+# as a model_params override, so PyMC also skips its own grid search here.
+_FAST_PYMC = {"draws": 40, "tune": 40, "chains": 1, "n_fourier": 1}
+
 def make_raw_df(n=60, freq="D", with_spend=False, with_zero_variance_col=False):
     df = pd.DataFrame({
         "date": pd.date_range("2026-01-01", periods=n, freq=freq),
@@ -141,7 +150,7 @@ def test_models_defaults_to_every_registered_model():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert set(forecaster.models) == set(MODEL_REGISTRY.keys())
-    assert set(forecaster.models) == {"prophet", "catboost", "sarimax", "neuralprophet"}
+    assert set(forecaster.models) == {"prophet", "catboost", "sarimax", "neuralprophet", "bayesianpymc"}
 
 def test_models_can_be_restricted_to_a_subset():
     df = make_raw_df(n=60)
@@ -383,20 +392,21 @@ def test_evaluate_runs_both_models_by_default():
     df = make_raw_df(n=90)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     results = forecaster.evaluate()
     assert set(results.keys()) == set(MODEL_REGISTRY.keys())  # every registered model runs by default
     assert isinstance(results["prophet"], EvaluationResult)
     assert isinstance(results["catboost"], EvaluationResult)
     assert isinstance(results["sarimax"], EvaluationResult)
+    assert isinstance(results["bayesianpymc"], EvaluationResult)
 
 
 def test_forecast_runs_both_models_by_default():
     df = make_raw_df(n=90)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     results = forecaster.forecast(horizon=5)
     assert set(results.keys()) == set(MODEL_REGISTRY.keys())  # every registered model runs by default
@@ -432,7 +442,7 @@ def test_evaluate_errors_reset_fresh_on_each_call_not_accumulated():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"depth": -1}, "bayesianpymc": _FAST_PYMC},
     )
     forecaster.evaluate()
     errors_first_call = dict(forecaster.evaluate_errors)
@@ -453,7 +463,7 @@ def test_grid_search_is_independent_per_model():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}},  # catboost gets no override
+        model_params={"prophet": {"seasonality_mode": "additive"}, "bayesianpymc": _FAST_PYMC},  # catboost gets no override
     )
     results = forecaster.evaluate()
     assert results["prophet"].grid_search_summary is None
@@ -934,7 +944,7 @@ def test_forecast_ensemble_reuses_evaluate_weights_and_warns_when_evaluate_not_c
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     assert forecaster._evaluate_mape_cache is None
     with pytest.warns(UserWarning, match=r"running evaluate\(\) internally"):
@@ -953,7 +963,7 @@ def test_forecast_does_not_rewarn_or_recompute_evaluate_on_second_call():
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     forecaster.forecast(horizon=5)
     cache_after_first_call = forecaster._evaluate_mape_cache
@@ -969,7 +979,7 @@ def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
-        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
+        model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     forecaster.evaluate()
 
