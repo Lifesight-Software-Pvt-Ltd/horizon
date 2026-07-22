@@ -110,14 +110,18 @@ very-high MAPE).
   slightly above the (uncorrected) interval centre — correct lognormal
   behaviour, since mean > median.
 
-- **Annual Fourier only with enough history.** Annual Fourier terms are
-  added for both frequencies, but only when training length covers ≥ half
-  the annual period (`_MIN_ANNUAL_COVERAGE = 0.5`). Below that they span
-  less than half a cycle and become unconstrained trend-like regressors
-  that extrapolate wildly — the same failure mode Prophet's `auto`
-  candidates guard against. **Confirmed during build:** on a ~2.5-month
-  daily series, including annual Fourier drove synthetic test MAPE from
-  ~6% to ~65%; the coverage guard restores ~6%.
+- **~~Annual Fourier only with enough history.~~ SUPERSEDED** — see
+  "Uniformity refactor" below. Annual Fourier was originally always-on for
+  both frequencies, gated by a hardcoded coverage rule
+  (`_MIN_ANNUAL_COVERAGE = 0.5`): terms were added only when training length
+  covered ≥ half the annual period, since below that they span less than
+  half a cycle and become unconstrained trend-like regressors that
+  extrapolate wildly. **Confirmed during build:** on a ~2.5-month daily
+  series, including annual Fourier drove synthetic test MAPE from ~6% to
+  ~65%; the coverage guard restored ~6%. The refactor replaced this fixed
+  gate entirely: `fourier_order_annual` is now an ordinary grid
+  hyperparameter (`0` = off), so the data chooses the order per dataset and
+  the coverage constant is gone.
 
 - **Auto-detected exog logging.** The library's `independent_columns` is a
   flat list with no spend/flag metadata, so the adapter log1p's a column

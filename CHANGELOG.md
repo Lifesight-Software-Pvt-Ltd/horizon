@@ -44,6 +44,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 - **Annual Fourier generation moved from `SARIMAXAdapter` into `SARIMAXWrapper`**, where it becomes an ordinary grid-searchable hyperparameter (`fourier_order_annual`, `0` = off) instead of a hardcoded module constant gated by a coverage rule. Real data forced this: on a ~3-year daily series annual Fourier was a clear win, but on a ~2-year weekly series it was *actively harmful* (82.81% at order 2 vs 48.74% with none) and diverged outright at order 10 — no fixed default serves both, so the data has to choose. Terms are now built from **absolute day offsets** against a fit-time reference date rather than a positional index, making them robust to gaps in the date sequence. (Phase 6, Part 2 hardening)
 - Horizon-vs-history warning tightened: it now fires once the horizon exceeds **half** the available history (`_HORIZON_WARNING_FRACTION = 0.5`), replacing a rule that only fired above **twice the entire history**. The old threshold let a 100-period forecast from 121 periods of data pass silently — the exact case that produced an implausible real-world forecast. (Phase 6, Part 1 hardening)
 - `{prefix}_final.csv` renamed to `{prefix}_final_ensemble.csv`, now that a best-single-model "final" is exported alongside it. (Phase 6, Part 1 hardening)
+- Pinned all previously-unpinned dependencies; added `requires-python` constraint. (Phase 2, packaging hardening)
+- Added a CI test matrix across Python 3.10–3.12, catching a `matplotlib` version incompatibility and a `setuptools 82` regression (`pkg_resources` removed). (Phase 2, packaging hardening)
+- Added explicit `[tool.setuptools.packages.find]` include list to prevent stray local folders (e.g. `test_env/`) from being mistaken for a second top-level package. (Phase 2, packaging hardening)
+- **Breaking:** `HorizonForecaster.evaluate()`/`.forecast()` now always return a `Dict[str, EvaluationResult]`/`Dict[str, ForecastResult]` keyed by model name, even when only one model is requested — previously returned a single result object directly. (Phase 3)
+- `BaseAdapter.__init__()` now accepts a uniform `frequency` parameter (used by `CatBoostAdapter`, ignored by `ProphetAdapter`) so `forecaster.py`'s `MODEL_REGISTRY`-driven adapter instantiation stays identical across every model, with no per-model special-casing in the orchestrator. (Phase 3)
+- `CatBoostWrapper.min_rows_required` is now a plain training-row-count floor, identical in meaning to `ProphetWrapper`'s — previously it applied to rows remaining *after* `CatBoostAdapter`'s lag-warmup drop, a mechanism that no longer exists. (Phase 3)
+- `publish.yml` switched from `twine` + long-lived `PYPI_API_TOKEN` secrets to PyPI Trusted Publishing (OIDC via `pypa/gh-action-pypi-publish`) — no stored credentials, short-lived per-run tokens instead. Manual `workflow_dispatch` runs now take a `target` input (`testpypi` default / `pypi`), so a manual run defaults to a safe TestPyPI dry run rather than a real release; tag pushes (`v*`) still always publish to real PyPI.
 
 ### Fixed
 
@@ -59,16 +66,6 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 - `CatBoostWrapper._categorical_feature_names` is now always empty — no calendar feature is declared categorical, matching the working reference notebook (which used none) rather than the original, untested categorical-encoding assumption. (Phase 3)
 - Fixed `CatBoostWrapper.save()`/`.load()` silently dropping the new non-negative-clipping decision (`_target_min`) on a reload — caught while adding the feature, before it shipped as a real bug. (Phase 3)
 
-### Changed
-
-- Pinned all previously-unpinned dependencies; added `requires-python` constraint. (Phase 2, packaging hardening)
-- Added a CI test matrix across Python 3.10–3.12, catching a `matplotlib` version incompatibility and a `setuptools 82` regression (`pkg_resources` removed). (Phase 2, packaging hardening)
-- Added explicit `[tool.setuptools.packages.find]` include list to prevent stray local folders (e.g. `test_env/`) from being mistaken for a second top-level package. (Phase 2, packaging hardening)
-- **Breaking:** `HorizonForecaster.evaluate()`/`.forecast()` now always return a `Dict[str, EvaluationResult]`/`Dict[str, ForecastResult]` keyed by model name, even when only one model is requested — previously returned a single result object directly. (Phase 3)
-- `BaseAdapter.__init__()` now accepts a uniform `frequency` parameter (used by `CatBoostAdapter`, ignored by `ProphetAdapter`) so `forecaster.py`'s `MODEL_REGISTRY`-driven adapter instantiation stays identical across every model, with no per-model special-casing in the orchestrator. (Phase 3)
-- `CatBoostWrapper.min_rows_required` is now a plain training-row-count floor, identical in meaning to `ProphetWrapper`'s — previously it applied to rows remaining *after* `CatBoostAdapter`'s lag-warmup drop, a mechanism that no longer exists. (Phase 3)
-- `publish.yml` switched from `twine` + long-lived `PYPI_API_TOKEN` secrets to PyPI Trusted Publishing (OIDC via `pypa/gh-action-pypi-publish`) — no stored credentials, short-lived per-run tokens instead. Manual `workflow_dispatch` runs now take a `target` input (`testpypi` default / `pypi`), so a manual run defaults to a safe TestPyPI dry run rather than a real release; tag pushes (`v*`) still always publish to real PyPI.
-
 ### Known limitations
 
 - **Ensemble weighting is not guaranteed to beat the best individual model** — this is a real, permanent characteristic of the design, not a bug to be fixed. Confirmed via direct testing (not assumed): even inverse-MAPE weighting can produce an ensemble MAPE worse than the single best model — on a synthetic test, Prophet alone scored 1.31% MAPE, CatBoost alone 12.77%, and the ~91%/9%-weighted ensemble of the two scored 1.58%, worse than Prophet alone. Root cause: weights are static across the whole horizon while each model's real per-period error isn't, so an otherwise-strong ensemble can still get dragged down on the specific periods where the weaker model is wrong. Documented directly in `evaluation/ensemble.py`'s docstring as a load-bearing finding — this is why `evaluate()`'s `EnsembleResult.mape` is computed and surfaced against real actuals rather than assumed, so the ensemble's own accuracy can always be checked against each individual model's before trusting it. (Phase 4)
@@ -76,5 +73,5 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 ### Known deferred issues
 
 - 24 CVEs in `torch`/`pytorch-lightning`, forced by `neuralprophet==0.8.0`'s own version constraints — consciously deferred to Phase 6 rather than pinning an untested pre-release NeuralProphet.
-- PyMC and NeuralProphet still need their own `save()`/`load()` overrides (Phase 6).
+- PyMC still needs its own `save()`/`load()` override (Phase 6, Part 3). NeuralProphet's is now implemented (torch-backed, with a trainer-restoring load fallback).
 - **PyMC** is the one model still not registered in `forecaster.py`'s `MODEL_REGISTRY` (empty stub adapter/wrapper only) — Phase 6, Part 3. SARIMAX (Part 1) and NeuralProphet (Part 2) are now registered, and the ensemble logic needed no changes to absorb either, as designed; it has now been exercised end-to-end on a real 4-model run.

@@ -3,7 +3,7 @@
 How `HorizonForecaster` combines multiple models' predictions into one
 weighted ensemble (Phase 4). This is a reference for how to use and
 configure it; for the design decisions and how it was verified, see
-`docs/build_log_phase3_phase4.md`.
+`docs/build_log_phase3-4-5.md`.
 
 ## What it does
 

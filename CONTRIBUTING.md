@@ -98,8 +98,8 @@ actually needed them; it's worth checking before adding a new one.
   verify against a real dataset if you can, not just synthetic test
   data — the CatBoost redesign in Phase 3 exists precisely because a
   synthetic-only test suite didn't catch a real, dataset-shape-dependent
-  failure mode. `docs/real_dataset_test_matrix.md` has a working
-  checklist of dataset shapes and edge cases worth trying.
+  failure mode. The per-phase build logs in `docs/` record the dataset
+  shapes and edge cases each model was checked against.
 
 ## Current project status
 
