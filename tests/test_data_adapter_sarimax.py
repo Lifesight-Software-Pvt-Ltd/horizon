@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import pandas as pd
 import pytest
@@ -91,6 +92,74 @@ def test_transform_train_missing_column_raises():
     adapter = SARIMAXAdapter("date", "orders", ["spend"], "daily")
     with pytest.raises(InvalidConfigError):
         adapter.transform_train(make_raw().drop(columns=["spend"]))
+
+
+def _two_years_weekly(n=104):
+    return pd.date_range("2022-01-02", periods=n, freq="W")
+
+
+def test_annual_collinearity_warning_fires_for_a_seasonal_driver():
+    """
+    A column that tracks the annual cycle (like a seasonal stockout weighting)
+    explains the same variance as the wrapper's annual Fourier terms, so the
+    user is warned that the higher-Fourier grid candidates may destabilise.
+    """
+    dates = _two_years_weekly()
+    t = np.arange(len(dates))
+    seasonal = 5 + 3 * np.sin(2 * np.pi * t / 52.0)  # non-negative, non-binary -> log1p'd
+    raw = pd.DataFrame({"date": dates, "orders": 100 + t + seasonal, "oos": seasonal})
+
+    adapter = SARIMAXAdapter("date", "orders", ["oos"], "weekly")
+    with pytest.warns(UserWarning, match=r"track the annual seasonal cycle.*oos"):
+        adapter.transform_train(raw)
+
+
+def test_annual_collinearity_warning_silent_for_a_nonseasonal_driver():
+    """
+    A spend-like column dominated by trend + noise, not the annual cycle,
+    must NOT trip the warning -- otherwise it would cry wolf on ordinary
+    spend inputs. (A plain trend is not sinusoidal, so its annual R² is low.)
+    """
+    dates = _two_years_weekly()
+    t = np.arange(len(dates))
+    rng = np.random.default_rng(0)
+    spend = 200 + 3.0 * t + rng.normal(0, 40, len(dates))  # trend + noise, no annual term
+    raw = pd.DataFrame({"date": dates, "orders": 100 + t, "spend": spend})
+
+    adapter = SARIMAXAdapter("date", "orders", ["spend"], "weekly")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any collinearity warning would raise
+        adapter.transform_train(raw)  # must not raise
+
+
+def test_annual_collinearity_r2_high_for_pure_sine_low_for_trend():
+    """
+    The scorer itself: ~1.0 on a clean annual sine, and for a linear ramp
+    comfortably below the warning threshold. (A ramp isn't sinusoidal, but
+    over a non-integer number of years it retains a small projection onto the
+    annual basis -- what matters is that it stays well under the threshold, so
+    ordinary trending spend never trips the warning.)
+    """
+    from horizon_forecaster.data_adapter.sarimax_adapter import (
+        _ANNUAL_COLLINEARITY_R2_THRESHOLD,
+    )
+
+    adapter = SARIMAXAdapter("date", "orders", ["x"], "weekly")
+    dates = _two_years_weekly()
+    t = np.arange(len(dates))
+    sine = np.sin(2 * np.pi * t / 52.0)
+    ramp = t.astype(float)
+    assert adapter._annual_collinearity_r2(pd.Series(dates), sine) > 0.95
+    assert (
+        adapter._annual_collinearity_r2(pd.Series(dates), ramp)
+        < _ANNUAL_COLLINEARITY_R2_THRESHOLD
+    )
+
+
+def test_annual_collinearity_r2_is_zero_for_constant_column():
+    adapter = SARIMAXAdapter("date", "orders", ["x"], "weekly")
+    dates = _two_years_weekly()
+    assert adapter._annual_collinearity_r2(pd.Series(dates), np.full(len(dates), 7.0)) == 0.0
 
 
 def test_works_with_no_independent_columns():

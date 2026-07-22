@@ -25,6 +25,7 @@ reuses -- the per-column log mask, and the standardisation mean/std/range
 fitted on TRAIN only.
 """
 
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -32,6 +33,20 @@ import pandas as pd
 
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.exceptions import InvalidConfigError
+
+# Days in a mean year, for building the annual seasonal basis used by the
+# collinearity check. Matches SARIMAXWrapper's _ANNUAL_PERIOD_DAYS so the
+# check measures overlap with the very Fourier terms the wrapper generates.
+_ANNUAL_PERIOD_DAYS = 365.25
+
+# An independent column is flagged as annually collinear when a sin/cos
+# annual basis explains at least this fraction of its variance (R²). 0.30 is
+# deliberately permissive: the warning is diagnostic, not an error, and the
+# point is to surface a real overlap the user may not know about. Calibrated
+# on real data where a stockout-weighting column (corr with the annual sine
+# ~0.58, so R² >= ~0.33) collided with the annual Fourier grid dimension,
+# while spend columns (annual R² well below 0.30) did not.
+_ANNUAL_COLLINEARITY_R2_THRESHOLD = 0.30
 
 
 class SARIMAXAdapter(BaseAdapter):
@@ -87,6 +102,10 @@ class SARIMAXAdapter(BaseAdapter):
         if self.independent_columns:
             self._log_columns = self._detect_log_columns(df[self.independent_columns])
             exog_ind = self._apply_log(df[self.independent_columns])
+            # Warn on annual collinearity BEFORE standardising (scale-free
+            # anyway) so the user learns why a seasonal driver can make the
+            # higher-Fourier grid candidates unstable. See the helper.
+            self._warn_on_annual_collinearity(df["ds"], exog_ind)
             self._means = exog_ind.mean()
             self._stds = exog_ind.std(ddof=0).replace(0.0, 1.0)  # guard constant columns
             standardized = (exog_ind - self._means) / self._stds
@@ -157,6 +176,74 @@ class SARIMAXAdapter(BaseAdapter):
             if series.min() >= 0 and series.nunique() > 2:
                 log_cols.append(col)
         return log_cols
+
+    def _annual_collinearity_r2(self, ds: pd.Series, values: np.ndarray) -> float:
+        """
+        Fraction of a column's variance explained by an annual sin/cos basis
+        (R² of an OLS fit on [1, sin(2πt/P), cos(2πt/P)], t in days). Phase-
+        invariant: a seasonal driver is flagged whatever its peak week. Returns
+        0.0 for degenerate input (constant column, <3 usable points).
+        """
+        v = np.asarray(values, dtype=float)
+        finite = np.isfinite(v)
+        if finite.sum() < 3:
+            return 0.0
+        v = v[finite]
+        if np.std(v) < 1e-12:
+            return 0.0
+
+        ds = pd.to_datetime(pd.Series(ds).reset_index(drop=True))
+        t_days = (ds - ds.min()).dt.total_seconds().to_numpy() / 86400.0
+        t_days = t_days[finite]
+        angle = 2.0 * np.pi * t_days / _ANNUAL_PERIOD_DAYS
+        design = np.column_stack([np.ones_like(angle), np.sin(angle), np.cos(angle)])
+
+        coef, *_ = np.linalg.lstsq(design, v, rcond=None)
+        ss_res = float(np.sum((v - design @ coef) ** 2))
+        ss_tot = float(np.sum((v - v.mean()) ** 2))
+        if ss_tot < 1e-12:
+            return 0.0
+        return max(0.0, 1.0 - ss_res / ss_tot)
+
+    def _warn_on_annual_collinearity(self, ds: pd.Series, exog_df: pd.DataFrame) -> None:
+        """
+        Flag independent columns that strongly track the annual cycle.
+
+        Such a column explains much of the same variance as SARIMAX's annual
+        Fourier terms, so on short histories the two compete: a good
+        low-Fourier fit can collapse once the column is added, and the grid
+        search is pushed toward a lower `fourier_order_annual`. Confirmed on
+        real weekly data, where a stockout-weighting column (which is itself
+        seasonal) cut the best achievable MAPE roughly in half versus the same
+        run without it -- not a bug, an inherent identifiability limit on ~100
+        rows. This surfaces the cause instead of leaving it buried in the grid
+        summary. Diagnostic only: nothing is dropped or altered.
+        """
+        flagged = {
+            col: r2
+            for col in exog_df.columns
+            if (r2 := self._annual_collinearity_r2(ds, exog_df[col].to_numpy()))
+            >= _ANNUAL_COLLINEARITY_R2_THRESHOLD
+        }
+        if not flagged:
+            return
+
+        listed = ", ".join(
+            f"{col} (annual R²={r2:.2f})"
+            for col, r2 in sorted(flagged.items(), key=lambda kv: -kv[1])
+        )
+        warnings.warn(
+            f"SARIMAX: independent column(s) strongly track the annual seasonal cycle: "
+            f"{listed}. These explain much of the same variance as SARIMAX's annual Fourier "
+            f"terms, so on short histories the two compete and the higher fourier_order_annual "
+            f"grid candidates can become unstable (a good low-Fourier fit can collapse once "
+            f"such a column is added). This is expected, not an error -- the grid search will "
+            f"tend to pick a lower Fourier order when these columns are present. If a run "
+            f"without them scores better, this overlap is the likely reason; the column may "
+            f"still be causally real, it is just hard to separate from seasonality on this "
+            f"much history.",
+            stacklevel=4,
+        )
 
     def _apply_log(self, ind_df: pd.DataFrame) -> pd.DataFrame:
         out = ind_df.copy()

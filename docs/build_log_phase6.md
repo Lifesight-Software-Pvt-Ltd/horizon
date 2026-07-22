@@ -568,5 +568,87 @@ padding: the first attempt at this fix landed in the `daily` block only --
 and `weekly` was the frequency actually failing. Verified by deleting the
 weekly entry and watching the test fail.
 
+**Confirmed on real data.** The weekly dataset that had failed on every
+previous attempt now fits: 36.73% with independent columns, 58.20% without.
+All four models now run across daily and weekly, with and without exog.
+
+Also of note, and the first time it has happened on weekly: with independent
+columns the ensemble (34.41%) **beat** every individual model, Prophet
+35.47% / CatBoost 34.88% / NeuralProphet 36.73%, on near-even weights. That
+is the case the ensemble is built for -- three comparably-accurate models
+whose errors are partly independent.
+
 Remaining gap: as with the rest of Part 2, an end-to-end fit with real
 regressors can only be confirmed locally, not in the sandbox.
+
+---
+
+## SARIMAX exog-vs-Fourier collinearity warning (post Part 2)
+
+### The observation
+
+On the weekly dataset, adding independent columns made SARIMAX *worse*:
+best MAPE without exog 27.60%, with exog 48.74%. The other models were
+unaffected or improved. A deterministic model degrading on more information
+is counter-intuitive, so it warranted a real diagnosis rather than a guess.
+
+### Two refuted hypotheses, then the real one
+
+A per-candidate diagnostic (grid MAPE with and without exog, side by side)
+was decisive. Two theories died against it:
+
+1. **The training-range clamp.** Synthetic tests showed exog *helping* even
+   with 23-40% of future rows pinned to the training range; the clamp cost
+   under a point. Not the cause.
+2. **Too many columns / one-time-event promos.** A synthetic with four
+   event-only promo flags plus a trend-collinear column still saw exog help
+   at every Fourier order. Column count alone did not reproduce it.
+
+What the diagnostic actually showed was a **selection crossover**, not
+uniform damage. Exog *halved* the error of three of the four grid
+candidates (106%->48%, 114%->49%, 165%->83%) and hurt only the one that had
+been good: `fourier_order_annual=6` went 27.60% -> 65.07%. The best
+no-exog candidate (fourier=6) had no counterpart once exog was present.
+
+The user then supplied the missing fact: the offending column,
+`OOS_weightage`, is a stockout weighting -- a variable they *know* has a
+negative effect on orders. Its correlations told the rest of the story:
+`corr(y) = -0.584` (the negative effect, correctly captured -- SARIMAX fits
+an unconstrained coefficient, and standardisation preserves sign, so no
+special encoding is needed), but also `corr(annual sin) = +0.576` and
+`corr(trend) = -0.766`. The stockouts are *themselves* seasonal, so the
+column overlaps the annual Fourier basis. On ~100 rows SARIMAX cannot
+attribute that shared variance to both the column and six Fourier harmonics
+at once, so the fourier=6 fit destabilises. Without exog, Fourier owns that
+variance and nails it.
+
+### Why a warning, not a code change
+
+This is an inherent identifiability limit, not a defect: the data cannot
+separate a seasonal driver from the seasonal basis with this little history,
+and the grid already resolves it correctly (it picks a low Fourier order
+once exog is present). "Keep adjusting the code because the MAPE is high" is
+the wrong reflex -- the model is behaving correctly, the user just cannot
+have both signals cleanly on this dataset. So the fix is to make the cause
+*visible* rather than to chase the number.
+
+`SARIMAXAdapter._warn_on_annual_collinearity()` flags any independent column
+whose variance is >= 30% explained by an annual sin/cos basis (R² of an OLS
+fit on `[1, sin(2πt/P), cos(2πt/P)]`, `P = 365.25` days -- the same period
+the wrapper's Fourier terms use). Phase-invariant, so a seasonal driver is
+flagged whatever its peak week. Diagnostic only; nothing is dropped.
+
+The 0.30 threshold is calibrated, not guessed: on a frame mirroring the real
+data (two spend columns, a sparse promo flag, and a seasonal stockout
+column) it flags the stockout column at R²=0.95 and stays silent on the
+spends and the promo -- confirmed in `test_data_adapter_sarimax.py`, which
+also asserts a plain trend stays below the threshold so ordinary growing
+spend never trips it.
+
+### Note kept for later, not actioned
+
+SARIMAX's daily MAPE has drifted between runs on identical data with the
+identical winning candidate (17.73% vs 19.62%), while the other three models
+reproduce to the digit. Likely statsmodels MLE / BLAS-threading
+non-determinism, but that is a hypothesis, not a finding -- left open rather
+than "fixed" on a guess.
