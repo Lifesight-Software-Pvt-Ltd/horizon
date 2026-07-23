@@ -656,3 +656,176 @@ identical winning candidate (17.73% vs 19.62%), while the other three models
 reproduce to the digit. Likely statsmodels MLE / BLAS-threading
 non-determinism, but that is a hypothesis, not a finding -- left open rather
 than "fixed" on a guess.
+
+---
+
+## Part 3 — Bayesian PyMC (NUTS / MCMC)
+
+### Goal
+
+Add Bayesian PyMC as the fifth and final registered model, porting the
+project owner's working notebook (a Student-T structural model sampled with
+NUTS) into the adapter/wrapper/config contract -- the slowest and most
+structurally complex model, saved for last as planned.
+
+### What was built
+
+- `data_adapter/bayesianpymc_adapter.py` -- a **stateful** adapter, close
+  to SARIMAX's minus the log1p and the collinearity warning: hands over
+  `ds`, raw `y`, and standardised independent columns, with the same
+  train-range clamp on future exog. No target transform and no seasonal
+  features -- both belong to the wrapper (see below).
+- `models/bayesianpymc_wrapper.py` -- the Bayesian model: linear trend +
+  annual Fourier (+ a weekly Fourier cycle for daily) + a linear regression
+  on the standardised exog, observed through a Student-T likelihood, sampled
+  with NUTS. Overridden `save`/`load` (NetCDF sidecar) for the posterior.
+- `bayesianpymc:` config block (daily/weekly) and one `MODEL_REGISTRY` line.
+  As with every part before it, **no change to `forecaster.py`'s core logic
+  was needed** -- the gate rule still holds across all five models.
+
+### Key design decisions
+
+- **`predict()` reconstructs `mu` from stored posterior draws, in pure
+  numpy.** The notebook built one `Deterministic('mu')` over the WHOLE
+  series (train + test) and sliced the test rows out of the posterior --
+  which only works when train and test are sampled together. Under
+  `BaseModel`, `fit()` sees only training rows and `predict()` only future
+  dates, so instead the wrapper samples the posterior on TRAIN once, keeps
+  the flattened posterior draws of every coefficient (slope, intercept,
+  `beta_long`, `beta_short`, per-exog coefs), and reconstructs `mu` at the
+  future dates as a linear combination of those draws. Same model, same
+  numbers, but honouring the fit-once / predict-any-horizon split every
+  other wrapper obeys -- and `predict()` never imports pymc.
+
+- **Target standardisation and Fourier both live in the wrapper**, mirroring
+  SARIMAX's split. `y` is z-scored on TRAIN inside `fit()` (posterior
+  sampled in z-space, back-transformed to raw units in `predict()`), so `y`
+  keeps one raw meaning across models and `yhat` comes back in raw units for
+  MAPE. Fourier terms are built from absolute day offsets against a fit-time
+  reference date (gap-robust, phase-aligned across train/future), so the
+  Fourier order is an ordinary grid hyperparameter.
+
+- **Coefficient priors: spend-like detection with no metadata channel.** The
+  notebook summed spend into one column with a polyfit-informed prior and
+  zero-centred the flags. The library takes arbitrary `independent_columns`
+  and the wrapper/adapter are constructed independently, so no "which column
+  is spend" metadata can cross the boundary. Instead the wrapper keys off
+  the standardised column it receives: a continuous driver (>2 distinct
+  values -- spend, impressions) gets an **informative** prior centred on its
+  OLS slope against the standardised target; a binary flag (<=2 distinct)
+  gets a plain zero-centred prior. Reproduces the notebook's intent
+  generically.
+
+- **Uncertainty = a posterior-predictive interval.** `yhat_lower`/`yhat_upper`
+  are the 3rd/97th percentiles of draws from `y ~ StudentT(nu, mu, sigma)`,
+  making PyMC the third bounds-emitting model (with Prophet and SARIMAX). As
+  with all of them, bounds are individual-model only and never enter the
+  ensemble. **Corrected after real-data diagnostics** (Section 5d of the
+  testing notebook): the first cut banded `mu` alone -- the latent mean --
+  exactly as the reference notebook did, which captures parameter uncertainty
+  but omits the observation noise, so it under-covered badly (only ~34% of
+  real daily actuals fell inside its nominal 94% band). Sampling the
+  likelihood (retaining the posterior `sigma`/`nu` draws in
+  `_extract_posterior`, drawing Student-T noise in `predict`) adds that noise
+  back and restores coverage toward nominal. The point forecast is still
+  `mu.mean` (the predictive mean for `nu > 1`), so MAPE is unaffected -- only
+  the band widened.
+
+- **`save`/`load` via a NetCDF sidecar.** Per `models/base.py`'s explicit
+  note, PyMC's `InferenceData` is not pickled directly: the trace is written
+  to `<path>.nc` via arviz and the rest of the wrapper (the numpy posterior
+  draws `predict()` actually uses, plus scalars) is pickled. `predict()`
+  depends only on the pickled numpy state, so a reload reproduces
+  predictions exactly even if the sidecar is absent.
+
+### The daily-scale sampling problem (and an honest correction)
+
+Weekly (100 train rows, single annual cycle) sampled cleanly and fast at the
+notebook's 2000 tune / 2000 draw settings -- real result **40.50% MAPE**,
+just above the 40% ensemble threshold, so correctly excluded from the weekly
+ensemble. Daily was a different regime entirely: on ~1144 rows a first
+full-grid run took **about an hour**.
+
+Diagnosis, done in the sandbox against synthetic daily data:
+
+- On *clean* seasonality NUTS is well-behaved (tree depth ~5, 0
+  divergences, fast).
+- On daily-like data -- an annual Fourier basis, a daily-only *weekly*
+  Fourier basis, AND independent columns that themselves track the annual
+  cycle (the exact overlap SARIMAX already warns about, e.g.
+  `Shopify_spends`/`OOS_weightage`) -- the posterior becomes a
+  poorly-conditioned ridge. NUTS responds with very deep leapfrog trees
+  (cost per draw ~ 2^depth x rows), which is where the hour came from.
+
+**A correction worth recording:** an early quick diagnostic reported ~40%
+divergences and I initially called the daily posterior "untrustworthy". That
+figure was an artifact of using a tiny 80-step warmup in the throwaway test
+-- far too short for NUTS to adapt. With a proper warmup the daily posterior
+is clean (0 divergences, R-hat ~1.0). So this was always a **speed** problem,
+not a validity problem. Getting adequate warmup before judging divergences is
+the lesson; the same "confirm before concluding" theme as the NeuralProphet
+`ConfigValueError` misdiagnosis above.
+
+### The daily fix
+
+Three changes to the daily config block, none touching the weekly one (it had
+no ridge problem and samples cheaply):
+
+1. **Halve draws/tune to 1000.** Draws/tune control estimation *precision*,
+   not the model. A sweep on a fixed daily split (real wrapper) showed the
+   point MAPE essentially flat across a 4x range -- 500 -> 11.46%, 1000 ->
+   11.56%, 2000 -> 11.65%, pure Monte-Carlo jitter -- while time scaled
+   ~linearly. So 1000 is a near-free ~2x speedup.
+
+2. **Keep the Fourier order low (2-4, never 6),** which was slowest and
+   never won.
+
+3. **Grid-select `beta_fourier_sigma` (0.3 tight vs 1.0 loose) rather than
+   hardcoding it.** A tight Fourier prior regularises the collinear ridge --
+   on the collinear synthetic it both halved sampling time and *improved*
+   MAPE (1.0 -> 14.55%, 0.3 -> 11.56%). But a tight prior is **not**
+   universally better: on strong, well-supported seasonality it underfits by
+   shrinking real signal. Which wins is data-dependent, so -- exactly like
+   `n_fourier` and Prophet's `yearly_seasonality` -- it belongs in the grid,
+   and `evaluate()` picks it per dataset on test MAPE. The daily grid is
+   therefore the 2x2 of `n_fourier {3,4}` x `beta_fourier_sigma {0.3,1.0}`.
+   (Weekly leaves it at the wrapper's 1.0 default.)
+
+### How this was verified
+
+- Unlike torch, **pymc installs in the sandbox** (5.25.1, matching the
+  `pyproject.toml` pin), so the real MCMC path runs in-sandbox.
+- `tests/test_bayesianpymc.py`, in three tiers: pure adapter tests and
+  wrapper geometry/guard tests (Fourier basis shape/layout, time-index
+  units, the full error contract) that need no pymc; and real-sampling
+  integration tests guarded by `importorskip("pymc")` -- fit/predict shape +
+  ordered credible bands + non-negativity, the no-independents path, the
+  horizon-mismatch guard, a `save`/`load` round-trip that reproduces the
+  prediction exactly from the pickled numpy posterior, and an end-to-end
+  `evaluate()`+`forecast()` through `HorizonForecaster`. All pass in-sandbox.
+- `test_forecaster.py`'s default-model tests were updated: registering a
+  fifth model meant every "run all registered models" test would otherwise
+  sample PyMC at production draws (an effective hang). Those seven tests now
+  pass a small-draw `bayesianpymc` override via `model_params` (the same
+  pattern already used to keep prophet/catboost/neuralprophet fast), and the
+  hardcoded default-set assertion was updated to five models.
+
+### Real results
+
+All five models now run across daily and weekly. On the real **daily**
+dataset (1144 train / 287 test) PyMC scored **18.09% MAPE** -- second only to
+SARIMAX (17.73%) and ahead of CatBoost 21.36% / NeuralProphet 24.98% /
+Prophet 28.10% -- and carried real weight (0.236) in the five-model ensemble
+(18.91%, which did not beat SARIMAX alone this run). A genuinely strong
+showing for the newest model, and the clearest evidence yet that the
+structural Bayesian approach earns its place despite the sampling cost.
+
+### Notes kept for later, not actioned
+
+- Gridding `beta_fourier_sigma` re-adds the slower loose-prior candidates, so
+  daily is not as fast as a fixed-0.3 config would be -- a deliberate
+  correctness-over-speed trade. A leaner 3-candidate daily grid is the
+  fallback if runtime ever dominates.
+- `nutpie` (a faster compiled CPU NUTS backend) was considered as a further
+  speedup but not adopted in v1: it addresses speed only, and the grid-
+  selected regularisation already brought daily back to a practical runtime.

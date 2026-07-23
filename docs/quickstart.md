@@ -41,7 +41,9 @@ forecaster = HorizonForecaster(
 ```
 
 `models=None` runs all registered models: `prophet`, `catboost`, `sarimax`,
-and `neuralprophet`. Pass an explicit list to run a subset.
+`neuralprophet`, and `bayesianpymc`. Pass an explicit list to run a subset —
+worth doing to exclude `bayesianpymc` when you want a fast run, since its
+MCMC sampling is much slower than the others.
 
 ## 3. Evaluate on the held-out split
 

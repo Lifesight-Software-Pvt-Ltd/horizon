@@ -108,7 +108,7 @@ output side of the original project spec now lives in `plotting.py` and
 `exporters.py` (Phase 5), which consume the `EnsembleResult` this doc
 describes. The ensemble logic itself is written generically against
 whatever's registered in `forecaster.py`'s `MODEL_REGISTRY` — and that
-generality has now been confirmed in practice: SARIMAX (Phase 6 Part 1)
-and NeuralProphet (Part 2) were both added with **no changes to this
-module**, and the ensemble has been exercised end-to-end on a real
-4-model run. PyMC (Part 3) is the one model still to come.
+generality has now been confirmed in practice: SARIMAX (Phase 6 Part 1),
+NeuralProphet (Part 2) and Bayesian PyMC (Part 3) were all added with **no
+changes to this module**, and the ensemble has been exercised end-to-end on
+a real 5-model run. All five models are now registered.

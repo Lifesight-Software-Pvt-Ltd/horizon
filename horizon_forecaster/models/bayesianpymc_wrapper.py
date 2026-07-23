@@ -40,10 +40,15 @@ Design, and how it maps onto the reference notebook:
   plain zero-centred prior. The classification keys off the standardised
   column the adapter hands over, so no metadata crosses the boundary.
 
-- Uncertainty: yhat_lower/upper are posterior percentiles of `mu` (the
-  latent mean), matching the notebook's 3rd/97th-percentile band. Like
-  every wrapper these bounds are individual-model-only and never enter the
-  ensemble (see BaseModel.predict docstring).
+- Uncertainty: yhat_lower/upper are a posterior-PREDICTIVE interval -- the
+  3rd/97th percentiles of draws from `y ~ StudentT(nu, mu, sigma)`, not of
+  `mu` alone. The notebook (and an earlier cut of this wrapper) banded `mu`,
+  the latent mean, which omits the observation noise and badly under-covers
+  (only ~34% of real actuals fell inside its nominal 94% band on daily
+  data); sampling the likelihood adds that noise back so the band covers
+  ~(ci_upper - ci_lower)% of outcomes. Like every wrapper these bounds are
+  individual-model-only and never enter the ensemble (see BaseModel.predict
+  docstring).
 
 Selection: PyMC uses the SAME forecaster-level grid search as the other
 models. Because NUTS sampling is expensive, the default grid is small and
@@ -265,9 +270,22 @@ class BayesianPyMCWrapper(BaseModel):
         def back(z: np.ndarray) -> np.ndarray:
             return np.clip(z * self._y_std + self._y_mean, 0.0, None)
 
+        # Point forecast: posterior mean of the latent mean mu (= the
+        # predictive mean for a Student-T with nu > 1), so MAPE is unchanged.
         yhat = back(mu.mean(axis=0))
-        yhat_lower = back(np.percentile(mu, self.ci_lower_pct, axis=0))
-        yhat_upper = back(np.percentile(mu, self.ci_upper_pct, axis=0))
+
+        # Bounds are a POSTERIOR-PREDICTIVE interval, not a band on mu. A
+        # percentile of mu alone answers "how uncertain is the mean curve"
+        # (narrow on long histories) and omits the per-period observation
+        # noise, so it badly under-covers -- real actuals include that noise.
+        # Drawing y ~ StudentT(nu, mu, sigma) per posterior draw adds it back,
+        # giving an interval that actually covers ~(ci_upper - ci_lower)% of
+        # outcomes. Seeded so predict() stays reproducible.
+        rng = np.random.default_rng(self.random_seed)
+        nu = np.broadcast_to(self._post["nu"][:, None], mu.shape)
+        y_pred = mu + self._post["sigma"][:, None] * rng.standard_t(nu)
+        yhat_lower = back(np.percentile(y_pred, self.ci_lower_pct, axis=0))
+        yhat_upper = back(np.percentile(y_pred, self.ci_upper_pct, axis=0))
 
         return pd.DataFrame(
             {
@@ -376,6 +394,12 @@ class BayesianPyMCWrapper(BaseModel):
             "slope": flat("slope"),
             "intercept": flat("intercept"),
             "beta_long": flat("beta_long"),
+            # sigma/nu are the Student-T likelihood's scale and tails. They are
+            # NOT part of the mean function, but predict() needs them to build a
+            # posterior-PREDICTIVE band (observation noise), not just a band on
+            # the mean -- so they are retained here alongside the coefficients.
+            "sigma": flat("sigma"),
+            "nu": flat("nu"),
         }
         if "beta_short" in post:
             self._post["beta_short"] = flat("beta_short")

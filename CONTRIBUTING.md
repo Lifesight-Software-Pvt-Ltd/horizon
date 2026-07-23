@@ -103,12 +103,12 @@ actually needed them; it's worth checking before adding a new one.
 
 ## Current project status
 
-Prophet, CatBoost, SARIMAX and NeuralProphet are fully implemented
-(adapter + wrapper + config + tests), registered in `MODEL_REGISTRY` and
-orchestrated by `HorizonForecaster`, with Phase 4's ensemble-weighting
-logic (`evaluation/ensemble.py`) combining them. The Phase 5 output layer
-(`plotting.py`/`exporters.py`) is also complete. **PyMC** is the one
-remaining model: it exists as empty stub files only (`data_adapter/`,
-`models/`) and is deliberately not registered yet (Phase 6, Part 3). See
-`CHANGELOG.md`'s "Known deferred issues" section for the current, honest
-list of what's not done yet.
+All five models — Prophet, CatBoost, SARIMAX, NeuralProphet and Bayesian
+PyMC — are fully implemented (adapter + wrapper + config + tests),
+registered in `MODEL_REGISTRY` and orchestrated by `HorizonForecaster`,
+with Phase 4's ensemble-weighting logic (`evaluation/ensemble.py`)
+combining them. The Phase 5 output layer (`plotting.py`/`exporters.py`) is
+also complete. Bayesian PyMC (Phase 6, Part 3) was the last to land; it is
+much slower than the others (NUTS/MCMC per grid candidate), so its daily
+config is tuned for scale. See `CHANGELOG.md`'s "Known deferred issues"
+section for the current, honest list of what's not done yet.

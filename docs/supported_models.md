@@ -6,9 +6,8 @@ an `(adapter, wrapper)` pair registered in `forecaster.py`, and the same
 a shared contract (`BaseModel`/`BaseAdapter`). Adding a model is a registry
 entry, not a change to the orchestrator.
 
-Four models are implemented and registered today; a fifth (Bayesian PyMC) is
-planned. Select a subset with the `models=` constructor argument, or pass
-`models=None` to run them all.
+All five models are implemented and registered today. Select a subset with
+the `models=` constructor argument, or pass `models=None` to run them all.
 
 ## Registered models
 
@@ -18,8 +17,9 @@ planned. Select a subset with the `models=` constructor argument, or pass
 | `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target-history lags), so it forecasts any horizon in one batched call. |
 | `sarimax` | statsmodels | yes (constant-variance band) | Log-space (S)ARIMA with an exogenous regression matrix and grid-chosen annual Fourier terms. |
 | `neuralprophet` | NeuralProphet (torch / PyTorch Lightning) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
+| `bayesianpymc` | PyMC (NUTS / MCMC) | yes (posterior credible band) | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
-All four are selected the same way — a hyperparameter grid search scored by
+All five are selected the same way — a hyperparameter grid search scored by
 MAPE on the test split — so their reported numbers are directly comparable
 and feed the ensemble on equal footing.
 
@@ -78,18 +78,47 @@ OmegaConf serialisation of the loss-function type union). No uncertainty
 bounds in v1. Torch-backed `save()`/`load()`, with a load fallback that
 restores the (unpicklable) Lightning trainer.
 
-## Planned
-
 ### bayesianpymc
 
-Empty stub files exist (`data_adapter/bayesianpymc_adapter.py`,
-`models/bayesianpymc_wrapper.py`) and PyMC is already a declared dependency,
-but the model is **not registered yet** — it is Phase 6, Part 3. Until then
-it will not run, and `models=["bayesianpymc"]` is not valid.
+A Bayesian structural time-series model sampled with NUTS: a linear trend, a
+Fourier seasonal basis (annual for both frequencies, plus a weekly cycle for
+daily data), and a linear regression on your standardised independent columns,
+all observed through a Student-T likelihood (heavy tails absorb spikes a
+Gaussian fit would chase). Design points worth knowing:
+
+- **`y` is z-scored inside the wrapper** (sampled in standardised space,
+  back-transformed to raw units on predict), and the Fourier basis is built in
+  the wrapper from absolute day offsets — same split as SARIMAX, so `y` keeps
+  one raw meaning and the Fourier order is grid-searchable.
+- **`predict()` reconstructs the forecast from the stored posterior draws** in
+  pure numpy (a fit-once/predict-any-horizon linear combination of the sampled
+  coefficients), so prediction never re-runs the sampler and never imports
+  pymc.
+- **Coefficient priors are chosen per column**: a continuous driver (spend,
+  impressions) gets an informative prior centred on its OLS slope against the
+  target; a binary flag gets a plain zero-centred prior.
+- **Credible band**: `yhat_lower`/`yhat_upper` are a posterior-**predictive**
+  interval — the 3rd/97th percentiles of draws from `y ~ StudentT(nu, mu,
+  sigma)`, i.e. the mean-function uncertainty plus the observation noise (a
+  94% band). Percentiles of `mu` alone (the latent mean) would omit the noise
+  and badly under-cover.
+- **Daily is tuned for scale.** On ~1000+ daily rows, seasonal-collinear exog
+  makes NUTS take deep, slow trajectories. The daily config therefore halves
+  draws/tune to 1000 (which barely moves the point forecast), caps the Fourier
+  order at 4, and **grid-selects `beta_fourier_sigma` (0.3 vs 1.0)** so the
+  data chooses how tightly to regularise the Fourier basis — a tight prior
+  helps on weak/collinear seasonality, a loose one preserves strong
+  seasonality, and neither is universally better. Weekly samples cleanly at
+  the full 2000/2000.
+- **`save()`/`load()` write the PyMC `InferenceData` to a NetCDF sidecar** and
+  pickle the rest; predictions reload exactly from the pickled posterior draws.
+
+Expect this model to be substantially slower than the other four — it runs a
+full MCMC per grid candidate.
 
 ## Uncertainty bounds
 
-Bounds (`yhat_lower`/`yhat_upper`) are optional and per-model — Prophet and
-SARIMAX provide them, CatBoost and NeuralProphet (v1) do not. They flow into
-per-model plots and CSVs but are **never combined into the ensemble**, which
-operates on the `yhat` point forecasts alone.
+Bounds (`yhat_lower`/`yhat_upper`) are optional and per-model — Prophet,
+SARIMAX and Bayesian PyMC provide them, CatBoost and NeuralProphet (v1) do
+not. They flow into per-model plots and CSVs but are **never combined into the
+ensemble**, which operates on the `yhat` point forecasts alone.

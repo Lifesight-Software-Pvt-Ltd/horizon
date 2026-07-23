@@ -231,6 +231,10 @@ def test_fit_predict_shape_and_bounds():
     assert (out["yhat"] >= 0).all()
     assert (out["yhat_lower"] <= out["yhat_upper"] + 1e-9).all()
     assert np.isfinite(out["yhat"].to_numpy()).all()
+    # Bounds are a posterior-PREDICTIVE band, so the likelihood's sigma/nu
+    # draws must be retained (not just the mean-function coefficients).
+    assert {"sigma", "nu"}.issubset(w._post)
+    assert (out["yhat_upper"] > out["yhat_lower"]).all()  # non-degenerate band
 
 
 def test_fit_predict_no_independents():
