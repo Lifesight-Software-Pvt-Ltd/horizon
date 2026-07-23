@@ -499,21 +499,40 @@ neuralprophet:
 #
 # Like the other models it uses the standard forecaster-level grid search,
 # but NUTS sampling is expensive, so the grid is deliberately SMALL and
-# varies only the two settings that matter most on real data: the Fourier
-# order (n_fourier) and the sampler's target_accept. Every candidate is
-# sampled at FULL draws -- there is no cheap-selection shortcut -- so a
-# candidate's MAPE reflects the exact posterior it would produce in a real
-# forecast. Expect this model to take meaningfully longer than the others.
+# varies mainly the Fourier order (n_fourier) and the sampler's
+# target_accept. Every candidate is sampled at full draws -- no
+# cheap-selection shortcut -- so a candidate's MAPE reflects the exact
+# posterior it would produce in a real forecast. Expect this model to take
+# meaningfully longer than the others.
 #
-# The sampler settings (draws/tune/chains/max_treedepth/init) are the
-# reference notebook's, pinned in base_hyperparameters so every candidate
-# and the final full-data refit sample identically. cores=1 keeps runs
-# reproducible and avoids multiprocessing issues under CI.
+# DAILY vs WEEKLY settings differ, on purpose. Weekly (short history, a
+# single annual cycle) samples cleanly and fast at the reference notebook's
+# 2000/2000 draws. Daily is a heavier regime: ~1000+ rows, and BOTH an
+# annual and a weekly Fourier basis that compete with any independent
+# columns which themselves track the annual cycle (the exact overlap SARIMAX
+# already warns about -- e.g. Shopify_spends/OOS_weightage). With enough
+# warmup the posterior is fine (0 divergences, R-hat ~1.0), but that
+# collinear ridge makes NUTS take very deep leapfrog trees, so cost per draw
+# is large -- a full-draw daily run took ~an hour. The daily block therefore:
+#   (a) halves draws/tune to 1000 -- draws/tune control estimation precision,
+#       not the model, and 1000 is empirically plenty here (point MAPE moved
+#       <0.2pp vs 2000), so this is a near-free ~2x speedup;
+#   (b) keeps the Fourier order low (2-4, never 6, which was slowest and
+#       never won); and
+#   (c) GRID-SELECTS beta_fourier_sigma (0.3 tight vs 1.0 loose) rather than
+#       hardcoding it. A tight Fourier prior regularises the collinear ridge
+#       (faster, and better when seasonality is weak/noisy/collinear); a loose
+#       one preserves strong, well-supported seasonality. Which wins is
+#       data-dependent -- neither is universally better -- so, exactly like
+#       n_fourier and Prophet's yearly_seasonality, it belongs in the grid and
+#       evaluate() picks it per dataset on test MAPE. (Weekly leaves it at the
+#       wrapper's 1.0 default; it samples cheaply and had no ridge problem.)
+# cores=1 keeps runs reproducible and avoids multiprocessing issues under CI.
 bayesianpymc:
   daily:
     base_hyperparameters:
-      draws: 2000
-      tune: 2000
+      draws: 1000               # halved vs weekly: see the daily-regime note above
+      tune: 1000
       chains: 2
       cores: 1
       max_treedepth: 15
@@ -521,10 +540,13 @@ bayesianpymc:
       use_short_seasonal: true    # weekly cycle, meaningful for daily data
       ci_lower_pct: 3
       ci_upper_pct: 97
+    # beta_fourier_sigma is grid-selected here (0.3 tight vs 1.0 loose) -- the
+    # data decides via test MAPE; see note (c) above.
     hyperparameter_grid:
-      - {n_fourier: 4, target_accept: 0.95}
-      - {n_fourier: 2, target_accept: 0.95}
-      - {n_fourier: 6, target_accept: 0.90}
+      - {n_fourier: 3, beta_fourier_sigma: 0.3, target_accept: 0.95}
+      - {n_fourier: 4, beta_fourier_sigma: 0.3, target_accept: 0.95}
+      - {n_fourier: 3, beta_fourier_sigma: 1.0, target_accept: 0.95}
+      - {n_fourier: 4, beta_fourier_sigma: 1.0, target_accept: 0.95}
     wrapper_config:
       min_rows_required: 35
       random_seed: 42
