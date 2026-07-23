@@ -357,7 +357,7 @@ catboost:
 # prophet/catboost/neuralprophet all pick candidates by scoring on the test
 # split, so their MAPE is optimistic while SARIMAX's was not. Comparing those
 # numbers, and deriving inverse-MAPE ensemble weights from them, penalised
-# SARIMAX for being more rigorous. One mechanism for all four models is the
+# SARIMAX for being more rigorous. One mechanism for every model is the
 # more useful property, so it now uses this grid like everybody else.
 #
 # The grid varies (p, q), the seasonal (P, Q), and fourier_order_annual.

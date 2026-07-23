@@ -48,8 +48,10 @@ pytest --cov=horizon_forecaster    # with coverage
 ```
 
 Note that the model backends are heavy: a full `pytest` run fits real
-Prophet, CatBoost, SARIMAX, and NeuralProphet models and takes a while.
-NeuralProphet is the slowest.
+Prophet, CatBoost, SARIMAX, NeuralProphet, and Bayesian PyMC models and
+takes a while (~25–30 minutes on a laptop). Bayesian PyMC is the slowest —
+it runs a full NUTS/MCMC sample per fit — with NeuralProphet's torch
+training next.
 
 ## A note on pinned dependencies
 

@@ -14,7 +14,7 @@ their hyperparameters by scoring candidates on the test split, so their
 reported MAPE is optimistic while SARIMAX's was not. Comparing those
 numbers head-to-head -- and, worse, deriving inverse-MAPE ensemble weights
 from them -- systematically penalised SARIMAX for being more rigorous. One
-selection mechanism for all four models is the more useful property here,
+selection mechanism for every model is the more useful property here,
 so the grid now varies (p, q), the seasonal (P, Q), and the annual Fourier
 order, while `d` stays ADF-derived (a property of the data, not a
 hyperparameter).

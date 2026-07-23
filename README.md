@@ -1,25 +1,231 @@
 # Horizon Forecaster
 
-An open-source ensemble time-series forecasting library that combines Prophet, NeuralProphet, SARIMAX, CatBoost, and Bayesian PyMC models with configurable ensemble weighting based on MAPE thresholds.
+An open-source ensemble time-series forecasting library that runs several
+strong forecasting models through one shared interface and combines them into
+a single weighted forecast — with transparent, per-model accuracy reporting so
+you always know *which* forecast you should trust.
 
-## Features
-- Supports daily and weekly forecasting granularity
-- Flexible target variables (orders, revenue, conversions, installs, etc.)
-- Configurable independent variables (spend, impressions, clicks, promos, organic, etc.)
-- Automatic model selection via MAPE threshold-based ensemble weighting
-- Outputs both final ensemble and individual model forecasts (plots + CSV)
-- Transparent reporting of rejected models with their MAPE scores
+It is built for business time series such as revenue, orders, installs,
+conversions, or sign-ups at **daily** or **weekly** granularity, optionally
+driven by independent variables (ad spend, impressions, promos, holidays,
+stockouts, and so on).
+
+Rather than betting on one model, Horizon Forecaster fits Prophet, CatBoost,
+SARIMAX, NeuralProphet, and a Bayesian PyMC model on the same data, scores each
+on a held-out split, and blends the accurate ones — while telling you the
+per-model MAPE, which models were excluded and why, and whether the ensemble
+actually beats the best individual model (it is not guaranteed to).
+
+---
+
+## Supported models
+
+Every model is an `(adapter, wrapper)` pair registered in one `MODEL_REGISTRY`,
+and all of them run through the same `evaluate()` / `forecast()` / ensemble /
+export / plot pipeline. They are selected the same way — a hyperparameter grid
+search scored by MAPE on the test split — so their numbers are directly
+comparable.
+
+| Model | Backend | Uncertainty bounds | Notes |
+|---|---|---|---|
+| `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. |
+| `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
+| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix and grid-chosen annual Fourier terms. |
+| `neuralprophet` | NeuralProphet (torch) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
+| `bayesianpymc` | PyMC (NUTS/MCMC) | yes | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
+
+Uncertainty bounds (`yhat_lower` / `yhat_upper`) are per-model and optional —
+Prophet, SARIMAX, and Bayesian PyMC provide them; CatBoost and NeuralProphet
+(v1) do not. They flow into per-model plots and CSVs but are **never combined
+into the ensemble**, which operates on the point forecasts alone. See
+[`docs/supported_models.md`](docs/supported_models.md) for full per-model
+behaviour.
+
+> **Note on speed:** Bayesian PyMC runs a full MCMC sample per grid candidate
+> and is dramatically slower than the other four. Pass `models=` to exclude it,
+> or give it a small-draw override, when you want a fast run.
+
+---
+
+## Key features
+
+- **Five models, one interface.** Fit and compare Prophet, CatBoost, SARIMAX,
+  NeuralProphet, and Bayesian PyMC with identical calls; add a model by
+  registering one `(adapter, wrapper)` pair, with no change to the orchestrator.
+- **Honest, held-out evaluation.** `evaluate()` does a chronological
+  train/test split, fits each model on the training portion, predicts the test
+  window, and reports MAPE (with explicit zero-actual handling).
+- **Threshold-based ensemble weighting.** Models at or below a configurable
+  `mape_threshold` are blended by `inverse_mape` (lower MAPE → more weight) or
+  `equal` weighting. The ensemble's own accuracy is scored against real actuals,
+  so you can check whether it beats the best single model.
+- **Transparent failure & rejection reporting.** A model that fits but scores
+  above the threshold is *rejected* from the ensemble (reported with its MAPE);
+  a model that fails to fit at all is recorded separately. One model failing
+  never aborts the others.
+- **Daily and weekly granularity**, flexible target variables, and optional
+  independent drivers.
+- **Ready-to-use outputs.** Overlay and per-model charts, a MAPE comparison bar
+  chart, and a one-call export of five CSVs plus PNGs.
+- **Built-in safety warnings** for over-long horizons, auto-generated future
+  driver values, and forecasts that land implausibly far outside history.
+
+---
 
 ## Installation
 
+Requires **Python 3.10–3.12** and a C/C++ toolchain (Prophet and PyMC compile
+at install/first use). The project is not yet on PyPI, so install from a clone:
+
 ```bash
-pip install -e .
+git clone https://github.com/Lifesight-Software-Pvt-Ltd/horizon.git
+cd horizon
+pip install -e .            # editable install; runtime deps are pinned in pyproject.toml
+pip install -e ".[dev]"     # add pytest, pytest-cov, black, flake8
 ```
 
-## Status
+See [`docs/installation.md`](docs/installation.md) for platform notes and the
+rationale behind the load-bearing dependency pins.
 
-This project is under active development.
+---
+
+## Quickstart
+
+```python
+import pandas as pd
+from horizon_forecaster.forecaster import HorizonForecaster
+
+# A tidy DataFrame: a date column, a numeric target, optional driver columns.
+df = pd.DataFrame({
+    "date":   pd.date_range("2022-01-01", periods=400, freq="D"),
+    "orders": [...],
+    "spend":  [...],   # optional independent driver
+})
+
+forecaster = HorizonForecaster(
+    df,
+    date_column="date",
+    target_column="orders",
+    frequency="daily",                  # "daily" or "weekly"
+    independent_columns=["spend"],      # omit if you have none
+    training_size=80,                   # % used for training; the rest is the test split
+    models=None,                        # None = all five; or e.g. ["sarimax", "catboost"]
+    mape_threshold=40.0,                # ensemble inclusion cutoff (upper bound only)
+    ensemble_weighting="inverse_mape",  # or "equal"
+)
+
+# 1) Evaluate every model on the held-out split
+results = forecaster.evaluate()
+for name, res in results.items():
+    print(f"{name}: MAPE {res.mape.value:.2f}%")
+
+ens = forecaster.evaluate_ensemble          # scored against real actuals
+if ens and ens.combined is not None:
+    print("ensemble MAPE:", ens.mape.value, "weights:", ens.weights)
+
+# 2) Forecast the future (refits on all data, once, cached)
+forecasts = forecaster.forecast(horizon=30)
+future = forecasts["sarimax"].forecast      # DataFrame ["ds", "yhat"] (+ bounds where available)
+```
+
+`evaluate()` and `forecast()` always return a dict keyed by model name (even
+for a single model). Full walkthrough — including exporting CSVs/plots and
+supplying planned future driver values — in
+[`docs/quickstart.md`](docs/quickstart.md).
+
+---
+
+## How the ensemble works
+
+`build_ensemble()` combines the point forecasts of every model whose MAPE is at
+or below `mape_threshold`, weighting them by inverse-MAPE or equally. Excluded
+models are reported in `rejected_models` with their MAPE and the threshold they
+exceeded — distinct from models that failed to fit, which land in
+`evaluate_errors` / `forecast_errors`.
+
+**A weighted ensemble is not guaranteed to beat the best single model** — with
+static weights it can be dragged down on the periods where a weaker member is
+wrong. This is a real property of the method, not a bug, which is why
+`evaluate()` scores the ensemble against actuals and the exporter writes *both*
+a `final_ensemble` and a `final_best_model` CSV so you can choose per run. See
+[`docs/ensemble_methods.md`](docs/ensemble_methods.md).
+
+---
+
+## Outputs
+
+`export_forecast()` writes, into one folder:
+
+- **Five CSVs** — `final_ensemble`, `final_best_model`, `per_model`,
+  `rejected`, and `model_summary` (per-model MAPE, ensemble weight, and status).
+- **Plots** (unless disabled) — an overlay chart plus one dedicated figure per
+  model and the ensemble.
+
+The plotting functions in `horizon_forecaster.plotting` can also be called
+directly; each returns a matplotlib `Axes`/`Figure` without calling
+`plt.show()`, so you control rendering.
+
+---
+
+## Architecture
+
+`HorizonForecaster` is a registry-driven orchestrator. Each model implements a
+shared contract:
+
+- a **data adapter** (`BaseAdapter`) that reshapes raw user data into that
+  model's expected input, and
+- a **model wrapper** (`BaseModel`) with `fit()` / `predict()` plus optional
+  native `save()` / `load()`.
+
+Adding a model means writing that pair and adding one `MODEL_REGISTRY` entry —
+nothing in the orchestrator changes. A guiding rule enforced throughout the
+build: if a new model ever forces a change to the orchestrator's core logic,
+that signals a gap in the shared contract to fix in the contract, not a
+special-case in the orchestrator. All five current models were added without
+breaking that rule.
+
+---
+
+## Project status & roadmap
+
+Under active development; not yet released to PyPI.
+
+- **Done** — the full model set (Prophet, CatBoost, SARIMAX, NeuralProphet,
+  Bayesian PyMC), MAPE-threshold ensemble weighting, and the output layer
+  (plots + CSV export) are implemented and tested across daily and weekly data.
+- **Next (Phase 7)** — richer future-exogenous-data strategies (carry-forward,
+  seasonal-naive, historical-average, default-from-past-N) that plug into every
+  adapter consistently.
+- **Then (Phase 8)** — worked example notebooks, final docs, exact dependency
+  pinning, and a gated PyPI release.
+
+A detailed, honest build log lives in [`docs/`](docs) (`build_log_phase*.md`),
+and every notable change — including the reasoning and the dead ends — is
+recorded in [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## Documentation
+
+- [`docs/installation.md`](docs/installation.md) — install & dependencies
+- [`docs/quickstart.md`](docs/quickstart.md) — end-to-end usage
+- [`docs/supported_models.md`](docs/supported_models.md) — per-model behaviour
+- [`docs/ensemble_methods.md`](docs/ensemble_methods.md) — ensemble weighting & caveats
+- [`docs/build_log_phase*.md`](docs) — how and why the library was built
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — conventions and project status
+- [`CHANGELOG.md`](CHANGELOG.md) — full change history
+
+---
+
+## Contributing
+
+Conventions, the model-adding pattern, and current status are documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). In short: every model follows the same
+adapter → wrapper → config → tests pattern, and each new model must pass through
+the existing pipeline without modifying the orchestrator.
+
+---
 
 ## License
 
-See [LICENSE](LICENSE).
+Licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
