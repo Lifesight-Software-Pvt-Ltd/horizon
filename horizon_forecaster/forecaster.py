@@ -18,13 +18,11 @@ a Phase 1/2 contract (BaseModel/BaseAdapter) had a gap -- fix the
 contract, don't special-case the orchestrator.
 """
 
-import math
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 import yaml
 
@@ -40,6 +38,11 @@ from horizon_forecaster.evaluation.ensemble import (
     build_ensemble,
 )
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
+from horizon_forecaster.future_exog import (
+    AGGREGATORS,
+    FUTURE_EXOG_STRATEGIES,
+    resolve_future_exog,
+)
 from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
     HorizonForecasterError,
@@ -134,14 +137,19 @@ class ForecastResult:
         forecast: DataFrame with columns ["ds", "yhat"] (plus
             "yhat_lower"/"yhat_upper" if available).
         horizon: the number of periods forecasted.
-        used_default_future_strategy: True if future independent-variable
-            values were auto-generated rather than caller-supplied.
+        used_default_future_strategy: True if ANY future independent-variable
+            values were auto-generated (via future_exog_strategy) rather than
+            caller-supplied.
+        future_exog_used: the resolved future independent values actually fed
+            to the models (supplied columns + generated columns), with a "ds"
+            column, for inspection. None when there are no independent columns.
     """
 
     model_name: str
     forecast: pd.DataFrame
     horizon: int
     used_default_future_strategy: bool
+    future_exog_used: Optional[pd.DataFrame] = None
 
 class HorizonForecaster:
     """
@@ -184,6 +192,25 @@ class HorizonForecaster:
             (every model that passes the threshold gets an equal
             share), passed straight through to
             evaluation/ensemble.py's build_ensemble().
+        future_exog_strategy: how forecast() invents future values for the
+            independent columns when they aren't supplied (Phase 7). One of
+            future_exog.FUTURE_EXOG_STRATEGIES: "carry_forward" (default --
+            hold the last value flat), "recent_average", "historical_average"
+            (season-aware), "seasonal_naive" (seasonal cycle + drift),
+            "linear_trend", or "cycle" (the legacy replay-the-tail behaviour).
+            Continuous drivers use the chosen strategy; binary event flags
+            default to 0 (except under seasonal_naive). See future_exog.py.
+        event_columns: names of the binary 0/1 event/flag columns (promos,
+            holidays) among independent_columns, so the strategy defaults them
+            to 0 ("no event unless supplied") instead of carrying them forward.
+            None (default) auto-detects flags (<=2 distinct non-negative
+            values); passing a list disables auto-detection and uses exactly
+            those columns.
+        future_exog_aggregator: "mean" (default) or "median", used by the
+            recent_average / historical_average / seasonal_naive strategies
+            (median is robust to spikes in the driver history).
+        recent_average_window: N for the recent_average strategy -- how many
+            trailing periods to average. Default 28.
 
     evaluate()/forecast() ALWAYS return a dict keyed by model name, even
     when only one model is requested -- deliberate, so the return shape
@@ -226,6 +253,10 @@ class HorizonForecaster:
         model_params: Optional[Dict[str, dict]] = None,
         mape_threshold: float = 40.0,
         ensemble_weighting: str = "inverse_mape",
+        future_exog_strategy: str = "carry_forward",
+        event_columns: Optional[List[str]] = None,
+        future_exog_aggregator: str = "mean",
+        recent_average_window: int = 28,
     ):
         self.frequency = validate_frequency(frequency)
         self.training_fraction = validate_training_size(training_size)
@@ -242,6 +273,34 @@ class HorizonForecaster:
             )
         self.ensemble_weighting = ensemble_weighting
 
+        # Phase 7: future-exogenous-data strategy (how forecast() invents future
+        # driver values when they aren't supplied). Validated here like
+        # ensemble_weighting; event_columns is validated against the surviving
+        # independent columns below, once those are known.
+        if future_exog_strategy not in FUTURE_EXOG_STRATEGIES:
+            raise InvalidConfigError(
+                f"future_exog_strategy must be one of {sorted(FUTURE_EXOG_STRATEGIES)} "
+                f"(got '{future_exog_strategy}').",
+                param_name="future_exog_strategy",
+                provided_value=future_exog_strategy,
+            )
+        if future_exog_aggregator not in AGGREGATORS:
+            raise InvalidConfigError(
+                f"future_exog_aggregator must be one of {sorted(AGGREGATORS)} "
+                f"(got '{future_exog_aggregator}').",
+                param_name="future_exog_aggregator",
+                provided_value=future_exog_aggregator,
+            )
+        if not (isinstance(recent_average_window, int) and recent_average_window > 0):
+            raise InvalidConfigError(
+                f"recent_average_window must be a positive integer (got {recent_average_window!r}).",
+                param_name="recent_average_window",
+                provided_value=recent_average_window,
+            )
+        self.future_exog_strategy = future_exog_strategy
+        self.future_exog_aggregator = future_exog_aggregator
+        self.recent_average_window = recent_average_window
+
         self.models = self._validate_models(models)
 
         requested_independent_columns = independent_columns or []
@@ -253,6 +312,26 @@ class HorizonForecaster:
         self.independent_columns = [
             c for c in requested_independent_columns if c not in dropped_columns
         ]
+
+        # event_columns (explicit 0/1 flags for the future-exog strategy). None
+        # means "auto-detect flags"; a list means "these exact columns are the
+        # flags, auto-detect nothing else". A listed column dropped for zero
+        # variance is silently ignored; anything else unrecognized is an error.
+        if event_columns is None:
+            self.event_columns: Optional[List[str]] = None
+        else:
+            unknown_events = [
+                c for c in event_columns
+                if c not in self.independent_columns and c not in dropped_columns
+            ]
+            if unknown_events:
+                raise InvalidConfigError(
+                    f"event_columns {unknown_events} are not among the independent_columns "
+                    f"{self.independent_columns}.",
+                    param_name="event_columns",
+                    provided_value=event_columns,
+                )
+            self.event_columns = [c for c in event_columns if c in self.independent_columns]
 
         self.raw_df = cleaned_df.sort_values(date_column).reset_index(drop=True)
         self._warn_if_declared_frequency_mismatches_data()
@@ -302,6 +381,11 @@ class HorizonForecaster:
         self._split_cache: Dict[str, tuple] = {}
         self._forecast_models: Dict[str, BaseModel] = {}
         self._forecast_adapters: Dict[str, BaseAdapter] = {}
+
+        # Phase 7: the future independent values actually used by the most
+        # recent forecast() (supplied columns + strategy-generated columns),
+        # exposed for inspection. None until forecast() runs with exog.
+        self.future_exog_used: Optional[pd.DataFrame] = None
 
         self.evaluate_errors: Dict[str, HorizonForecasterError] = {}
         self.forecast_errors: Dict[str, HorizonForecasterError] = {}
@@ -613,8 +697,26 @@ class HorizonForecaster:
 
         return results
 
+    def _future_dates(self, horizon: int) -> pd.Series:
+        """The horizon's future dates, one step past the last observed date."""
+        last_date = self.raw_df[self.date_column].max()
+        offset = _FREQUENCY_OFFSETS[self.frequency]
+        return pd.Series(
+            pd.date_range(
+                start=pd.to_datetime(last_date) + pd.tseries.frequencies.to_offset(offset),
+                periods=horizon,
+                freq=offset,
+            )
+        )
+
     def _forecast_single_model(
-        self, model_name: str, horizon: int, future_independent_data: Optional[pd.DataFrame]
+        self,
+        model_name: str,
+        horizon: int,
+        future_independent_data: Optional[pd.DataFrame],
+        future_dates: pd.Series,
+        used_default_strategy: bool,
+        future_exog_used: Optional[pd.DataFrame],
     ) -> ForecastResult:
         AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
 
@@ -645,21 +747,9 @@ class HorizonForecaster:
 
         adapter = self._forecast_adapters[model_name]
 
-        used_default_strategy = False
-        if self.independent_columns and future_independent_data is None:
-            future_independent_data = self._build_default_future_independent_data(horizon)
-            used_default_strategy = True
-
-        last_date = self.raw_df[self.date_column].max()
-        offset = _FREQUENCY_OFFSETS[self.frequency]
-        future_dates = pd.Series(
-            pd.date_range(
-                start=pd.to_datetime(last_date) + pd.tseries.frequencies.to_offset(offset),
-                periods=horizon,
-                freq=offset,
-            )
-        )
-
+        # future_independent_data and future_dates are resolved ONCE, model-
+        # agnostically, in forecast() (see _resolve_future_exog there) and
+        # passed in, so every model sees the same assumed future drivers.
         future_exog = adapter.transform_future(future_dates, future_independent_data)
         forecast_df = self._forecast_models[model_name].predict(horizon=horizon, future_exog=future_exog)
 
@@ -668,6 +758,7 @@ class HorizonForecaster:
             forecast=forecast_df,
             horizon=horizon,
             used_default_future_strategy=used_default_strategy,
+            future_exog_used=future_exog_used,
         )
 
     def _warn_on_forecasts_far_outside_history(self, results: Dict[str, ForecastResult]) -> None:
@@ -763,15 +854,24 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
-        if self.independent_columns and future_independent_data is None:
+        # Resolve the future independent values ONCE, model-agnostically, so
+        # every model sees the same assumed future drivers. Partial fill: any
+        # column the caller supplied is used as-is; the rest are generated via
+        # future_exog_strategy. Exposed as self.future_exog_used.
+        future_dates = self._future_dates(horizon)
+        resolved_exog, self.future_exog_used, used_default, generated = self._resolve_future_exog(
+            horizon, future_dates, future_independent_data
+        )
+        if generated:
             warnings.warn(
-                f"No future_independent_data was supplied, so values for "
-                f"{self.independent_columns} were auto-generated for all {horizon} "
-                f"periods by reusing/cycling historical values. The forecast is only "
-                f"as reliable as those assumed inputs -- for an exogenous-variable-"
-                f"driven model this can dominate the result. Supply real planned "
-                f"values if you have them, and treat this output as a scenario "
-                f"rather than a prediction if you don't.",
+                f"future values for {generated} were auto-generated for all {horizon} "
+                f"periods via the '{self.future_exog_strategy}' strategy (no values were "
+                f"supplied for them). The forecast is only as reliable as those assumed "
+                f"inputs -- for an exogenous-variable-driven model this can dominate the "
+                f"result. Supply real planned values if you have them (you can supply "
+                f"just some columns; the rest are filled), inspect what was assumed via "
+                f"forecaster.future_exog_used, and treat this output as a scenario rather "
+                f"than a prediction.",
                 stacklevel=2,
             )
 
@@ -799,7 +899,9 @@ class HorizonForecaster:
 
         for model_name in self.models:
             try:
-                results[model_name] = self._forecast_single_model(model_name, horizon, future_independent_data)
+                results[model_name] = self._forecast_single_model(
+                    model_name, horizon, resolved_exog, future_dates, used_default, self.future_exog_used
+                )
             except HorizonForecasterError as e:
                 errors[model_name] = e
 
@@ -832,20 +934,36 @@ class HorizonForecaster:
 
         return results
 
-    def _build_default_future_independent_data(self, horizon: int) -> pd.DataFrame:
+    def _resolve_future_exog(self, horizon, future_dates, supplied):
         """
-        Default future-independent-variable strategy: reuse the actual
-        historical values of each independent column, cycling
-        (repeating) the full history as many times as needed to cover
-        the requested horizon, then taking the trailing `horizon` rows
-        of that cycled sequence. Model-agnostic -- operates on
-        self.raw_df directly, not through any adapter.
+        Resolve the future independent values for this forecast, once and
+        model-agnostically (Phase 7). Delegates to future_exog.resolve, which
+        honours PARTIAL FILL (supplied columns kept, the rest generated via
+        self.future_exog_strategy) and type-aware flag handling.
+
+        Returns (models_df, used_df, used_default, generated):
+            models_df    the independent-columns DataFrame fed to each adapter
+                         (None when there are no independent columns).
+            used_df      the same, with a leading "ds" column, stored on
+                         self.future_exog_used for inspection.
+            used_default True if any column was generated rather than supplied.
+            generated    the list of generated (vs supplied) columns.
         """
-        history = self.raw_df[self.independent_columns].to_numpy()
-        n_total = len(history)
+        if not self.independent_columns:
+            return None, None, False, []
 
-        n_repeats = math.ceil(horizon / n_total)
-        tiled = np.tile(history, (n_repeats, 1))
-        future_values = tiled[-horizon:]
-
-        return pd.DataFrame(future_values, columns=self.independent_columns)
+        models_df, generated = resolve_future_exog(
+            history_df=self.raw_df,
+            date_column=self.date_column,
+            independent_columns=self.independent_columns,
+            future_dates=future_dates,
+            frequency=self.frequency,
+            strategy=self.future_exog_strategy,
+            aggregator=self.future_exog_aggregator,
+            window=self.recent_average_window,
+            event_columns=self.event_columns,
+            supplied=supplied,
+        )
+        used_df = models_df.copy()
+        used_df.insert(0, "ds", pd.Series(future_dates).reset_index(drop=True))
+        return models_df, used_df, bool(generated), generated

@@ -586,35 +586,86 @@ def test_forecast_uses_supplied_future_independent_data_when_provided():
     assert len(result.forecast) == 5
 
 
-def test_default_future_strategy_reuses_last_n_periods_when_horizon_fits_within_history():
+# ---------- Phase 7: future-exogenous-data strategies ----------
+# The strategy internals are unit-tested in tests/test_future_exog.py; these
+# check the forecaster-level wiring (resolution, partial fill, exposure,
+# validation) without needing a model fit.
+
+def _resolve(forecaster, horizon, supplied=None):
+    fut = forecaster._future_dates(horizon)
+    return forecaster._resolve_future_exog(horizon, fut, supplied)
+
+
+def test_cycle_strategy_reuses_last_n_periods_when_horizon_fits_within_history():
     df = make_raw_df(n=60, with_spend=True)  # spend = 50 + i, last values: ..., 107, 108, 109
     forecaster = HorizonForecaster(
-        df,
-        date_column="date",
-        target_column="orders",
-        frequency="daily",
-        independent_columns=["spend"],
-        models=["prophet"],
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["prophet"], future_exog_strategy="cycle",
     )
-    default_future = forecaster._build_default_future_independent_data(horizon=3)
-    # last 3 actual spend values in a 60-row series starting at 50: 107, 108, 109
-    assert default_future["spend"].tolist() == [107, 108, 109]
+    models_df, _, _, _ = _resolve(forecaster, horizon=3)
+    assert models_df["spend"].tolist() == [107, 108, 109]
 
 
-def test_default_future_strategy_cycles_when_horizon_exceeds_history():
-    df = make_raw_df(n=20, with_spend=True)  # spend = 50..69 (20 values)
+def test_cycle_strategy_tiles_when_horizon_exceeds_history():
+    df = make_raw_df(n=20, with_spend=True)  # spend = 50..69
     forecaster = HorizonForecaster(
-        df,
-        date_column="date",
-        target_column="orders",
-        frequency="daily",
-        independent_columns=["spend"],
-        models=["prophet"],
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["prophet"], future_exog_strategy="cycle",
     )
-    # horizon of 45 > 20 rows of history -> must cycle, not crash
-    default_future = forecaster._build_default_future_independent_data(horizon=45)
-    assert len(default_future) == 45
-    assert not default_future["spend"].isna().any()
+    models_df, _, _, _ = _resolve(forecaster, horizon=45)
+    assert len(models_df) == 45
+    assert not models_df["spend"].isna().any()
+
+
+def test_default_strategy_is_carry_forward():
+    df = make_raw_df(n=60, with_spend=True)  # spend last value = 109
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["prophet"],
+    )
+    assert forecaster.future_exog_strategy == "carry_forward"
+    models_df, used_df, used_default, generated = _resolve(forecaster, horizon=4)
+    assert models_df["spend"].tolist() == [109] * 4   # held flat
+    assert used_default is True and generated == ["spend"]
+    assert list(used_df.columns) == ["ds", "spend"]   # exposed with a ds column
+
+
+def test_partial_fill_keeps_supplied_generates_missing():
+    df = make_raw_df(n=60, with_spend=True)
+    df["promo"] = [i % 2 for i in range(len(df))]     # binary flag
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend", "promo"], models=["prophet"],
+    )
+    supplied = pd.DataFrame({"spend": [777.0] * 5})
+    models_df, _, used_default, generated = _resolve(forecaster, horizon=5, supplied=supplied)
+    assert models_df["spend"].tolist() == [777.0] * 5  # supplied kept
+    assert models_df["promo"].tolist() == [0.0] * 5    # generated flag -> 0
+    assert generated == ["promo"] and used_default is True
+
+
+def test_explicit_event_columns_treated_as_flags():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        independent_columns=["spend"], models=["prophet"], event_columns=["spend"],
+    )
+    models_df, _, _, _ = _resolve(forecaster, horizon=3)
+    assert models_df["spend"].tolist() == [0.0] * 3    # forced to 0 as a declared flag
+
+
+def test_invalid_future_exog_params_raise():
+    df = make_raw_df(n=60, with_spend=True)
+    common = dict(date_column="date", target_column="orders", frequency="daily",
+                  independent_columns=["spend"], models=["prophet"])
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, future_exog_strategy="nope", **common)
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, future_exog_aggregator="mode", **common)
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, recent_average_window=0, **common)
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, event_columns=["not_a_column"], **common)
 
 
 def test_forecast_warns_when_horizon_far_exceeds_history():
