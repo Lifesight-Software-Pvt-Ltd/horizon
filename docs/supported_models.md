@@ -122,3 +122,10 @@ Bounds (`yhat_lower`/`yhat_upper`) are optional and per-model — Prophet,
 SARIMAX and Bayesian PyMC provide them, CatBoost and NeuralProphet (v1) do
 not. They flow into per-model plots and CSVs but are **never combined into the
 ensemble**, which operates on the `yhat` point forecasts alone.
+
+## See also
+
+- [`ensemble_methods.md`](ensemble_methods.md) — how the per-model forecasts
+  are combined and weighted (and why the ensemble isn't guaranteed to win).
+- [`future_exog.md`](future_exog.md) — how `forecast()` fills in future values
+  for your independent columns when you don't supply them.
