@@ -1,7 +1,7 @@
 # Contributing to Horizon Forecaster
 
 This document reflects how the project has actually been built so far
-(Phases 0–6), not a generic template — the conventions below are the ones
+(Phases 0–7), not a generic template — the conventions below are the ones
 already in use throughout the codebase. Following them keeps a
 contribution consistent with everything already here, rather than adding
 a second style alongside the existing one.
@@ -108,7 +108,14 @@ PyMC — are fully implemented (adapter + wrapper + config + tests),
 registered in `MODEL_REGISTRY` and orchestrated by `HorizonForecaster`,
 with Phase 4's ensemble-weighting logic (`evaluation/ensemble.py`)
 combining them. The Phase 5 output layer (`plotting.py`/`exporters.py`) is
-also complete. Bayesian PyMC (Phase 6, Part 3) was the last to land; it is
-much slower than the others (NUTS/MCMC per grid candidate), so its daily
-config is tuned for scale. See `CHANGELOG.md`'s "Known deferred issues"
-section for the current, honest list of what's not done yet.
+also complete. Bayesian PyMC (Phase 6, Part 3) was the last model to land; it
+is much slower than the others (NUTS/MCMC per grid candidate), so its daily
+config is tuned for scale. Phase 7 added the future-exogenous-data strategies
+(`future_exog.py`) — how `forecast()` invents future driver values when they
+aren't supplied. The project is now in Phase 8 (final docs and
+dependency pinning). Runnable example notebooks and a gated PyPI release are
+deferred to the publishing stage — a clean `pip install` + Open-in-Colab only
+makes sense once the package is published (the `examples/*.md` files are empty
+placeholders until then). See `CHANGELOG.md`'s
+"Known deferred issues" section for the current, honest list of what's not
+done yet.
