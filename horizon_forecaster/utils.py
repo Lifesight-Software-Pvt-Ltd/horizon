@@ -37,6 +37,21 @@ def validate_no_missing_values(
     or a surviving independent column) are ignored.
     """
     independent_columns = independent_columns or []
+
+    # Column existence first, so a missing/misspelled column is a clear error
+    # rather than a raw KeyError from the value checks below.
+    missing_columns = [
+        c for c in [date_column, target_column, *independent_columns]
+        if c not in df.columns
+    ]
+    if missing_columns:
+        raise InvalidConfigError(
+            f"Column(s) not found in the data: {missing_columns}. "
+            f"Available columns: {list(df.columns)}.",
+            param_name="columns",
+            provided_value=missing_columns,
+        )
+
     problems = {}
 
     n_bad_dates = int(pd.to_datetime(df[date_column], errors="coerce").isna().sum())

@@ -433,6 +433,18 @@ sarimax:
 # yearly_seasonality is "auto", NOT true -- forcing yearly seasonality on
 # short history has already produced garbage twice in this project (Prophet in
 # Phase 2, SARIMAX's annual Fourier in Phase 6 Part 1).
+#
+# Grid + trend widened after synthetic-sweep testing showed NeuralProphet was
+# the consistent outlier -- badly on a mid-series level shift (18.7% vs ~2%)
+# and on strong seasonality -- while the structural models fit those clean
+# signals near-perfectly. The cause was under-fitting: too few epochs (a
+# neural model trained by SGD needs more than 50-150 to converge) and too
+# little trend flexibility to track a level shift. So the grid now spans a
+# middle learning rate (0.03) and higher epochs (150/300), and the trend gets
+# more changepoints (n_changepoints) placed slightly later in the history
+# (changepoints_range). The grid selects the best by test MAPE, so a setting
+# that overfits a given dataset simply won't be chosen. n_lags stays 0 (the
+# fit-once/predict-any-horizon comparability constraint -- see the wrapper).
 neuralprophet:
   daily:
     base_hyperparameters:
@@ -441,6 +453,8 @@ neuralprophet:
       weekly_seasonality: true
       daily_seasonality: false
       impute_missing: true
+      n_changepoints: 20         # up from the default (~5-10): finer trend so a
+      changepoints_range: 0.9    # level shift can be tracked, not smoothed over
       accelerator: cpu          # pinned so local (MPS) and CI (CPU) agree
       # REQUIRED, not an optimisation. With metrics enabled, NeuralProphet
       # attaches a Lightning logger, which makes trainer.fit() run
@@ -454,14 +468,12 @@ neuralprophet:
       collect_metrics: false
       freq: auto                # wrapper-level; never passed to the constructor
     hyperparameter_grid:
-      - learning_rate: 0.01
-        epochs: 50
-      - learning_rate: 0.10
-        epochs: 50
-      - learning_rate: 0.01
-        epochs: 150
-      - learning_rate: 0.10
-        epochs: 150
+      - {learning_rate: 0.01, epochs: 150}
+      - {learning_rate: 0.03, epochs: 150}
+      - {learning_rate: 0.10, epochs: 150}
+      - {learning_rate: 0.01, epochs: 300}
+      - {learning_rate: 0.03, epochs: 300}
+      - {learning_rate: 0.10, epochs: 300}
     wrapper_config:
       min_rows_required: 30
       random_seed: 42
@@ -472,18 +484,18 @@ neuralprophet:
       weekly_seasonality: false   # meaningless at weekly granularity
       daily_seasonality: false
       impute_missing: true
+      n_changepoints: 10          # fewer than daily -- weekly series are shorter,
+      changepoints_range: 0.9     # so too many changepoints would overfit
       accelerator: cpu
       collect_metrics: false    # required -- see the daily block's note
       freq: auto
     hyperparameter_grid:
-      - learning_rate: 0.01
-        epochs: 50
-      - learning_rate: 0.10
-        epochs: 50
-      - learning_rate: 0.01
-        epochs: 150
-      - learning_rate: 0.10
-        epochs: 150
+      - {learning_rate: 0.01, epochs: 150}
+      - {learning_rate: 0.03, epochs: 150}
+      - {learning_rate: 0.10, epochs: 150}
+      - {learning_rate: 0.01, epochs: 300}
+      - {learning_rate: 0.03, epochs: 300}
+      - {learning_rate: 0.10, epochs: 300}
     wrapper_config:
       min_rows_required: 16
       random_seed: 42

@@ -56,6 +56,14 @@ def test_validate_no_missing_ignores_unused_columns():
     df = _complete_df(); df["extra"] = np.nan     # not date/target/independent -> ignored
     validate_no_missing_values(df, "date", "y", ["spend"])   # no raise
 
+
+def test_validate_no_missing_raises_clearly_on_absent_column():
+    df = _complete_df()
+    with pytest.raises(InvalidConfigError):        # missing target -> clear error, not KeyError
+        validate_no_missing_values(df, "date", "does_not_exist", ["spend"])
+    with pytest.raises(InvalidConfigError):        # missing independent
+        validate_no_missing_values(df, "date", "y", ["nope"])
+
 # ---------- clean_zero_variance ----------
 
 def test_clean_zero_variance_drops_constant_columns():
