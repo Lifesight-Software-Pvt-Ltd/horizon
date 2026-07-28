@@ -1,14 +1,60 @@
 import pandas as pd
 import pytest
 
+import numpy as np
+
 from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
 from horizon_forecaster.utils import (
     clean_zero_variance,
     infer_frequency,
     validate_frequency,
+    validate_no_missing_values,
     validate_training_size,
     validate_mape_threshold,
 )
+
+
+# ---------- validate_no_missing_values (complete-data requirement) ----------
+
+def _complete_df(n=100):
+    return pd.DataFrame({
+        "date": pd.date_range("2022-01-01", periods=n),
+        "y": np.arange(n, dtype=float),
+        "spend": np.arange(n, dtype=float) + 1,
+    })
+
+
+def test_validate_no_missing_passes_on_complete_data():
+    validate_no_missing_values(_complete_df(), "date", "y", ["spend"])   # no raise
+
+
+def test_validate_no_missing_raises_on_a_single_nan_target():
+    df = _complete_df(); df.loc[5, "y"] = np.nan                          # ONE missing cell
+    with pytest.raises(InvalidConfigError):
+        validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+def test_validate_no_missing_raises_on_nan_independent():
+    df = _complete_df(); df.loc[5, "spend"] = np.nan
+    with pytest.raises(InvalidConfigError):
+        validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+def test_validate_no_missing_raises_on_non_numeric_value():
+    df = _complete_df(); df["y"] = df["y"].astype(object); df.loc[0, "y"] = "x"
+    with pytest.raises(InvalidConfigError):
+        validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+def test_validate_no_missing_raises_on_missing_date():
+    df = _complete_df(); df["date"] = df["date"].astype(object); df.loc[0, "date"] = None
+    with pytest.raises(InvalidConfigError):
+        validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+def test_validate_no_missing_ignores_unused_columns():
+    df = _complete_df(); df["extra"] = np.nan     # not date/target/independent -> ignored
+    validate_no_missing_values(df, "date", "y", ["spend"])   # no raise
 
 # ---------- clean_zero_variance ----------
 

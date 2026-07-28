@@ -61,6 +61,7 @@ from horizon_forecaster.utils import (
     infer_frequency,
     validate_frequency,
     validate_mape_threshold,
+    validate_no_missing_values,
     validate_training_size,
 )
 
@@ -312,6 +313,15 @@ class HorizonForecaster:
         self.independent_columns = [
             c for c in requested_independent_columns if c not in dropped_columns
         ]
+
+        # Complete-data requirement: a single missing/non-numeric cell in any
+        # column used for training/testing (date, target, or a surviving
+        # independent column) is a hard failure -- missing data is never
+        # silently dropped or imputed. Done here, at construction, alongside
+        # the other dataset-level validation.
+        validate_no_missing_values(
+            cleaned_df, date_column, target_column, self.independent_columns
+        )
 
         # event_columns (explicit 0/1 flags for the future-exog strategy). None
         # means "auto-detect flags"; a list means "these exact columns are the
@@ -673,6 +683,18 @@ class HorizonForecaster:
                 results[model_name] = self._evaluate_single_model(model_name)
             except HorizonForecasterError as e:
                 errors[model_name] = e
+            except Exception as e:  # noqa: BLE001
+                # A model raising an UNEXPECTED (non-HorizonForecaster) error --
+                # e.g. a raw numpy LinAlgError from bad input -- must not abort
+                # the whole run. Isolate it exactly like a typed failure, but
+                # preserve the real type/message (via original_exception) so it
+                # stays debuggable rather than silently swallowed.
+                errors[model_name] = ModelConvergenceError(
+                    f"{model_name} failed with an unexpected "
+                    f"{type(e).__name__}: {e}",
+                    model_name=model_name,
+                    original_exception=e,
+                )
 
         self.evaluate_errors = errors
 
@@ -904,6 +926,13 @@ class HorizonForecaster:
                 )
             except HorizonForecasterError as e:
                 errors[model_name] = e
+            except Exception as e:  # noqa: BLE001 -- isolate any model failure; see evaluate()
+                errors[model_name] = ModelConvergenceError(
+                    f"{model_name} failed with an unexpected "
+                    f"{type(e).__name__}: {e}",
+                    model_name=model_name,
+                    original_exception=e,
+                )
 
         self.forecast_errors = errors
         self._warn_on_forecasts_far_outside_history(results)

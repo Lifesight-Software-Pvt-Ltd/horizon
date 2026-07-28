@@ -668,6 +668,52 @@ def test_invalid_future_exog_params_raise():
         HorizonForecaster(df, event_columns=["not_a_column"], **common)
 
 
+# ---------- NaN target handling + failure isolation (robustness) ----------
+
+def test_single_missing_target_cell_hard_fails_at_construction():
+    df = make_raw_df(n=100)
+    df["orders"] = df["orders"].astype(float)
+    df.loc[df.index[3], "orders"] = float("nan")         # exactly ONE missing cell
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, date_column="date", target_column="orders",
+                          frequency="daily", models=["prophet"])
+
+
+def test_single_missing_independent_cell_hard_fails_at_construction():
+    df = make_raw_df(n=100, with_spend=True)
+    df["spend"] = df["spend"].astype(float)
+    df.loc[df.index[3], "spend"] = float("nan")          # one missing driver cell
+    with pytest.raises(InvalidConfigError):
+        HorizonForecaster(df, date_column="date", target_column="orders",
+                          frequency="daily", independent_columns=["spend"],
+                          models=["prophet"])
+
+
+def test_unexpected_model_error_is_isolated_not_fatal():
+    """A model raising a raw (non-HorizonForecaster) error must be isolated in
+    evaluate_errors, with the real cause preserved, while other models run."""
+    df = make_raw_df(n=60)
+    f = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["sarimax", "prophet"],
+        model_params={"prophet": {"seasonality_mode": "additive"}},
+    )
+    real = f._evaluate_single_model
+
+    def patched(model_name):
+        if model_name == "prophet":
+            raise ValueError("simulated raw crash")     # not a HorizonForecasterError
+        return real(model_name)
+
+    f._evaluate_single_model = patched
+    results = f.evaluate()
+
+    assert "sarimax" in results                          # the healthy model still ran
+    err = f.evaluate_errors["prophet"]
+    assert isinstance(err, ModelConvergenceError)        # wrapped + isolated
+    assert isinstance(err.original_exception, ValueError)  # real cause preserved
+
+
 def test_forecast_warns_when_horizon_far_exceeds_history():
     df = make_raw_df(n=20, with_spend=True)
     forecaster = HorizonForecaster(

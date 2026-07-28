@@ -16,6 +16,48 @@ from horizon_forecaster.exceptions import (
 
 SUPPORTED_FREQUENCIES = ("daily", "weekly")
 
+
+def validate_no_missing_values(
+    df: pd.DataFrame,
+    date_column: str,
+    target_column: str,
+    independent_columns: Optional[List[str]] = None,
+) -> None:
+    """
+    Hard-fail if ANY cell of the data used for training/testing is missing.
+
+    Every value in the date column, the target column, and each independent
+    column that is actually used must be present -- a single NaN, NaT, or
+    non-numeric entry raises InvalidConfigError. Missing data is NOT dropped or
+    imputed: forecasting requires complete input, so the caller must supply it
+    (project convention -- fail loudly rather than silently forecasting on a
+    quietly-shrunk or gap-filled series).
+
+    Columns present in the DataFrame but not used (i.e. not the date, target,
+    or a surviving independent column) are ignored.
+    """
+    independent_columns = independent_columns or []
+    problems = {}
+
+    n_bad_dates = int(pd.to_datetime(df[date_column], errors="coerce").isna().sum())
+    if n_bad_dates:
+        problems[date_column] = n_bad_dates
+
+    for col in [target_column, *independent_columns]:
+        n_missing = int(pd.to_numeric(df[col], errors="coerce").isna().sum())
+        if n_missing:
+            problems[col] = n_missing
+
+    if problems:
+        raise InvalidConfigError(
+            f"The data has missing or non-numeric values in column(s) used for "
+            f"training/testing: {problems}. Every cell of the date, target and "
+            f"independent columns must be present -- clean or impute the data "
+            f"before forecasting (missing values are not dropped automatically).",
+            param_name="raw_df",
+            provided_value=problems,
+        )
+
 def clean_zero_variance(
     df: pd.DataFrame, exclude_columns: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, List[str]]:

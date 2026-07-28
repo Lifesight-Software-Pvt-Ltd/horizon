@@ -85,6 +85,18 @@ _WEEKLY_PERIOD_DAYS = 7.0
 _CONTINUOUS_MIN_DISTINCT = 2
 
 
+def _ols_slope(x: np.ndarray, y: np.ndarray) -> float:
+    """
+    NaN-safe least-squares slope of y on x. Returns 0.0 if fewer than two
+    finite (x, y) pairs remain. Used for prior means, so a NaN in a driver
+    can't leak a raw LinAlgError out of fit() before the sampler's guard.
+    """
+    m = np.isfinite(x) & np.isfinite(y)
+    if int(m.sum()) < 2:
+        return 0.0
+    return float(np.polyfit(x[m], y[m], 1)[0])
+
+
 class BayesianPyMCWrapper(BaseModel):
     """Wraps a PyMC Bayesian structural model to the BaseModel contract."""
 
@@ -172,10 +184,11 @@ class BayesianPyMCWrapper(BaseModel):
             else np.empty((n, 0))
         )
 
-        # Prior means, straight from the reference notebook.
-        slope_est, _ = np.polyfit(t, y_sc, 1)
+        # Prior means, straight from the reference notebook (NaN-safe, so a
+        # missing value in a driver can't leak a raw LinAlgError out of fit()).
+        slope_est = _ols_slope(t, y_sc)
         tail = min(52, n)
-        intercept_est = float(y_sc[-tail:].mean())
+        intercept_est = float(np.nanmean(y_sc[-tail:]))
 
         # Per-column coefficient prior means: OLS slope of the standardised
         # target on a continuous driver (informative), else 0 for a flag.
@@ -183,13 +196,12 @@ class BayesianPyMCWrapper(BaseModel):
             np.unique(exog[:, j][np.isfinite(exog[:, j])]).size > _CONTINUOUS_MIN_DISTINCT
             for j in range(exog.shape[1])
         ]
-        coef_prior_means = []
-        for j in range(exog.shape[1]):
-            if self._driver_mask[j] and np.nanstd(exog[:, j]) > 1e-12:
-                slope_j, _ = np.polyfit(exog[:, j], y_sc, 1)
-                coef_prior_means.append(float(slope_j))
-            else:
-                coef_prior_means.append(0.0)
+        coef_prior_means = [
+            _ols_slope(exog[:, j], y_sc)
+            if (self._driver_mask[j] and np.nanstd(exog[:, j]) > 1e-12)
+            else 0.0
+            for j in range(exog.shape[1])
+        ]
 
         try:
             trace = self._sample(
