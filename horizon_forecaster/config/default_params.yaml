@@ -454,7 +454,13 @@ neuralprophet:
       daily_seasonality: false
       impute_missing: true
       n_changepoints: 20         # up from the default (~5-10): finer trend so a
-      changepoints_range: 0.9    # level shift can be tracked, not smoothed over
+      changepoints_range: 0.8    # level shift can be tracked, not smoothed over.
+                                 # Kept at the 0.8 default (not 0.9): allowing
+                                 # changepoints into the last 10-20% left a short,
+                                 # noisy final trend segment that extrapolated
+                                 # badly on smooth-trend series (a regression seen
+                                 # on negative_effect_driver); a mid-series shift
+                                 # at ~60% is still well inside 0.8.
       accelerator: cpu          # pinned so local (MPS) and CI (CPU) agree
       # REQUIRED, not an optimisation. With metrics enabled, NeuralProphet
       # attaches a Lightning logger, which makes trainer.fit() run
@@ -485,7 +491,9 @@ neuralprophet:
       daily_seasonality: false
       impute_missing: true
       n_changepoints: 10          # fewer than daily -- weekly series are shorter,
-      changepoints_range: 0.9     # so too many changepoints would overfit
+      changepoints_range: 0.8     # so too many changepoints would overfit
+                                  # (0.8 default -- see the daily block's note on
+                                  # why not 0.9)
       accelerator: cpu
       collect_metrics: false    # required -- see the daily block's note
       freq: auto
