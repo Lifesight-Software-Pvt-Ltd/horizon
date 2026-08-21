@@ -7,7 +7,8 @@ MAE are provided as supplementary metrics only (e.g. for future
 reporting), never used for threshold/ensemble decisions.
 
 All functions are pure: they take numpy-array-like actuals/predictions
-and return plain floats (or a dict with metadata for MAPE), with no
+and return plain floats -- or, for MAPE, a MapeResult dataclass carrying
+the zero-actual exclusion metadata alongside the value -- with no
 dependency on any model class.
 """
 

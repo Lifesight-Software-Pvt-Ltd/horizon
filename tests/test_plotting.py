@@ -2,6 +2,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: no display needed, and never blocks
 import matplotlib.pyplot as plt
+from pathlib import Path
 import pandas as pd
 import pytest
 from types import SimpleNamespace
@@ -56,10 +57,26 @@ def make_ensemble(*, combined=True, with_mape=True, n=3):
     mape = MapeResult(value=8.0, excluded_zero_actual_count=0, total_count=n) if with_mape else None
     return EnsembleResult(
         combined=combined_df,
-        weights={"prophet": 0.6, "catboost": 0.4} if combined else {},
+        method="inverse_mape",
+        rule_applied="inverse_mape" if combined else "none",
+        members=["prophet", "catboost"] if combined else [],
+        weights={"prophet": 0.6, "catboost": 0.4} if combined else None,
         rejected_models={},
-        weighting="inverse_mape",
         mape=mape,
+    )
+
+
+def make_trimmed_ensemble(*, n=3, degraded=False):
+    """A weightless (trimmed) result -- the DEFAULT rule, which the
+    inverse_mape fixture above never exercises."""
+    return EnsembleResult(
+        combined=pd.DataFrame({"ds": _ds(n), "yhat": [12, 20, 32][:n]}),
+        method="trimmed",
+        rule_applied="mean" if degraded else "trimmed",
+        members=["prophet", "catboost"] if degraded else ["prophet", "catboost", "sarimax"],
+        degraded=degraded,
+        weights=None,
+        mape=MapeResult(value=8.0, excluded_zero_actual_count=0, total_count=n),
     )
 
 
@@ -79,7 +96,8 @@ def test_plot_evaluation_overlays_ensemble_with_its_mape():
     results = {"prophet": make_eval_result(5.0)}
     ax = plot_evaluation(results, ensemble=make_ensemble())
     labels = [ln.get_label() for ln in ax.get_lines()]
-    assert any(lbl.startswith("ensemble predicted") and "8.00%" in lbl for lbl in labels)
+    # The line is named for the rule that actually ran, not the one requested.
+    assert any(lbl.startswith("ensemble (") and "8.00%" in lbl for lbl in labels)
 
 
 def test_plot_evaluation_skips_ensemble_when_not_formed():
@@ -261,3 +279,52 @@ def test_plot_functions_draw_on_supplied_ax():
     fig, ax = plt.subplots()
     returned = plot_evaluation({"prophet": make_eval_result(5.0)}, ax=ax)
     assert returned is ax
+
+
+# ---------- the dict shape the forecaster actually hands over ----------
+
+def test_every_plot_entry_point_accepts_the_forecaster_dict():
+    """
+    HorizonForecaster.evaluate_ensemble / forecast_ensemble are
+    {method: EnsembleResult} dicts. Before 1.0.0 only the overlay charts
+    normalised that, so the per-model and save_* variants -- and therefore
+    exporters.export_forecast(save_plots=True), the documented one-call
+    export -- died with AttributeError on a perfectly ordinary run. Every
+    entry point must accept the dict.
+    """
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(9.0)}
+    forecasts = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
+    as_dict = {"trimmed": make_trimmed_ensemble()}
+
+    assert plot_evaluation(results, as_dict) is not None
+    assert plot_model_comparison(results, as_dict) is not None
+    assert plot_forecast(forecasts, ensemble=as_dict) is not None
+    assert "ensemble" in plot_evaluation_per_model(results, as_dict)
+    assert "ensemble" in plot_forecast_per_model(forecasts, ensemble=as_dict)
+
+
+def test_save_helpers_accept_the_forecaster_dict(tmp_path):
+    results = {"prophet": make_eval_result(5.0)}
+    forecasts = {"prophet": make_forecast_result()}
+    as_dict = {"trimmed": make_trimmed_ensemble()}
+
+    written = save_evaluation_plots(results, as_dict, output_dir=str(tmp_path))
+    assert "ensemble" in written
+    written = save_forecast_plots(forecasts, ensemble=as_dict, output_dir=str(tmp_path))
+    assert "ensemble" in written
+    assert all(Path(p).exists() for p in written.values())
+
+
+def test_line_charts_label_the_rule_that_actually_ran():
+    """A two-member plain mean must not be labelled 'trimmed'."""
+    results = {"prophet": make_eval_result(5.0)}
+    ax = plot_evaluation(results, {"trimmed": make_trimmed_ensemble(degraded=True)})
+    labels = [ln.get_label() for ln in ax.get_lines()]
+    assert any("(mean)" in lbl and "degraded" in lbl for lbl in labels)
+
+
+def test_weightless_ensemble_still_plots():
+    """The default rule carries weights=None; nothing may assume a dict."""
+    results = {"prophet": make_eval_result(5.0)}
+    assert plot_evaluation(results, make_trimmed_ensemble()) is not None
+    assert "ensemble" in plot_evaluation_per_model(results, make_trimmed_ensemble())

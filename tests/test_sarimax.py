@@ -249,3 +249,78 @@ def test_sarimax_uses_the_standard_grid_search_like_other_models():
 
     forecasts = f.forecast(horizon=10)
     assert len(forecasts["sarimax"].forecast) == 10
+
+
+# ---------- deterministic trend term (regression: the undifferenced collapse) ----------
+
+def test_trend_term_is_ct_when_nothing_is_differenced():
+    """
+    statsmodels defaults to NO constant. That is right for a differenced
+    series but catastrophic at d=0: this wrapper fits in log1p space, where
+    a business series sits around 7, so "zero-mean" forces the AR root to
+    ~1 and the forecast decays toward zero.
+    """
+    assert SARIMAXWrapper._trend_for((1, 0, 1), (0, 0, 0, 0)) == "ct"
+
+
+@pytest.mark.parametrize("order,seasonal_order", [
+    ((1, 1, 1), (0, 0, 0, 0)),   # ordinary differencing
+    ((1, 0, 1), (0, 1, 1, 7)),   # seasonal differencing only
+    ((1, 1, 1), (0, 1, 1, 7)),   # both
+])
+def test_no_trend_term_once_anything_is_differenced(order, seasonal_order):
+    """Differencing removes the level; a constant would imply a drift
+    nobody asked for. Untouched by the d=0 fix."""
+    assert SARIMAXWrapper._trend_for(order, seasonal_order) == "n"
+
+
+def test_undifferenced_fit_keeps_tracking_the_trend(monkeypatch):
+    """
+    End-to-end regression for the bug the trend term fixes.
+
+    Forces the d=0 branch on a clearly rising series. Without a trend term
+    statsmodels fits a ZERO-MEAN process to log1p data centred near 7, the
+    AR root is pushed toward 1, and the forecast mean-reverts instead of
+    continuing: measured here at 1047 -> 891 while actuals climb past 1300
+    (and, on the noisier real-data case that surfaced this, ~98% MAPE with
+    an 80-period forecast falling from ~945 to 3.3).
+
+    The assertion is directional rather than a MAPE bound, because the
+    severity depends on how close to 1 the AR root lands, while the
+    SIGNATURE is always the same: a rising series forecast to fall. The
+    horizon must be long enough for the decay to show -- over a short one
+    the same defect merely flattens the forecast, which reads as a
+    plausible plateau rather than a failure.
+    """
+    monkeypatch.setattr(SARIMAXWrapper, "_adf_differencing_order", lambda self, y: 0)
+
+    rng = np.random.default_rng(11)
+    n, horizon = 260, 80
+    t = np.arange(n + horizon)
+    values = np.maximum(500 + 2.0 * t + 60 * np.sin(t * 2 * np.pi / 7) + rng.normal(0, 20, n + horizon), 10)
+    raw = pd.DataFrame({"date": pd.date_range("2022-01-01", periods=n + horizon, freq="D"),
+                        "orders": values})
+
+    adapter = SARIMAXAdapter(
+        date_column="date", target_column="orders",
+        independent_columns=[], frequency="daily",
+    )
+    train = adapter.transform_train(raw.iloc[:n])
+    future = adapter.transform_future(
+        pd.Series(raw["date"].iloc[n:].reset_index(drop=True)), None
+    )
+
+    model = SARIMAXWrapper(frequency="daily", params=dict(BASE)).fit(train, target_column="y")
+    assert model._order[1] == 0, "test must exercise the undifferenced branch"
+
+    forecast = model.predict(horizon=horizon, future_exog=future)["yhat"].to_numpy()
+    last_observed = float(values[n - 1])
+
+    # A rising series must not be forecast to fall. Without trend="ct"
+    # the far end lands ~15% BELOW the last observed value.
+    assert forecast[-1] > last_observed, (
+        f"forecast ends at {forecast[-1]:.1f}, below the last observed "
+        f"{last_observed:.1f} -- an upward series is being forecast to "
+        f"decline, the signature of a zero-mean undifferenced fit"
+    )
+    assert forecast[-1] > forecast[0], "forecast should continue the trend, not revert"

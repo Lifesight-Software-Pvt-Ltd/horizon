@@ -5,6 +5,8 @@ import pytest
 from types import SimpleNamespace
 
 from horizon_forecaster.exporters import (
+    _REJECTED_COLUMNS,
+    _SUMMARY_COLUMNS,
     build_best_model_forecast_table,
     build_final_forecast_table,
     build_model_summary_table,
@@ -34,9 +36,11 @@ def make_ensemble(*, combined=True, rejected=None, n=3):
     combined_df = pd.DataFrame({"ds": _ds(n), "yhat": [12.0, 20.0, 32.0][:n]}) if combined else None
     return EnsembleResult(
         combined=combined_df,
-        weights={"prophet": 1.0} if combined else {},
+        method="inverse_mape",
+        rule_applied="inverse_mape" if combined else "none",
+        members=["prophet"] if combined else [],
+        weights={"prophet": 1.0} if combined else None,
         rejected_models=rejected or {},
-        weighting="inverse_mape",
         mape=None,
     )
 
@@ -123,7 +127,7 @@ def test_build_model_summary_reports_mape_weight_and_status():
     table = build_model_summary_table(
         {"prophet": 29.71, "sarimax": 1403.0}, ens, ensemble_mape=22.40
     )
-    assert list(table.columns) == ["model", "mape", "ensemble_weight", "status"]
+    assert list(table.columns) == _SUMMARY_COLUMNS
     by_model = table.set_index("model")
     assert by_model.loc["prophet", "status"] == "in_ensemble"
     assert by_model.loc["prophet", "ensemble_weight"] == 1.0
@@ -133,7 +137,7 @@ def test_build_model_summary_reports_mape_weight_and_status():
 
 def test_build_model_summary_empty_is_shaped():
     table = build_model_summary_table(None, None)
-    assert list(table.columns) == ["model", "mape", "ensemble_weight", "status"]
+    assert list(table.columns) == _SUMMARY_COLUMNS
     assert len(table) == 0
 
 
@@ -147,7 +151,7 @@ def test_build_rejected_models_table_content():
         allowed_max=40.0,
     )
     table = build_rejected_models_table(make_ensemble(rejected={"catboost": err}))
-    assert list(table.columns) == ["model", "mape", "mape_threshold", "reason"]
+    assert list(table.columns) == _REJECTED_COLUMNS
     row = table.iloc[0]
     assert row["model"] == "catboost"
     assert row["mape"] == 90.0
@@ -177,11 +181,15 @@ def test_export_writes_three_readable_files(tmp_path):
 
     written = export_forecast_csvs(results, ens, output_dir=str(tmp_path))
 
-    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
+    assert set(written) == {
+        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected", "model_summary",
+    }
     for path in written.values():
-        assert pd.read_csv(path) is not None  # re-reads without error
+        # pd.read_csv never returns None -- it raises or returns a frame.
+        # Assert the file has real columns instead of merely not crashing.
+        assert not pd.read_csv(path).columns.empty
 
-    final = pd.read_csv(written["final_ensemble"])
+    final = pd.read_csv(written["final_ensemble_inverse_mape"])
     assert list(final["yhat"]) == [12.0, 20.0, 32.0]
     rejected = pd.read_csv(written["rejected"])
     assert rejected.iloc[0]["model"] == "catboost"
@@ -190,8 +198,10 @@ def test_export_writes_three_readable_files(tmp_path):
 def test_export_creates_missing_nested_dir(tmp_path):
     target = tmp_path / "a" / "b"
     written = export_forecast_csvs({"prophet": make_forecast_result([1.0])}, make_ensemble(), output_dir=str(target))
-    assert (target / "forecast_final_ensemble.csv").exists()
-    assert written["final_ensemble"].endswith("forecast_final_ensemble.csv")
+    assert (target / "forecast_final_ensemble_inverse_mape.csv").exists()
+    assert written["final_ensemble_inverse_mape"].endswith(
+        "forecast_final_ensemble_inverse_mape.csv"
+    )
 
 
 def test_export_uses_custom_prefix(tmp_path):
@@ -199,7 +209,7 @@ def test_export_uses_custom_prefix(tmp_path):
         {"prophet": make_forecast_result([1.0])}, make_ensemble(),
         output_dir=str(tmp_path), prefix="run42",
     )
-    assert (tmp_path / "run42_final_ensemble.csv").exists()
+    assert (tmp_path / "run42_final_ensemble_inverse_mape.csv").exists()
     assert (tmp_path / "run42_per_model.csv").exists()
     assert (tmp_path / "run42_rejected_models.csv").exists()
 
@@ -220,9 +230,12 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
     # CSV keys + plot keys (overlay + one dedicated figure per model + ensemble)
-    assert {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"} <= set(written)
+    assert {
+        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected",
+        "model_summary",
+    } <= set(written)
     assert {"plot_overlay", "plot_prophet", "plot_ensemble"} <= set(written)
-    for name in ("forecast_final_ensemble.csv", "forecast_overlay.png",
+    for name in ("forecast_final_ensemble_inverse_mape.csv", "forecast_overlay.png",
                  "forecast_prophet.png", "forecast_ensemble.png"):
         assert (tmp_path / name).exists()
 
@@ -230,12 +243,112 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
 def test_export_forecast_save_plots_false_writes_only_csvs(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path), save_plots=False)
-    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
+    assert set(written) == {
+        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected", "model_summary",
+    }
     assert not list(tmp_path.glob("*.png"))
 
 
 def test_export_forecast_empty_still_writes_csvs_no_plots(tmp_path):
-    # No forecasts: CSVs written (header-only), plots skipped rather than raising.
+    # No forecasts and no ensemble: CSVs written (header-only), plots
+    # skipped rather than raising. With no ensemble there is no method to
+    # name, so the combined file keeps the plain unsuffixed name.
     written = export_forecast({}, None, output_dir=str(tmp_path))
-    assert set(written) == {"final_ensemble", "final_best_model", "per_model", "rejected", "model_summary"}
+    assert set(written) == {
+        "final_ensemble", "final_best_model", "per_model", "rejected", "model_summary",
+    }
     assert not list(tmp_path.glob("*.png"))
+
+
+# ---------- the DEFAULT (weightless) rule, and multi-method runs ----------
+
+def make_trimmed_ensemble(*, degraded=False, n=3):
+    """
+    The default rule's result shape: no weights at all.
+
+    Every other fixture in this file builds an `inverse_mape` ensemble with
+    a populated `weights` dict, so without this the weightless branches --
+    a blank `ensemble_weight` column, the `degraded` status, `rule_applied`
+    -- were exported by code no test ever ran.
+    """
+    return EnsembleResult(
+        combined=pd.DataFrame({"ds": _ds(n), "yhat": [12.0, 20.0, 32.0][:n]}),
+        method="trimmed",
+        rule_applied="mean" if degraded else "trimmed",
+        members=["prophet", "catboost"] if degraded else ["prophet", "catboost", "sarimax"],
+        degraded=degraded,
+        weights=None,
+        mape=None,
+    )
+
+
+def test_summary_leaves_ensemble_weight_blank_for_a_weightless_rule():
+    table = build_model_summary_table(
+        {"prophet": 10.0, "catboost": 12.0, "sarimax": 14.0},
+        make_trimmed_ensemble(),
+        ensemble_mape=9.0,
+        per_model_validation_mape={"prophet": 8.0, "catboost": 11.0, "sarimax": 13.0},
+    )
+    members = table[table["model"] != "ensemble"]
+    assert members["ensemble_weight"].isna().all()  # None, not a fabricated share
+    assert (members["status"] == "in_ensemble").all()
+    assert (members["rule_applied"] == "trimmed").all()
+    # Both windows are reported, and they are distinct columns.
+    assert members.set_index("model").loc["prophet", "validation_mape"] == 8.0
+    assert members.set_index("model").loc["prophet", "mape"] == 10.0
+
+
+def test_summary_marks_a_degraded_ensemble_row():
+    table = build_model_summary_table(
+        {"prophet": 10.0, "catboost": 12.0},
+        make_trimmed_ensemble(degraded=True),
+        ensemble_mape=9.0,
+    )
+    row = table[table["model"] == "ensemble"].iloc[0]
+    assert row["status"] == "degraded"
+    assert row["rule_applied"] == "mean"
+
+
+def test_export_writes_one_final_file_per_ensemble_method(tmp_path):
+    """
+    `ensemble_method=None` builds all three rules, and each needs its own
+    file -- a single `final_ensemble.csv` would silently keep only one.
+    """
+    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
+    ensembles = {
+        "trimmed": make_trimmed_ensemble(),
+        "inverse_mape": make_ensemble(),
+        "equal": make_ensemble(),
+    }
+    written = export_forecast_csvs(
+        results, ensembles, per_model_mape={"prophet": 10.0},
+        ensemble_mape=9.0, output_dir=str(tmp_path),
+    )
+
+    for method in ("trimmed", "inverse_mape", "equal"):
+        key = f"final_ensemble_{method}"
+        assert key in written
+        assert (tmp_path / f"forecast_final_ensemble_{method}.csv").exists()
+    # The summary repeats the per-model block once per method, so a reader
+    # can compare the rules side by side in one file.
+    summary = pd.read_csv(written["model_summary"])
+    assert set(summary["ensemble_method"]) == {"trimmed", "inverse_mape", "equal"}
+    assert (summary["model"] == "ensemble").sum() == 3
+
+
+def test_rejected_table_records_which_method_dropped_the_model():
+    """
+    Exclusion is per method: a NaN validation MAPE is dropped by the
+    weighted rules but kept by the trimmed one, so the reason must say
+    which rule it applied to.
+    """
+    err = ThresholdRejectionError(
+        "nan", model_name="sarimax", mape_value=float("nan"), allowed_max=40.0
+    )
+    ensembles = {
+        "trimmed": make_trimmed_ensemble(),
+        "inverse_mape": make_ensemble(rejected={"sarimax": err}),
+    }
+    table = build_rejected_models_table(ensembles)
+    assert list(table["ensemble_method"]) == ["inverse_mape"]
+    assert table.iloc[0]["model"] == "sarimax"

@@ -3,5 +3,4 @@ include README.md
 include CHANGELOG.md
 include CONTRIBUTING.md
 include requirements.txt
-include requirements-dev.txt
 recursive-include horizon_forecaster/config *.yaml

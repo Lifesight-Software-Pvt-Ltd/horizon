@@ -36,9 +36,10 @@ Design choices, all deliberate:
   change here. The ensemble is the one fixed style -- a red dashed line
   -- so it always stands out from the individual models.
 - Uncertainty bounds (yhat_lower/yhat_upper) are drawn as a shaded band
-  only for the models that actually provide them (Prophet does; CatBoost
-  does not). The ensemble never has bounds, by design (see
-  evaluation/ensemble.py) -- it is always a single line.
+  only for the models that actually provide them (Prophet, SARIMAX and
+  Bayesian PyMC do; CatBoost and NeuralProphet do not). The ensemble
+  never has bounds, by design (see evaluation/ensemble.py) -- it is
+  always a single line.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
 
 import matplotlib.pyplot as plt
+
+from horizon_forecaster.evaluation.ensemble import as_ensemble_dict
 
 if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy stack)
     import pandas as pd
@@ -61,13 +64,14 @@ _ACTUAL_COLOR = "black"
 _HISTORY_COLOR = "gray"
 _BOUND_ALPHA = 0.15
 
-# Shown when an ensemble was requested but none could be formed (every
-# model exceeded mape_threshold). The individual-model lines are still
+# Shown when an ensemble was requested but none could be formed -- every
+# model exceeded mape_threshold, or (under a weighted rule) every model
+# had a NaN selection MAPE. The individual-model lines are still
 # drawn -- a rejected model still produced a real forecast -- but this
 # note makes it unmistakable that those lines are for diagnosis, NOT a
 # blessed/trusted result, so a rejected model isn't mistaken for one.
 _NO_ENSEMBLE_NOTE = (
-    "No ensemble formed — all models above mape_threshold;\n"
+    "No ensemble formed — no model was admitted;\n"
     "individual forecasts shown for diagnosis only"
 )
 
@@ -93,6 +97,33 @@ def _draw_bounds(ax: "Axes", df: "pd.DataFrame", color) -> None:
         ax.fill_between(
             df["ds"], df["yhat_lower"], df["yhat_upper"], alpha=_BOUND_ALPHA, color=color
         )
+
+
+def _primary_ensemble(ensemble) -> "Optional[EnsembleResult]":
+    """
+    The single ensemble to draw on a line chart.
+
+    Overlaying several combination rules on one time-series axes buries
+    the per-model lines the chart exists to show, so the line plots draw
+    the FIRST requested method -- which is the configured default unless
+    the caller deliberately reordered it. plot_model_comparison() is the
+    exception: comparing rules is exactly what a bar chart is for, so it
+    shows one bar per method.
+    """
+    ensembles = as_ensemble_dict(ensemble)
+    if not ensembles:
+        return None
+    return next(iter(ensembles.values()))
+
+
+def _ensemble_label(result: "EnsembleResult") -> str:
+    """
+    Name the combined line by the rule that was ACTUALLY applied, not the
+    one requested -- a two-member plain mean labelled "trimmed" would
+    misrepresent the chart.
+    """
+    label = f"ensemble ({result.rule_applied})"
+    return f"{label} [degraded]" if result.degraded else label
 
 
 def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> None:
@@ -123,7 +154,7 @@ def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> N
 
 def plot_evaluation(
     evaluation_results: "Dict[str, EvaluationResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     ax: "Optional[Axes]" = None,
     title: str = "Test set: actual vs predicted, by model",
@@ -181,6 +212,7 @@ def plot_evaluation(
         )
         _draw_bounds(ax, preds, line.get_color())
 
+    ensemble = _primary_ensemble(ensemble)
     if ensemble is not None and ensemble.combined is not None:
         mape_label = (
             f" (MAPE {ensemble.mape.value:.2f}%)" if ensemble.mape is not None else ""
@@ -188,7 +220,7 @@ def plot_evaluation(
         ax.plot(
             ensemble.combined["ds"],
             ensemble.combined["yhat"],
-            label=f"ensemble predicted{mape_label}",
+            label=f"{_ensemble_label(ensemble)}{mape_label}",
             color=_ENSEMBLE_COLOR,
             linestyle="--",
             marker="x",
@@ -205,7 +237,7 @@ def plot_forecast(
     history: "Optional[pd.DataFrame]" = None,
     date_column: str = "ds",
     target_column: str = "y",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     ax: "Optional[Axes]" = None,
     title: str = "History + forecast, by model",
 ) -> "Axes":
@@ -255,6 +287,7 @@ def plot_forecast(
         line, = ax.plot(fc["ds"], fc["yhat"], label=f"{name} forecast")
         _draw_bounds(ax, fc, line.get_color())
 
+    ensemble = _primary_ensemble(ensemble)
     if ensemble is not None and ensemble.combined is not None:
         ax.plot(
             ensemble.combined["ds"],
@@ -271,13 +304,17 @@ def plot_forecast(
 
 def plot_model_comparison(
     evaluation_results: "Dict[str, EvaluationResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     ax: "Optional[Axes]" = None,
     title: str = "Model comparison: MAPE (lower is better)",
 ) -> "Axes":
     """
-    Bar chart comparing each model's test-set MAPE, and the ensemble's.
+    Bar chart comparing each model's test-window MAPE, and the ensemble's.
+
+    These are the REPORTED scores, not the validation scores models were
+    selected on -- so a model that looks strong here earned it on data no
+    selection path was allowed to see.
 
     A quick side-by-side of the same numbers plot_evaluation puts in its
     legend -- easier to compare at a glance, and it makes the ensemble's
@@ -307,10 +344,17 @@ def plot_model_comparison(
     values = [evaluation_results[n].mape.value for n in names]
     colors = ["tab:blue"] * len(names)
 
-    if ensemble is not None and ensemble.mape is not None:
-        names.append("ensemble")
-        values.append(ensemble.mape.value)
+    # One bar per combination method. Comparing rules head-to-head is
+    # precisely what this chart is for, so unlike the line plots it does
+    # not collapse to a single primary ensemble.
+    ensembles = as_ensemble_dict(ensemble)
+    for method, result in ensembles.items():
+        if result.mape is None:
+            continue
+        names.append(f"ensemble\n({result.rule_applied})" if len(ensembles) > 1 else "ensemble")
+        values.append(result.mape.value)
         colors.append(_ENSEMBLE_COLOR)
+    ensemble = _primary_ensemble(ensemble)
 
     ax = _new_ax(ax, figsize=(8, 5))
     bars = ax.bar(names, values, color=colors)
@@ -324,7 +368,7 @@ def plot_model_comparison(
 
 def plot_evaluation_per_model(
     evaluation_results: "Dict[str, EvaluationResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     figsize=(11, 4.5),
 ) -> "Dict[str, Figure]":
@@ -352,6 +396,7 @@ def plot_evaluation_per_model(
     if not evaluation_results:
         raise ValueError("plot_evaluation_per_model: evaluation_results is empty, nothing to plot.")
 
+    ensemble = _primary_ensemble(ensemble)
     actual = next(iter(evaluation_results.values())).test_predictions[["ds", "y"]]
     figures: "Dict[str, Figure]" = {}
 
@@ -372,7 +417,8 @@ def plot_evaluation_per_model(
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
         ax.plot(
-            ensemble.combined["ds"], ensemble.combined["yhat"], label="ensemble predicted",
+            ensemble.combined["ds"], ensemble.combined["yhat"],
+            label=_ensemble_label(ensemble),
             color=_ENSEMBLE_COLOR, linestyle="--", marker="x",
         )
         _finalize(ax, f"Test set: actual vs ensemble{mape_label}")
@@ -394,7 +440,7 @@ def plot_forecast_per_model(
     history: "Optional[pd.DataFrame]" = None,
     date_column: str = "ds",
     target_column: str = "y",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     figsize=(11, 4.5),
 ) -> "Dict[str, Figure]":
     """
@@ -408,6 +454,7 @@ def plot_forecast_per_model(
     if not forecast_results:
         raise ValueError("plot_forecast_per_model: forecast_results is empty, nothing to plot.")
 
+    ensemble = _primary_ensemble(ensemble)
     figures: "Dict[str, Figure]" = {}
 
     def _figure(label, fc, is_ensemble):
@@ -435,7 +482,7 @@ def plot_forecast_per_model(
 
 def save_evaluation_plots(
     evaluation_results: "Dict[str, EvaluationResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     output_dir: str = ".",
     prefix: str = "evaluation",
@@ -482,7 +529,7 @@ def save_forecast_plots(
     history: "Optional[pd.DataFrame]" = None,
     date_column: str = "ds",
     target_column: str = "y",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     output_dir: str = ".",
     prefix: str = "forecast",
     dpi: int = 100,

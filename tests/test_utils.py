@@ -5,6 +5,7 @@ import numpy as np
 
 from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
 from horizon_forecaster.utils import (
+    resolve_split,
     clean_zero_variance,
     infer_frequency,
     validate_frequency,
@@ -154,3 +155,69 @@ def test_validate_mape_threshold_rejects_out_of_bounds():
         validate_mape_threshold(0)       
     with pytest.raises(InvalidConfigError):
         validate_mape_threshold(150)  # above the internal ceiling of 100
+
+# ---------- resolve_split ----------
+
+def test_resolve_split_uses_frequency_defaults_on_a_long_series():
+    assert resolve_split(400, "daily") == (316, 56, 28)
+    assert resolve_split(300, "weekly") == (261, 26, 13)
+
+
+def test_resolve_split_treats_ints_as_periods_and_floats_as_fractions():
+    assert resolve_split(400, "daily", validation_size=40, test_size=20) == (340, 40, 20)
+    # 0.1 * 400 = 40, 0.05 * 400 = 20 -- same split, expressed as fractions.
+    assert resolve_split(400, "daily", validation_size=0.1, test_size=0.05) == (340, 40, 20)
+
+
+@pytest.mark.parametrize("value", [1.0, 28.0, 2.5])
+def test_resolve_split_rejects_ambiguous_floats(value):
+    """
+    `28` and `28.0` would otherwise mean periods while `0.28` meant a
+    fraction -- exactly the unit confusion that produces a wrong split
+    nobody notices. A float >= 1 is refused rather than guessed at.
+    """
+    with pytest.raises(InvalidConfigError, match="ambiguous"):
+        resolve_split(400, "daily", test_size=value)
+
+
+@pytest.mark.parametrize("value", [0, -5, 0.0, True])
+def test_resolve_split_rejects_nonsensical_window_sizes(value):
+    # bool is a subclass of int, so True must not sail through as "1 period".
+    with pytest.raises(InvalidConfigError):
+        resolve_split(400, "daily", validation_size=value)
+
+
+def test_resolve_split_percentage_route_splits_remainder_two_to_one():
+    n_train, n_validation, n_test = resolve_split(1000, "daily", training_size=80)
+    assert n_train == 800
+    assert n_validation + n_test == 200
+    # Validation is the selection instrument and wants stability, so it
+    # takes two-thirds rather than an even split.
+    assert n_validation == 133 and n_test == 67
+
+
+def test_resolve_split_refuses_to_mix_the_two_routes():
+    with pytest.raises(InvalidConfigError, match="cannot be combined"):
+        resolve_split(400, "daily", training_size=80, test_size=20)
+
+
+def test_resolve_split_scales_defaults_down_on_a_short_series():
+    with pytest.warns(UserWarning, match="too short for the default"):
+        n_train, n_validation, n_test = resolve_split(60, "daily")
+    # Capped at 40% of the data between them, keeping the 2:1 ratio.
+    assert (n_train, n_validation, n_test) == (36, 16, 8)
+    assert n_validation + n_test == int(60 * 0.4)
+
+
+def test_resolve_split_never_silently_shrinks_an_explicit_window():
+    """A size the caller chose is honoured or refused -- never quietly
+    reduced, unlike the defaults."""
+    with pytest.raises(InvalidConfigError, match="do not leave any rows for training"):
+        resolve_split(60, "daily", validation_size=50, test_size=20)
+
+
+def test_resolve_split_scaling_applies_only_when_both_windows_defaulted():
+    # test_size named explicitly -> no scaling, so the daily default
+    # validation window of 56 is used as-is and there is no room left.
+    with pytest.raises(InvalidConfigError):
+        resolve_split(60, "daily", test_size=5)

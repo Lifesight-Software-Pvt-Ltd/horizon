@@ -1,15 +1,17 @@
 """
 HorizonForecaster: the main orchestration class for horizon_forecaster.
 
-Phase 3 extended this from a single hardcoded model (Prophet) to a
-registry-driven orchestrator that can run any number of registered
-models in one evaluate()/forecast() call, each independent and
-parallel. Phase 4 adds the actual ensemble combination on top of that:
-evaluate()/forecast() still return the same per-model dict as before
-(unchanged, backward compatible), and additionally populate
-self.evaluate_ensemble / self.forecast_ensemble (an EnsembleResult --
-see evaluation/ensemble.py) as a side effect, mirroring how
+A registry-driven orchestrator that runs any number of registered models
+in one evaluate()/forecast() call, each independent. evaluate()/
+forecast() return a per-model dict keyed by model name, and additionally
+populate self.evaluate_ensemble / self.forecast_ensemble (a dict of
+EnsembleResult keyed by combination method -- see
+evaluation/ensemble.py) as a side effect, mirroring how
 self.evaluate_errors/self.forecast_errors already work.
+
+Data is split into three chronological windows: train, validation
+(every selection decision) and test (reported, never selected on). See
+the HorizonForecaster class docstring for why.
 
 Adding a new model to this orchestrator should mean adding ONE entry to
 MODEL_REGISTRY below, nothing else in this file. If a new model ever
@@ -20,8 +22,9 @@ contract, don't special-case the orchestrator.
 
 import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Union
 
 import pandas as pd
 import yaml
@@ -33,9 +36,10 @@ from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetA
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
 from horizon_forecaster.data_adapter.sarimax_adapter import SARIMAXAdapter
 from horizon_forecaster.evaluation.ensemble import (
-    WEIGHTING_STRATEGIES,
+    DEFAULT_ENSEMBLE_METHOD,
+    ENSEMBLE_METHODS,
     EnsembleResult,
-    build_ensemble,
+    build_ensembles,
 )
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
 from horizon_forecaster.future_exog import (
@@ -46,6 +50,7 @@ from horizon_forecaster.future_exog import (
 from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
     HorizonForecasterError,
+    InsufficientDataError,
     InvalidConfigError,
     ModelConvergenceError,
     UnsupportedFrequencyError,
@@ -59,14 +64,33 @@ from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
 from horizon_forecaster.utils import (
     clean_zero_variance,
     infer_frequency,
+    resolve_split,
     validate_frequency,
     validate_mape_threshold,
     validate_no_missing_values,
-    validate_training_size,
 )
 
 _CONFIG_PATH = Path(__file__).parent / "config" / "default_params.yaml"
 _FREQUENCY_OFFSETS = {"daily": "D", "weekly": "7D"}
+
+
+@lru_cache(maxsize=1)
+def _default_params() -> dict:
+    """
+    The parsed default_params.yaml, read once per process.
+
+    It used to be re-read and re-parsed for every requested model, so a
+    default five-model construction parsed the same ~600-line file five
+    times. The file ships inside the package and never changes at
+    runtime, so caching is safe.
+
+    Callers must treat the returned dict as READ-ONLY -- it is shared by
+    every HorizonForecaster in the process. Nothing mutates it today:
+    _load_config only indexes into it, and the per-candidate merges in
+    the grid search build new dicts via {**base, **entry}.
+    """
+    with open(_CONFIG_PATH) as f:
+        return yaml.safe_load(f)
 
 # Warn once the requested horizon exceeds this fraction of the available
 # history. Deliberately strict: the previous rule only fired when the
@@ -95,33 +119,77 @@ MODEL_REGISTRY: Dict[str, dict] = {
 }
 
 @dataclass
+class _Selection:
+    """
+    Internal record of the hyperparameter-selection step for ONE model.
+
+    Selection happens on the VALIDATION window and nothing else -- this is
+    the whole point of the three-way split. Keeping it in its own record,
+    cached separately from EvaluationResult, means forecast() can reuse a
+    selection (which is all it needs: the winning params, plus a validation
+    MAPE for ensemble screening/weighting) WITHOUT paying for the train+
+    validation refit and test prediction that only evaluate() reports.
+    """
+
+    params: dict
+    validation_mape: MapeResult
+    grid_search_summary: Optional[List[dict]] = None
+
+
+@dataclass
 class EvaluationResult:
     """
     Structured result from evaluating ONE model. HorizonForecaster.evaluate()
-    returns a Dict[str, EvaluationResult] keyed by model name -- this
-    dataclass itself is unchanged from the single-model Phase 2 version,
-    since Phase 4's ensemble logic will consume these per-model results
-    directly.
+    returns a Dict[str, EvaluationResult] keyed by model name.
+
+    The two MAPEs here are the heart of the three-way split, and they are
+    NOT interchangeable:
+
+        validation_mape  the score every DECISION was made on -- which
+                         hyperparameter candidate won, whether the model
+                         clears mape_threshold, and its inverse-MAPE
+                         weight. Because candidates were selected to
+                         minimise it, it is a selection score and is
+                         optimistic by construction.
+
+        mape             the score REPORTED, measured on the test window,
+                         which no selection path is ever allowed to read.
+                         This is the honest out-of-sample estimate.
+
+    The gap between them is itself a useful diagnostic: a large one means
+    the grid search found a candidate that suited the validation window
+    specifically rather than the series generally.
 
     Attributes:
         model_name: which model this result is for (e.g. "prophet").
-        mape: MapeResult (value + zero-actual exclusion metadata), not a
-            bare float.
-        n_train: number of rows used for training.
-        n_test: number of rows held out for evaluation.
+        mape: MapeResult on the TEST window -- the reported score.
+        validation_mape: MapeResult on the VALIDATION window -- the
+            selection score. Present whether or not a grid search ran,
+            since the ensemble needs it either way.
+        n_train: rows used to fit during selection.
+        n_validation: rows in the validation window.
+        n_test: rows in the test window.
         test_predictions: DataFrame with columns ["ds", "y", "yhat"]
-            (plus "yhat_lower"/"yhat_upper" if available).
-        fitted_model: the wrapper instance fitted on the TRAIN SPLIT ONLY
-            (using the winning hyperparameters, if grid search was used).
+            (plus "yhat_lower"/"yhat_upper" if available), over the test
+            window.
+        fitted_model: the wrapper instance fitted on TRAIN + VALIDATION
+            using the winning hyperparameters -- i.e. the model that
+            actually produced `test_predictions`. Deliberately not the
+            train-only fit used during selection: refitting on everything
+            available before scoring test is what makes the reported MAPE
+            an estimate of the procedure that produces the real forecast.
         grid_search_summary: if hyperparameters were selected via grid
             search (no explicit model_params override given), a list of
-            every candidate tried, each as {"params": {...}, "mape": float},
-            sorted best-to-worst. None if an explicit override was used.
+            every candidate tried, each as {"params": {...}, "mape": float}
+            where that mape is the VALIDATION score, sorted best-to-worst.
+            None if an explicit override was used.
     """
 
     model_name: str
     mape: MapeResult
+    validation_mape: MapeResult
     n_train: int
+    n_validation: int
     n_test: int
     test_predictions: pd.DataFrame
     fitted_model: BaseModel
@@ -155,7 +223,7 @@ class ForecastResult:
 class HorizonForecaster:
     """
     Main orchestrator. Takes raw user data once at construction, and
-    exposes evaluate() (train/test split + MAPE, per model) and
+    exposes evaluate() (train/validation/test split + MAPE, per model) and
     forecast() (full-data refit + real future prediction, per model).
 
     Args:
@@ -164,9 +232,25 @@ class HorizonForecaster:
         date_column: name of the date column in raw_df.
         target_column: name of the target/dependent variable column.
         frequency: "daily" or "weekly".
-        training_size: percentage (50-100) or fraction (0.5-1.0) of data
-            to use for training; the remainder is held out for
-            evaluation. Defaults to 80 (an 80/20 split).
+        validation_size: size of the validation window, used for EVERY
+            selection decision (hyperparameter grid search, mape_threshold
+            screening, inverse-MAPE weighting). An int is a number of
+            periods, a float strictly between 0 and 1 is a fraction of the
+            data, and None (the default) uses the frequency default from
+            utils.DEFAULT_EVALUATION_WINDOWS -- 56 periods daily, 26
+            weekly.
+        test_size: size of the test window, which is REPORTED and never
+            read by any selection path. Same int/float/None semantics as
+            validation_size; the frequency default is 28 periods daily, 13
+            weekly. Training takes every row the two windows leave.
+        training_size: the percentage route, for callers who would rather
+            think in percentages than windows. A percentage (50-100) or
+            fraction (0.5-1.0), meaning exactly what it always has; the
+            remainder is divided between validation and test, two-thirds
+            to validation. Mutually exclusive with validation_size/
+            test_size -- passing both raises InvalidConfigError rather
+            than letting one silently win. Note this parameter is
+            percentages ONLY: training_size=80 is 80%, never 80 periods.
         independent_columns: names of independent variable columns
             (spend, impressions, promos, etc.) to use, if any.
         models: which models to run, e.g. ["prophet", "catboost"]. If
@@ -180,19 +264,23 @@ class HorizonForecaster:
             base_hyperparameters). A model with no entry (or if
             model_params is omitted entirely) uses its own grid search
             as normal -- this is independent per model.
-        mape_threshold: accuracy cutoff (0-100, default 40) a model's
-            MAPE must be at or below to be included in the ensemble. A
-            model scoring above it is excluded and reported in
-            evaluate_ensemble.rejected_models /
-            forecast_ensemble.rejected_models. This is an upper bound
-            only -- an unusually low MAPE is never rejected. Lower it to
-            filter more aggressively; raise it (up to 100) to be more
-            permissive.
-        ensemble_weighting: "inverse_mape" (default -- models with
-            lower MAPE get proportionally more weight) or "equal"
-            (every model that passes the threshold gets an equal
-            share), passed straight through to
-            evaluation/ensemble.py's build_ensemble().
+        mape_threshold: garbage filter (0.01-100, default 40), applied to
+            each model's VALIDATION MAPE. A model scoring above it is
+            excluded from the combination and reported in
+            rejected_models. Pass None to admit every model. Treat this
+            as a guard against degenerate fits rather than an accuracy
+            screen: the default combination rule already discards the
+            worst member on every period, so screening hard AND trimming
+            spends the same robustness budget twice -- five members
+            screened down to three leaves the median.
+        ensemble_method: how surviving models are combined. "trimmed"
+            (the default -- discard the highest and lowest member per
+            period and average the rest), "inverse_mape" (lower
+            validation MAPE gets proportionally more weight), or "equal".
+            Accepts a list to build several, or None to build all of
+            them; the models are already fitted by then, so extra rules
+            are close to free. evaluate_ensemble/forecast_ensemble are
+            keyed by method name in every case.
         future_exog_strategy: how forecast() invents future values for the
             independent columns when they aren't supplied (Phase 7). One of
             future_exog.FUTURE_EXOG_STRATEGIES: "carry_forward" (default --
@@ -229,17 +317,27 @@ class HorizonForecaster:
     ensemble rejection below -- just "did this model produce a result
     or not."
 
-    Ensemble behavior (Phase 4): after evaluate()/forecast() build
-    their per-model dict as above (unchanged), each call additionally
-    populates self.evaluate_ensemble / self.forecast_ensemble (an
-    EnsembleResult, see evaluation/ensemble.py) as a side effect --
-    the returned dict's shape/meaning is untouched. forecast() has no
-    held-out actuals of its own to score model accuracy, so it always
-    reuses evaluate()'s per-model MAPE to decide both the threshold
-    rejection and the weights; if evaluate() hasn't been run yet this
-    session, forecast() runs it internally once (with a warning, since
-    this adds evaluate()'s own train/test-split fit cost on top of
-    forecast()'s full-data refit).
+    Evaluation windows: this class splits chronologically into THREE
+    windows, not two. Hyperparameter grid search, mape_threshold
+    screening and inverse-MAPE weighting all score on the VALIDATION
+    window; the winning candidate is then refit on train + validation and
+    scored once on the TEST window, which no selection path is ever
+    allowed to read. EvaluationResult carries both numbers -- `mape` is
+    the reported test-window score, `validation_mape` the selection score
+    it was chosen by. Before 1.0 there was one held-out window serving
+    both roles, which made every reported MAPE a selection score and
+    therefore optimistic.
+
+    Ensemble behavior: after evaluate()/forecast() build their per-model
+    dict as above, each call additionally populates
+    self.evaluate_ensemble / self.forecast_ensemble as a side effect --
+    a Dict[str, EnsembleResult] keyed by combination method (see
+    evaluation/ensemble.py), always a dict even when one method was
+    requested, matching the convention the per-model returns already
+    follow. forecast() has no held-out actuals of its own, so any
+    screening or weighting reuses the validation MAPE from selection,
+    which it has to perform anyway in order to know which hyperparameters
+    to fit with.
     """
 
     def __init__(
@@ -248,35 +346,29 @@ class HorizonForecaster:
         date_column: str,
         target_column: str,
         frequency: str,
-        training_size: float = 80,
+        validation_size: Optional[Union[int, float]] = None,
+        test_size: Optional[Union[int, float]] = None,
+        training_size: Optional[Union[int, float]] = None,
         independent_columns: Optional[List[str]] = None,
         models: Optional[List[str]] = None,
         model_params: Optional[Dict[str, dict]] = None,
-        mape_threshold: float = 40.0,
-        ensemble_weighting: str = "inverse_mape",
+        mape_threshold: Optional[float] = 40.0,
+        ensemble_method: Union[str, Sequence[str], None] = DEFAULT_ENSEMBLE_METHOD,
         future_exog_strategy: str = "carry_forward",
         event_columns: Optional[List[str]] = None,
         future_exog_aggregator: str = "mean",
         recent_average_window: int = 28,
     ):
         self.frequency = validate_frequency(frequency)
-        self.training_fraction = validate_training_size(training_size)
         self.date_column = date_column
         self.target_column = target_column
 
         self.mape_threshold = validate_mape_threshold(mape_threshold)
-        if ensemble_weighting not in WEIGHTING_STRATEGIES:
-            raise InvalidConfigError(
-                f"ensemble_weighting must be one of {WEIGHTING_STRATEGIES} "
-                f"(got '{ensemble_weighting}').",
-                param_name="ensemble_weighting",
-                provided_value=ensemble_weighting,
-            )
-        self.ensemble_weighting = ensemble_weighting
+        self.ensemble_methods = self._validate_ensemble_methods(ensemble_method)
 
         # Phase 7: future-exogenous-data strategy (how forecast() invents future
         # driver values when they aren't supplied). Validated here like
-        # ensemble_weighting; event_columns is validated against the surviving
+        # ensemble_method; event_columns is validated against the surviving
         # independent columns below, once those are known.
         if future_exog_strategy not in FUTURE_EXOG_STRATEGIES:
             raise InvalidConfigError(
@@ -346,31 +438,37 @@ class HorizonForecaster:
         self.raw_df = cleaned_df.sort_values(date_column).reset_index(drop=True)
         self._warn_if_declared_frequency_mismatches_data()
 
-        # Computed once here, not per-model: which rows go to train/test
-        # depends only on training_fraction and row count, never on
-        # which model is being evaluated. A training_size that leaves
-        # zero test rows is a dataset-level configuration error common
-        # to every model, not a single model's data problem -- so it's
+        # Computed once here, not per-model: which rows go to train /
+        # validation / test depends only on the requested sizes and the row
+        # count, never on which model is being evaluated. A configuration
+        # that leaves a window empty is a dataset-level error common to
+        # every model, not a single model's data problem -- so it's
         # validated here, at construction, and fails immediately with a
-        # direct InvalidConfigError, rather than being discovered inside
-        # a per-model try/except during evaluate() (where it would
-        # otherwise get caught by the partial-failure handling below and
-        # surface as a confusing AllModelsRejectedError instead).
+        # direct InvalidConfigError, rather than being discovered inside a
+        # per-model try/except during evaluate() (where it would otherwise
+        # get caught by the partial-failure handling below and surface as a
+        # confusing AllModelsRejectedError instead).
         n_total = len(self.raw_df)
-        self._n_train = int(n_total * self.training_fraction)
-        self._n_test = n_total - self._n_train
-        if self._n_test == 0:
-            raise InvalidConfigError(
-                f"training_size of {self.training_fraction * 100:.0f}% leaves no rows for "
-                f"evaluation ({n_total} total rows -> {self._n_train} train, 0 test). "
-                f"Use a smaller training_size, or a larger dataset.",
-                param_name="training_size",
-                provided_value=self.training_fraction,
-            )
+        self._n_train, self._n_validation, self._n_test = resolve_split(
+            n_total=n_total,
+            frequency=self.frequency,
+            training_size=training_size,
+            validation_size=validation_size,
+            test_size=test_size,
+        )
 
         self._configs: Dict[str, dict] = {
             model_name: self._load_config(model_name) for model_name in self.models
         }
+
+        # The split is legal in the abstract (every window has rows), but
+        # the models actually requested may each need more training rows
+        # than it leaves. Checked here rather than per-model at fit time so
+        # the caller gets one clear, actionable message naming the binding
+        # model up front -- otherwise every model fails separately inside
+        # evaluate()'s partial-failure handling and the real cause (the
+        # split, not the data) is buried in an AllModelsRejectedError.
+        self._validate_train_size_against_model_floors()
 
         model_params = model_params or {}
         self._use_grid_search: Dict[str, bool] = {}
@@ -387,8 +485,13 @@ class HorizonForecaster:
             else:
                 self._selected_hyperparameters[model_name] = {**base_hyperparameters, **(override or {})}
 
-        self._grid_search_results: Dict[str, EvaluationResult] = {}
+        # Selection (winning params + validation MAPE) is cached separately
+        # from the full EvaluationResult, because forecast() needs only the
+        # former -- see _Selection's docstring.
+        self._selection_cache: Dict[str, _Selection] = {}
+        self._evaluation_cache: Dict[str, EvaluationResult] = {}
         self._split_cache: Dict[str, tuple] = {}
+        self._refit_cache: Dict[str, tuple] = {}
         self._forecast_models: Dict[str, BaseModel] = {}
         self._forecast_adapters: Dict[str, BaseAdapter] = {}
 
@@ -400,18 +503,51 @@ class HorizonForecaster:
         self.evaluate_errors: Dict[str, HorizonForecasterError] = {}
         self.forecast_errors: Dict[str, HorizonForecasterError] = {}
 
-        # Phase 4: ensemble side-channel state. evaluate_ensemble/
-        # forecast_ensemble are populated by evaluate()/forecast()
-        # respectively; None until the corresponding method has run at
-        # least once. _evaluate_mape_cache is the per-model MAPE dict
-        # forecast() reuses to weight its own ensemble (see forecast()
-        # docstring) -- None means evaluate() hasn't run yet this
-        # session, {} means it ran but produced zero usable results
-        # (AllModelsRejectedError), distinguishing "not tried" from
-        # "tried and found nothing" so forecast() doesn't retry forever.
-        self.evaluate_ensemble: Optional[EnsembleResult] = None
-        self.forecast_ensemble: Optional[EnsembleResult] = None
-        self._evaluate_mape_cache: Optional[Dict[str, float]] = None
+        # Ensemble side-channel state. evaluate_ensemble/forecast_ensemble
+        # are populated by evaluate()/forecast() respectively, each a dict
+        # keyed by combination method (see the class docstring); None until
+        # the corresponding method has run at least once.
+        self.evaluate_ensemble: Optional[Dict[str, EnsembleResult]] = None
+        self.forecast_ensemble: Optional[Dict[str, EnsembleResult]] = None
+
+    def _validate_ensemble_methods(
+        self, ensemble_method: Union[str, Sequence[str], None]
+    ) -> List[str]:
+        """
+        Resolve `ensemble_method` into the list of rules to build.
+
+        Accepts a single name, a sequence of names, or None meaning "all
+        of them". None is genuinely useful rather than indulgent: the
+        models have already been fitted by the time any of this runs, so
+        every additional rule costs one pass of arithmetic over
+        predictions that are already in memory. A caller who wants to see
+        how much the choice of rule actually matters on their series
+        should not have to re-run the fits three times to find out.
+        """
+        if ensemble_method is None:
+            return list(ENSEMBLE_METHODS)
+
+        requested = [ensemble_method] if isinstance(ensemble_method, str) else list(ensemble_method)
+
+        if not requested:
+            raise InvalidConfigError(
+                "ensemble_method cannot be an empty list. Pass a method name, a list "
+                "of names, or None for all of them.",
+                param_name="ensemble_method",
+                provided_value=ensemble_method,
+            )
+
+        invalid = [m for m in requested if m not in ENSEMBLE_METHODS]
+        if invalid:
+            raise InvalidConfigError(
+                f"Unknown ensemble method(s): {invalid}. "
+                f"Available methods: {list(ENSEMBLE_METHODS)}.",
+                param_name="ensemble_method",
+                provided_value=ensemble_method,
+            )
+
+        # De-duplicate while preserving the caller's order.
+        return list(dict.fromkeys(requested))
 
     def _validate_models(self, models: Optional[List[str]]) -> List[str]:
         if models is None:
@@ -435,18 +571,68 @@ class HorizonForecaster:
         return list(models)
 
     def _load_config(self, model_name: str) -> dict:
-        """Load one model's config block for this instance's frequency."""
-        with open(_CONFIG_PATH) as f:
-            full_config = yaml.safe_load(f)
+        """
+        One model's config block for this instance's frequency.
+
+        Reads the parsed YAML from _default_params(), which is cached, so
+        constructing a forecaster parses the file once rather than once
+        per requested model.
+        """
+        full_config = _default_params()
         try:
             return full_config[model_name][self.frequency]
-        except KeyError:
+        except KeyError as e:
             raise InvalidConfigError(
                 f"No config found for model '{model_name}' at frequency "
                 f"'{self.frequency}' in {_CONFIG_PATH}.",
                 param_name="models",
                 provided_value=model_name,
-            )
+            ) from e
+
+    def _validate_train_size_against_model_floors(self) -> None:
+        """
+        Warn when the resolved training window is below what one or more
+        of the requested models need in order to fit.
+
+        The floor checked is each model's own `wrapper_config.
+        min_rows_required` for this frequency, so it stays a property of
+        the config rather than a constant duplicated here. Every model
+        below its floor is named in a single warning; the rest run
+        normally, per the library's contract that one model failing never
+        costs you the others.
+
+        This NEVER raises, even when no model can fit. The training window
+        does not govern everything: `forecast()` refits on the full
+        series, so a 16-row daily series with a 10-row training window can
+        still produce a real forecast from a model whose floor is 14.
+        Refusing here would block that to pre-empt an error `evaluate()`
+        already reports perfectly well, per model, in `evaluate_errors`.
+        """
+        floors = {
+            model_name: self._configs[model_name]["wrapper_config"]["min_rows_required"]
+            for model_name in self.models
+        }
+        n_total = len(self.raw_df)
+        split_description = (
+            f"{self._n_train} training rows ({n_total} total - "
+            f"{self._n_validation} validation - {self._n_test} test)"
+        )
+
+        too_small = {name: floor for name, floor in floors.items() if self._n_train < floor}
+        if not too_small:
+            return
+
+        warnings.warn(
+            f"The resolved split leaves {split_description}, which is below the "
+            f"minimum for {sorted(too_small)} "
+            f"({', '.join(f'{n} needs {f}' for n, f in sorted(too_small.items()))}). "
+            f"Those models cannot be evaluated and will be reported in "
+            f"evaluate_errors; any remaining models run normally, and forecast() may "
+            f"still succeed for all of them since it refits on the full series. Use "
+            f"smaller validation_size/test_size, drop models via models=, or supply a "
+            f"longer series.",
+            stacklevel=3,
+        )
 
     def _warn_if_declared_frequency_mismatches_data(self) -> None:
         try:
@@ -472,42 +658,40 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
-    def _prepare_split(self, model_name: str):
+    def _adapt_window(self, model_name: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame):
         """
-        Builds and caches (n_train, n_test, adapted_train,
-        adapted_test_features, y_test) for ONE model, using that
-        model's own adapter class. Cached per model per instance,
-        since the split doesn't depend on hyperparameters -- grid
-        search candidates all reuse the same adapted data.
+        Shape one (fit window, scoring window) pair for ONE model, using
+        that model's own adapter class.
 
-        Critical detail: the test split is shaped via
+        Returns (adapted_fit, adapted_score_features, y_score).
+
+        Critical detail: the scoring window is shaped via
         adapter.transform_future(), NOT adapter.transform_train().
-        Using transform_train() on the test split alone (the Phase 2
+        Using transform_train() on the scoring window alone (the Phase 2
         Prophet-only approach) happened to work for ProphetAdapter,
         which is a stateless pure function -- but it would be actively
         WRONG for an adapter that carries state across the train/future
         boundary like CatBoostAdapter: transform_train() resets the
-        adapter's retained self._reference_date to the test split's own
-        first date, which would restart the trend index (time_idx) at 0
-        for the test split instead of letting it continue seamlessly
-        from where the training history left off -- silently corrupting
-        the very feature the redesign added, and any subsequent use of
-        the adapter. transform_future() is the correct call here -- it's
-        exactly what a genuine future forecast would do, reusing the
-        reference_date established by the train-split fit. The only
-        difference from a real future forecast is that the actual y
-        values for this "future" period ARE already known (it's
-        held-out historical data, being used for evaluation) -- so
-        they're read directly from raw_df, never routed through the
-        adapter, which by design never sees them.
+        adapter's retained self._reference_date to the scoring window's
+        own first date, which would restart the trend index (time_idx) at
+        0 instead of letting it continue seamlessly from where the fit
+        window left off -- silently corrupting the very feature the
+        redesign added, and any subsequent use of the adapter.
+        transform_future() is the correct call here -- it's exactly what a
+        genuine future forecast would do, reusing the reference_date
+        established by the fit. The only difference from a real future
+        forecast is that the actual y values for this "future" period ARE
+        already known (it's held-out historical data, being used for
+        scoring) -- so they're read directly from raw_df, never routed
+        through the adapter, which by design never sees them.
+
+        A FRESH adapter is built per call. This matters now that there are
+        two fit windows (train, and train+validation): a stateful adapter
+        fitted on train carries standardisation constants and a reference
+        date derived from train alone, and reusing it for the train+
+        validation refit would leave the refit describing its own data
+        with the wrong constants.
         """
-        if model_name in self._split_cache:
-            return self._split_cache[model_name]
-
-        n_train, n_test = self._n_train, self._n_test
-        train_raw = self.raw_df.iloc[:n_train]
-        test_raw = self.raw_df.iloc[n_train:]
-
         AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
         adapter = AdapterClass(
             date_column=self.date_column,
@@ -515,23 +699,63 @@ class HorizonForecaster:
             independent_columns=self.independent_columns,
             frequency=self.frequency,
         )
-        adapted_train = adapter.transform_train(train_raw)
+        adapted_fit = adapter.transform_train(fit_rows)
 
-        future_dates = pd.Series(test_raw[self.date_column].reset_index(drop=True))
+        future_dates = pd.Series(score_rows[self.date_column].reset_index(drop=True))
         future_independent_data = (
-            test_raw[self.independent_columns].reset_index(drop=True)
+            score_rows[self.independent_columns].reset_index(drop=True)
             if self.independent_columns
             else None
         )
-        adapted_test_features = adapter.transform_future(future_dates, future_independent_data)
-        y_test = test_raw[self.target_column].to_numpy()
+        adapted_score_features = adapter.transform_future(future_dates, future_independent_data)
+        y_score = score_rows[self.target_column].to_numpy()
 
-        result = (n_train, n_test, adapted_train, adapted_test_features, y_test)
-        self._split_cache[model_name] = result
-        return result
+        return adapted_fit, adapted_score_features, y_score
 
-    def _fit_predict_mape(self, model_name: str, params: dict, adapted_train, adapted_test_features, y_test):
-        """Fit one model with one candidate hyperparameter set, predict on the held-out test split, score it."""
+    def _prepare_split(self, model_name: str):
+        """
+        The SELECTION split for one model: fit on train, score on
+        validation. Cached per model per instance, since the split doesn't
+        depend on hyperparameters -- every grid candidate reuses the same
+        adapted data.
+
+        Returns (adapted_train, adapted_validation_features, y_validation).
+        """
+        if model_name not in self._split_cache:
+            self._split_cache[model_name] = self._adapt_window(
+                model_name,
+                fit_rows=self.raw_df.iloc[: self._n_train],
+                score_rows=self.raw_df.iloc[self._n_train : self._n_train + self._n_validation],
+            )
+        return self._split_cache[model_name]
+
+    def _prepare_refit(self, model_name: str):
+        """
+        The REPORTING split for one model: fit on train + validation, score
+        on test. Cached per model per instance.
+
+        Returning to the data once more before scoring test is deliberate.
+        The alternative -- fitting on train alone and predicting straight
+        across validation and test in one span -- is cheaper by one fit per
+        model, but it measures a model trained on less data than would ever
+        be deployed. Refitting on everything available before the test
+        window makes the reported MAPE an estimate of the same procedure
+        that produces the real forecast (which refits on the full frame),
+        which is the number a user actually wants.
+
+        Returns (adapted_train_validation, adapted_test_features, y_test).
+        """
+        if model_name not in self._refit_cache:
+            split_point = self._n_train + self._n_validation
+            self._refit_cache[model_name] = self._adapt_window(
+                model_name,
+                fit_rows=self.raw_df.iloc[:split_point],
+                score_rows=self.raw_df.iloc[split_point:],
+            )
+        return self._refit_cache[model_name]
+
+    def _fit_predict_mape(self, model_name: str, params: dict, adapted_fit, adapted_score_features, y_score):
+        """Fit one model with one hyperparameter set, predict the scoring window, score it."""
         WrapperClass = MODEL_REGISTRY[model_name]["wrapper"]
         wrapper_config = self._configs[model_name]["wrapper_config"]
         model = WrapperClass(
@@ -540,10 +764,10 @@ class HorizonForecaster:
             min_rows_required=wrapper_config["min_rows_required"],
             random_seed=wrapper_config["random_seed"],
         )
-        model.fit(adapted_train, target_column="y")
+        model.fit(adapted_fit, target_column="y")
 
-        forecast_df = model.predict(horizon=len(adapted_test_features), future_exog=adapted_test_features)
-        mape_result = mape(y_test, forecast_df["yhat"].values)
+        forecast_df = model.predict(horizon=len(adapted_score_features), future_exog=adapted_score_features)
+        mape_result = mape(y_score, forecast_df["yhat"].values)
         return model, forecast_df, mape_result
 
     def _build_test_predictions(self, adapted_test_features, y_test, forecast_df) -> pd.DataFrame:
@@ -557,8 +781,13 @@ class HorizonForecaster:
             test_predictions["yhat_upper"] = forecast_df["yhat_upper"].values
         return test_predictions
 
-    def _run_hyperparameter_grid_search(self, model_name: str) -> EvaluationResult:
-        n_train, n_test, adapted_train, adapted_test_features, y_test = self._prepare_split(model_name)
+    def _run_hyperparameter_grid_search(self, model_name: str) -> _Selection:
+        """
+        Score every hyperparameter candidate on the VALIDATION window and
+        keep the winner. Nothing in here ever touches the test window --
+        that separation is the entire reason the three-way split exists.
+        """
+        adapted_train, adapted_validation_features, y_validation = self._prepare_split(model_name)
         config = self._configs[model_name]
         base = config.get("base_hyperparameters", {})
 
@@ -576,7 +805,7 @@ class HorizonForecaster:
             full_params = {**base, **grid_entry}
             try:
                 model, forecast_df, mape_result = self._fit_predict_mape(
-                    model_name, full_params, adapted_train, adapted_test_features, y_test
+                    model_name, full_params, adapted_train, adapted_validation_features, y_validation
                 )
             except HorizonForecasterError as e:
                 failures[str(grid_entry)] = f"{type(e).__name__}: {e}"
@@ -584,15 +813,63 @@ class HorizonForecaster:
                 continue
             candidates.append((full_params, model, forecast_df, mape_result))
 
+        if not candidates and all(
+            isinstance(e, InsufficientDataError) for e in failure_exceptions
+        ):
+            # Every candidate failed because the TRAINING WINDOW is below
+            # this model's row floor. That is not a hyperparameter problem
+            # -- no choice of parameters would have helped -- and, crucially,
+            # it does not mean the model cannot be fitted at all: both later
+            # fits see more data. The train+validation refit is longer, and
+            # forecast() refits on the entire series. A 20-row daily series
+            # splits to a 12-row training window, under Prophet's floor of
+            # 14, while the 20 rows forecast() actually fits on clear it
+            # comfortably.
+            #
+            # So fall back to the first grid entry rather than failing the
+            # model outright. That entry is not arbitrary: per this config's
+            # own header, the leading candidates are the combination the
+            # project owner has used and found to work in practice, which
+            # makes it the right thing to reach for when there is no
+            # evidence to choose on. The validation MAPE is recorded as NaN,
+            # which is the honest description -- nothing was validated --
+            # and downstream that means the trimmed rule still uses the
+            # model while the weighted rules exclude it.
+            #
+            # Deliberately narrow to InsufficientDataError. A convergence
+            # failure across every candidate is a real modelling failure and
+            # still raises below; only "the window is too small" is treated
+            # as a reason to defer to a default.
+            fallback_params = {**base, **config["hyperparameter_grid"][0]}
+            warnings.warn(
+                f"{model_name}: every hyperparameter candidate failed on the "
+                f"{self._n_train}-row training window because the model needs more "
+                f"rows than that, so none could be scored. Falling back to the first "
+                f"configured candidate without selecting it. Its later fits see more "
+                f"data (train+validation for evaluate(), the full series for "
+                f"forecast()) and may well succeed, but this model carries no "
+                f"validation MAPE -- it will be excluded from any weighted ensemble "
+                f"and cannot be screened against mape_threshold. Supply a longer "
+                f"series, or smaller validation_size/test_size, to select properly.",
+                stacklevel=3,
+            )
+            self._selected_hyperparameters[model_name] = fallback_params
+            return _Selection(
+                params=fallback_params,
+                validation_mape=MapeResult(
+                    value=float("nan"), excluded_zero_actual_count=0, total_count=0
+                ),
+                grid_search_summary=None,
+            )
+
         if not candidates:
             # When every candidate failed the SAME way, the cause is not
             # hyperparameter-specific -- it's a property of the data or the
-            # model (too few rows, a missing column), and it would be wrong
-            # to relabel it. Re-raise the original exception so its real
-            # type and structured attributes survive: InsufficientDataError
-            # carries required_periods/available_periods, and callers
-            # (including evaluate_errors consumers) reasonably branch on
-            # type. Only genuinely mixed failures become the aggregate
+            # model (a missing column, a systematically unusable series), and
+            # it would be wrong to relabel it. Re-raise the original
+            # exception so its real type and structured attributes survive,
+            # since callers (including evaluate_errors consumers) reasonably
+            # branch on type. Only genuinely mixed failures become the aggregate
             # ModelConvergenceError, where no single type is representative.
             distinct_types = {type(e) for e in failure_exceptions}
             if len(distinct_types) == 1:
@@ -617,45 +894,120 @@ class HorizonForecaster:
             return float("inf") if val != val else val
 
         candidates.sort(key=sort_key)
-        best_params, best_model, best_forecast_df, best_mape = candidates[0]
+        best_params, _best_model, _best_forecast_df, best_mape = candidates[0]
 
-        test_predictions = self._build_test_predictions(adapted_test_features, y_test, best_forecast_df)
+        # The candidates' own fitted models are deliberately discarded. Each
+        # was fitted on TRAIN only, and every window that gets reported is
+        # produced by a later refit on train+validation -- keeping the
+        # train-only fits around would just invite something downstream to
+        # report from the wrong model.
         grid_search_summary = [{"params": p, "mape": m.value} for p, _, _, m in candidates]
 
         self._selected_hyperparameters[model_name] = best_params
-        result = EvaluationResult(
-            model_name=best_model.model_name,
-            mape=best_mape,
-            n_train=n_train,
-            n_test=n_test,
-            test_predictions=test_predictions,
-            fitted_model=best_model,
+        return _Selection(
+            params=best_params,
+            validation_mape=best_mape,
             grid_search_summary=grid_search_summary,
         )
-        self._grid_search_results[model_name] = result
-        return result
+
+    def _select(self, model_name: str) -> _Selection:
+        """
+        Resolve one model's hyperparameters and its validation MAPE,
+        caching the result.
+
+        This is the ONLY path by which any selection decision is made, and
+        it reads the validation window exclusively. Both evaluate() (which
+        goes on to refit and report a test score) and forecast() (which
+        needs the winning params, plus the validation MAPE for ensemble
+        screening and weighting) come through here, so a session never pays
+        for selection twice.
+
+        A model given explicit `model_params` skips the grid, but is still
+        fitted once on train and scored on validation -- the ensemble needs
+        a validation MAPE for it either way, and inventing one from the
+        test window would reintroduce exactly the leak the three-way split
+        removes.
+        """
+        if model_name in self._selection_cache:
+            return self._selection_cache[model_name]
+
+        if self._use_grid_search[model_name]:
+            selection = self._run_hyperparameter_grid_search(model_name)
+        else:
+            explicit_params = self._selected_hyperparameters[model_name]
+            try:
+                adapted_train, adapted_validation_features, y_validation = self._prepare_split(
+                    model_name
+                )
+                _model, _forecast_df, validation_mape = self._fit_predict_mape(
+                    model_name, explicit_params, adapted_train,
+                    adapted_validation_features, y_validation,
+                )
+            except HorizonForecasterError as e:
+                # With explicit params there is nothing to SELECT -- this fit
+                # exists only to produce a validation score. If it fails (a
+                # short series whose training window is below the model's
+                # floor, say), the params are still perfectly usable, and
+                # forecast() refits on the full frame where the model may fit
+                # fine. So record an undefined score rather than failing the
+                # model outright: the trimmed rule needs no MAPE and will
+                # still use it, while the weighted rules drop it explicitly.
+                # A grid search cannot degrade this way -- with no candidate
+                # scores there is no basis for choosing one, so it still
+                # raises.
+                warnings.warn(
+                    f"{model_name} could not be scored on the validation window "
+                    f"({type(e).__name__}: {e}). Its explicit model_params are still "
+                    f"used, so forecast() can proceed, but it has no validation MAPE "
+                    f"-- it will be excluded from any weighted ensemble and cannot be "
+                    f"screened against mape_threshold.",
+                    stacklevel=3,
+                )
+                validation_mape = MapeResult(
+                    value=float("nan"), excluded_zero_actual_count=0, total_count=0
+                )
+            selection = _Selection(
+                params=explicit_params,
+                validation_mape=validation_mape,
+                grid_search_summary=None,
+            )
+
+        self._selection_cache[model_name] = selection
+        return selection
 
     def _evaluate_single_model(self, model_name: str) -> EvaluationResult:
-        if self._use_grid_search[model_name]:
-            if model_name in self._grid_search_results:
-                return self._grid_search_results[model_name]
-            return self._run_hyperparameter_grid_search(model_name)
+        """
+        Select on validation, refit the winner on train+validation, then
+        predict and score the test window.
+        """
+        if model_name in self._evaluation_cache:
+            return self._evaluation_cache[model_name]
 
-        n_train, n_test, adapted_train, adapted_test_features, y_test = self._prepare_split(model_name)
-        model, forecast_df, mape_result = self._fit_predict_mape(
-            model_name, self._selected_hyperparameters[model_name], adapted_train, adapted_test_features, y_test
+        selection = self._select(model_name)
+
+        adapted_train_validation, adapted_test_features, y_test = self._prepare_refit(model_name)
+        model, forecast_df, test_mape = self._fit_predict_mape(
+            model_name,
+            selection.params,
+            adapted_train_validation,
+            adapted_test_features,
+            y_test,
         )
         test_predictions = self._build_test_predictions(adapted_test_features, y_test, forecast_df)
 
-        return EvaluationResult(
+        result = EvaluationResult(
             model_name=model.model_name,
-            mape=mape_result,
-            n_train=n_train,
-            n_test=n_test,
+            mape=test_mape,
+            validation_mape=selection.validation_mape,
+            n_train=self._n_train,
+            n_validation=self._n_validation,
+            n_test=self._n_test,
             test_predictions=test_predictions,
             fitted_model=model,
-            grid_search_summary=None,
+            grid_search_summary=selection.grid_search_summary,
         )
+        self._evaluation_cache[model_name] = result
+        return result
 
     def evaluate(self) -> Dict[str, EvaluationResult]:
         """
@@ -663,10 +1015,15 @@ class HorizonForecaster:
         Always returns a dict keyed by model name (even for a single
         model). See class docstring for partial-failure behavior.
 
-        Also populates self.evaluate_ensemble (an EnsembleResult) and
-        self._evaluate_mape_cache (reused by forecast(), see its
-        docstring) as a side effect -- the returned dict itself is
-        unchanged from Phase 3.
+        Each model is selected on the validation window, refit on train +
+        validation, then scored on the test window -- so the MAPE on every
+        returned EvaluationResult is an out-of-sample estimate, and the
+        selection score it was chosen by is kept alongside it as
+        `validation_mape`.
+
+        Also populates self.evaluate_ensemble (a dict of EnsembleResult
+        keyed by combination method) as a side effect -- the returned dict
+        itself is only the per-model results.
 
         Raises:
             AllModelsRejectedError: if every requested model failed.
@@ -699,7 +1056,6 @@ class HorizonForecaster:
         self.evaluate_errors = errors
 
         if not results:
-            self._evaluate_mape_cache = {}
             self.evaluate_ensemble = None
             raise AllModelsRejectedError(
                 f"All requested models failed during evaluate(): "
@@ -707,13 +1063,18 @@ class HorizonForecaster:
                 rejected_models=list(errors.keys()),
             )
 
-        self._evaluate_mape_cache = {name: r.mape.value for name, r in results.items()}
+        # Screening and weighting read the VALIDATION MAPE; the ensemble's
+        # own reported score is computed on the TEST window, against test
+        # actuals. Mixing those up is exactly the leak the three-way split
+        # exists to close, so they are passed as separate arguments.
         first_result = next(iter(results.values()))
-        self.evaluate_ensemble = build_ensemble(
-            per_model_mape=self._evaluate_mape_cache,
+        self.evaluate_ensemble = build_ensembles(
+            methods=self.ensemble_methods,
+            per_model_selection_mape={
+                name: r.validation_mape.value for name, r in results.items()
+            },
             per_model_predictions={name: r.test_predictions for name, r in results.items()},
             mape_threshold=self.mape_threshold,
-            weighting=self.ensemble_weighting,
             actuals=first_result.test_predictions[["ds", "y"]],
         )
 
@@ -743,8 +1104,10 @@ class HorizonForecaster:
         AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
 
         if model_name not in self._forecast_models:
-            if self._selected_hyperparameters[model_name] is None:
-                self._run_hyperparameter_grid_search(model_name)
+            # Resolve hyperparameters on the validation window if that
+            # hasn't happened yet this session. Cached, so a model already
+            # selected by evaluate() is not re-searched here.
+            selected_params = self._select(model_name).params
 
             adapter = AdapterClass(
                 date_column=self.date_column,
@@ -758,7 +1121,7 @@ class HorizonForecaster:
             WrapperClass = MODEL_REGISTRY[model_name]["wrapper"]
             model = WrapperClass(
                 frequency=self.frequency,
-                params=self._selected_hyperparameters[model_name],
+                params=selected_params,
                 min_rows_required=wrapper_config["min_rows_required"],
                 random_seed=wrapper_config["random_seed"],
             )
@@ -836,17 +1199,18 @@ class HorizonForecaster:
         for a single model). See class docstring for partial-failure
         behavior.
 
-        Also populates self.forecast_ensemble (an EnsembleResult) as a
-        side effect -- the returned dict itself is unchanged from
-        Phase 3. Since forecast() has no held-out actuals to score
-        accuracy against, the ensemble's weights (and which models pass
-        the mape_threshold) always come from evaluate()'s
-        MAPE, not anything computed here. If evaluate() hasn't been run
-        yet this session, forecast() runs it internally once (see the
-        warning below) purely to derive those weights -- a separate
-        fit/split from forecast()'s own full-data refit, so it doesn't
-        affect the forecast values themselves, only the ensemble
-        weighting.
+        Also populates self.forecast_ensemble (a dict of EnsembleResult
+        keyed by combination method) as a side effect.
+
+        forecast() has no held-out actuals to score accuracy against, so
+        any screening or weighting its ensemble needs comes from the
+        validation MAPE established when each model's hyperparameters
+        were selected. That selection has to happen anyway -- forecast()
+        cannot fit without knowing which parameters won -- so the scores
+        come for free and are cached, whether or not evaluate() was ever
+        called. (Before 1.0 this method ran the whole of evaluate()
+        internally to obtain them, which additionally paid for a test-
+        window prediction it then discarded.)
 
         Args:
             horizon: number of future periods to forecast.
@@ -856,7 +1220,7 @@ class HorizonForecaster:
                 declared, a default strategy is applied.
 
         Raises:
-            InvalidConfigError: if horizon is not a positive integer.
+            InvalidConfigError: if horizon is not positive.
             AllModelsRejectedError: if every requested model failed.
         """
         if horizon <= 0:
@@ -897,25 +1261,6 @@ class HorizonForecaster:
                 stacklevel=2,
             )
 
-        if self._evaluate_mape_cache is None:
-            warnings.warn(
-                "forecast() is running evaluate() internally, since it hasn't been "
-                "called yet this session, to derive per-model MAPE for ensemble "
-                "weighting. This adds evaluate()'s own train/test-split fit cost on "
-                "top of forecast()'s full-data refit. Call evaluate() explicitly "
-                "first if you'd like to see (or avoid paying twice for) that cost "
-                "separately.",
-                stacklevel=2,
-            )
-            try:
-                self.evaluate()
-            except AllModelsRejectedError:
-                # evaluate() itself couldn't produce a single result. forecast()
-                # still attempts its own full-data fits below (a model that
-                # failed on the smaller train/test split may yet succeed with
-                # more data) -- it just won't have ensemble weights available.
-                self._evaluate_mape_cache = {}
-
         results: Dict[str, ForecastResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
 
@@ -945,28 +1290,29 @@ class HorizonForecaster:
                 rejected_models=list(errors.keys()),
             )
 
-        forecast_mape_input = {
-            name: self._evaluate_mape_cache[name]
+        # Screening and weighting reuse the validation MAPE established
+        # during selection -- forecast() has no actuals of its own, and
+        # every model that got here has been selected, so the scores are
+        # already cached. `actuals=None` because no ground truth for the
+        # future exists yet, so no ensemble MAPE is computed.
+        selection_mape = {
+            name: self._selection_cache[name].validation_mape.value
             for name in results
-            if name in self._evaluate_mape_cache
         }
-        if forecast_mape_input:
-            self.forecast_ensemble = build_ensemble(
-                per_model_mape=forecast_mape_input,
-                per_model_predictions={name: results[name].forecast for name in forecast_mape_input},
-                mape_threshold=self.mape_threshold,
-                weighting=self.ensemble_weighting,
-                actuals=None,
-            )
-        else:
-            self.forecast_ensemble = None
+        self.forecast_ensemble = build_ensembles(
+            methods=self.ensemble_methods,
+            per_model_selection_mape=selection_mape,
+            per_model_predictions={name: results[name].forecast for name in selection_mape},
+            mape_threshold=self.mape_threshold,
+            actuals=None,
+        )
 
         return results
 
     def _resolve_future_exog(self, horizon, future_dates, supplied):
         """
         Resolve the future independent values for this forecast, once and
-        model-agnostically (Phase 7). Delegates to future_exog.resolve, which
+        model-agnostically (Phase 7). Delegates to future_exog.resolve_future_exog, which
         honours PARTIAL FILL (supplied columns kept, the rest generated via
         self.future_exog_strategy) and type-aware flag handling.
 

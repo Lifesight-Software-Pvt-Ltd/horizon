@@ -1,8 +1,8 @@
 # Contributing to Horizon Forecaster
 
-This document reflects how the project has actually been built so far
-(Phases 0–7), not a generic template — the conventions below are the ones
-already in use throughout the codebase. Following them keeps a
+This document reflects how the project has actually been built (Phases 0–8,
+through the 1.0.0 release), not a generic template — the conventions below
+are the ones already in use throughout the codebase. Following them keeps a
 contribution consistent with everything already here, rather than adding
 a second style alongside the existing one.
 
@@ -16,9 +16,13 @@ source test_env/bin/activate
 pip install -e ".[dev]"
 ```
 
-`requirements.txt`/`requirements-dev.txt` mirror `pyproject.toml`'s
-dependency list exactly — if you add a dependency, update all three
-together, not just one.
+`pyproject.toml` is the single source of truth for dependencies: runtime
+pins under `[project].dependencies`, and the test/lint tools under the
+`dev` optional-dependency group that `pip install -e ".[dev]"` pulls in.
+`requirements.txt` mirrors the runtime pins for tools that expect a plain
+requirements file, so update both if you add a runtime dependency. There is
+deliberately no `requirements-dev.txt` — the `dev` extra is the only dev
+dependency list, so there is nothing to keep in step with it.
 
 ## Running tests
 
@@ -28,7 +32,9 @@ pytest --cov=horizon_forecaster
 
 If you haven't done an editable install, `PYTHONPATH=. pytest tests/`
 works too. CI (`.github/workflows/tests.yml`) runs the full suite across
-Python 3.10, 3.11, and 3.12 on every push and PR.
+Python 3.10, 3.11, and 3.12, but is currently triggered **manually**
+(`on: workflow_dispatch`) rather than on push — so run the suite locally
+before opening a PR; nothing will run it for you.
 
 A few tests fit real Prophet/CatBoost models with the default
 hyperparameter grid search (6 and 18 candidates respectively), which is
@@ -36,6 +42,16 @@ slow. When writing a new test that doesn't need to exercise the grid
 search itself, pass an explicit `model_params` override
 (e.g. `model_params={"prophet": {"seasonality_mode": "additive"}}`) to
 skip it — see almost any test in `test_forecaster.py` for the pattern.
+Note that `evaluate()` fits each model once more than the grid alone
+implies: the winning candidate is refit on train + validation before the
+test window is scored. `forecast()` does *not* run `evaluate()` — it only
+needs the cached selection — so a test that just wants a forecast should
+not pay for a test-window prediction it throws away.
+
+Tests that construct a `HorizonForecaster` on a short synthetic series
+should set `validation_size`/`test_size` explicitly. The defaults are
+absolute period counts (56/28 daily, 26/13 weekly) and will either scale
+themselves down with a warning or leave too little to train on.
 Tests in this project fit real models rather than mocking them; mocking
 is only used where it's the only practical way to hit a specific
 code path deterministically (e.g. `test_catboost.py`'s prediction-clipping
@@ -62,7 +78,7 @@ Every raised error is a typed subclass of `HorizonForecasterError`
 (`exceptions.py`), carrying structured, machine-readable attributes
 (`model_name`, `mape_value`, `required_periods`, etc.) in addition to a
 human-readable message — not just a string to parse. This is what lets
-`evaluate_errors`/`forecast_errors`/`evaluate_ensemble.rejected_models`
+`evaluate_errors`/`forecast_errors`/`EnsembleResult.rejected_models`
 build a real, programmatic report instead of guessing from exception
 text. If you need a new failure mode, check `exceptions.py` first —
 several genuinely-fitting exceptions (`ThresholdRejectionError`,
@@ -71,8 +87,11 @@ actually needed them; it's worth checking before adding a new one.
 
 ## Documentation expectations for a real change
 
-- **`CHANGELOG.md`**: update the `Added`/`Fixed`/`Changed` section under
-  `[Unreleased]` for anything a user of the library would notice. If you
+- **`CHANGELOG.md`**: add an `Added`/`Fixed`/`Changed` entry for anything
+  a user of the library would notice. Open a new `## [Unreleased]` section
+  above the latest released version if one isn't there yet — do not file
+  under `## Pre-1.0 history`, which is a closed record of work that has
+  already shipped. If you
   found and fixed a real bug or behavior gap (not just added a feature),
   say what the actual problem was — see the CatBoost lag/rolling-feature
   entry for the level of detail expected: what broke, how it was
@@ -103,19 +122,34 @@ actually needed them; it's worth checking before adding a new one.
 
 ## Current project status
 
-All five models — Prophet, CatBoost, SARIMAX, NeuralProphet and Bayesian
-PyMC — are fully implemented (adapter + wrapper + config + tests),
-registered in `MODEL_REGISTRY` and orchestrated by `HorizonForecaster`,
-with Phase 4's ensemble-weighting logic (`evaluation/ensemble.py`)
-combining them. The Phase 5 output layer (`plotting.py`/`exporters.py`) is
-also complete. Bayesian PyMC (Phase 6, Part 3) was the last model to land; it
-is much slower than the others (NUTS/MCMC per grid candidate), so its daily
-config is tuned for scale. Phase 7 added the future-exogenous-data strategies
-(`future_exog.py`) — how `forecast()` invents future driver values when they
-aren't supplied. The project is now in Phase 8 (final docs and
-dependency pinning). Runnable example notebooks and a gated PyPI release are
-deferred to the publishing stage — a clean `pip install` + Open-in-Colab only
-makes sense once the package is published (the `examples/*.md` files are empty
-placeholders until then). See `CHANGELOG.md`'s
-"Known deferred issues" section for the current, honest list of what's not
-done yet.
+The library is at **1.0.0**. All five models — Prophet, CatBoost, SARIMAX,
+NeuralProphet and Bayesian PyMC — are fully implemented (adapter + wrapper
++ config + tests), registered in `MODEL_REGISTRY` and orchestrated by
+`HorizonForecaster`, with `evaluation/ensemble.py` combining them and the
+`plotting.py`/`exporters.py` output layer consuming the results. Bayesian
+PyMC is much slower than the others (NUTS/MCMC per grid candidate), so its
+daily config is tuned for scale. `future_exog.py` (Phase 7) handles how
+`forecast()` invents future driver values when they aren't supplied.
+
+1.0.0 reworked the evaluation protocol itself, and two of its decisions are
+worth knowing before you change anything in `forecaster.py` or
+`evaluation/ensemble.py`:
+
+- **Selection and reporting live in different windows.** Grid search,
+  `mape_threshold` screening and inverse-MAPE weighting read the
+  **validation** window only; the test window is reported and never read by
+  a selection path. Any new feature that wants an accuracy number has to
+  choose which of the two it is entitled to — if it influences a decision,
+  it gets the validation score.
+- **The default combination rule is a trimmed mean**, which has no weights
+  at all. Code that assumes `EnsembleResult.weights` is a populated dict
+  will break: it is `Optional` and is `None` for weightless rules.
+
+Runnable example notebooks and a gated PyPI release remain deferred to the
+publishing stage — a clean `pip install` + Open-in-Colab only makes sense
+once the package is published (the `examples/*.md` files are empty
+placeholders until then). Rolling-origin backtesting, benchmark-relative
+metrics (RelMAE/MASE), family de-duplication of Prophet vs NeuralProphet,
+and an error-diversity diagnostic are all acknowledged gaps rather than
+completed work; see `CHANGELOG.md`'s "Known deferred issues" section for
+the current, honest list.

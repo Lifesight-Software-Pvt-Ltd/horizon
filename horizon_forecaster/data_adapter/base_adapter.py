@@ -21,6 +21,8 @@ from typing import List, Optional
 
 import pandas as pd
 
+from horizon_forecaster.exceptions import InvalidConfigError
+
 class BaseAdapter(ABC):
     """
     Abstract base class every model-specific data adapter must inherit
@@ -110,3 +112,27 @@ class BaseAdapter(ABC):
                 of the declared columns.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def _validate_columns_present(df: pd.DataFrame, required_columns: list) -> None:
+        """
+        Hard-fail when a declared column is absent from the input.
+
+        Shared by every adapter, so the message and exception type have a
+        single definition rather than five that can drift apart.
+
+        Deliberately raises rather than dropping the column: a missing
+        declared column means the caller's data does not match what they
+        told the forecaster to expect, and silently forecasting without a
+        driver they asked for is worse than refusing.
+
+        Raises:
+            InvalidConfigError: naming the missing column(s).
+        """
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            raise InvalidConfigError(
+                f"Missing required column(s) in input data: {missing}",
+                param_name="raw_df columns",
+                provided_value=list(df.columns),
+            )

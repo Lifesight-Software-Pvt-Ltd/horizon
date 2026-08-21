@@ -32,7 +32,7 @@ HorizonForecaster(
 | `linear_trend` | A fitted trend line projected forward. | Steadily trending drivers (e.g. a spend ramp). |
 | `cycle` | Legacy: replays/tiles the trailing history (the pre-Phase-7 default). | Reproducing the old behaviour exactly. |
 
-All strategies are defined for **any horizon** — short ones take the head,
+All strategies are defined for **any horizon** — short ones take the tail,
 long ones tile — so the same choice works whether you forecast 7 periods or
 700.
 

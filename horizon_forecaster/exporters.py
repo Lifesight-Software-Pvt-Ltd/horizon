@@ -9,21 +9,29 @@ a CSV never pulls in the heavy Prophet/CatBoost stack. Type hints for the
 result objects are TYPE_CHECKING-only; at runtime the inputs are
 duck-typed.
 
-Three deliverables, matching the Phase 5 spec:
+Five deliverables:
 
-1. Final forecast  -- the ensemble's combined ["ds", "yhat"] series: the
-   single blended number the caller ultimately acts on.
-2. Per-model forecast -- every model's own forecast, stacked into one
+1. Final combined forecast -- the ensemble's ["ds", "yhat"] series: the
+   single blended number the caller ultimately acts on. One file per
+   combination method, since several rules can be built in one run.
+2. Best single model's forecast -- exported alongside the combined one,
+   because a combination is not guaranteed to beat the best individual
+   model, so both candidates ship with the scores needed to choose.
+3. Per-model forecast -- every model's own forecast, stacked into one
    long/tidy table with a "model" column (+ bounds where a model
    provides them), so all models sit in one file for easy comparison.
-3. Rejected-models table -- one row per model excluded from the ensemble
-   by the MAPE threshold, with its MAPE, the threshold it exceeded, and
+4. Model summary -- per model, its validation and test MAPE, ensemble
+   membership, weight (where the rule has one) and status.
+5. Rejected-models table -- one row per model excluded from a
+   combination, with its MAPE, the threshold it exceeded (if any) and
    the human-readable reason. This is the "why isn't model X in the
    blend?" report, built straight from EnsembleResult.rejected_models.
+   Note exclusion is per method: a model with a NaN validation MAPE is
+   dropped by the weighted rules but kept by the trimmed one.
 
-Each of these has a pure "build the DataFrame" function (returns a
-DataFrame, writes nothing) plus one convenience writer, export_forecast_csvs(),
-that persists all three at once. The builders never raise on empty/None
+Each has a pure "build the DataFrame" function (returns a DataFrame,
+writes nothing) plus one convenience writer, export_forecast_csvs(),
+that persists them all at once. The builders never raise on empty/None
 input -- they return a correctly-columned empty DataFrame -- so a run
 where (say) every model was rejected still produces predictable,
 header-only files rather than a crash or a missing file.
@@ -36,14 +44,24 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import pandas as pd
 
+from horizon_forecaster.evaluation.ensemble import as_ensemble_dict
+
 if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy stack)
     from horizon_forecaster.evaluation.ensemble import EnsembleResult
     from horizon_forecaster.forecaster import ForecastResult
 
 _FINAL_COLUMNS = ["ds", "yhat"]
 _PER_MODEL_BASE_COLUMNS = ["model", "ds", "yhat"]
-_REJECTED_COLUMNS = ["model", "mape", "mape_threshold", "reason"]
-_SUMMARY_COLUMNS = ["model", "mape", "ensemble_weight", "status"]
+_REJECTED_COLUMNS = ["model", "ensemble_method", "mape", "mape_threshold", "reason"]
+_SUMMARY_COLUMNS = [
+    "model",
+    "validation_mape",
+    "mape",
+    "ensemble_method",
+    "rule_applied",
+    "ensemble_weight",
+    "status",
+]
 
 
 def build_final_forecast_table(ensemble: "Optional[EnsembleResult]") -> pd.DataFrame:
@@ -127,77 +145,126 @@ def build_best_model_forecast_table(
 
 def build_model_summary_table(
     per_model_mape: "Optional[Dict[str, float]]" = None,
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     ensemble_mape: "Optional[float]" = None,
+    per_model_validation_mape: "Optional[Dict[str, float]]" = None,
 ) -> pd.DataFrame:
     """
-    One row per model with its MAPE, ensemble weight and status, plus an
-    "ensemble" row when its own score is supplied -- the at-a-glance table
-    for deciding whether to act on the blend or a single model.
+    The at-a-glance table for deciding whether to act on a combined
+    forecast or a single model.
 
-    Columns: ["model", "mape", "ensemble_weight", "status"], where status
-    is "in_ensemble", "rejected" (excluded by the MAPE threshold), or
-    "not_in_ensemble".
+    One row per (model, ensemble method) pair, plus one row per method for
+    the combined result itself. With the default single method that is the
+    familiar "one row per model plus an ensemble row"; asking for several
+    methods simply repeats the block per method, so the shape never
+    depends on how many were requested.
+
+    Columns: ["model", "validation_mape", "mape", "ensemble_method",
+    "rule_applied", "ensemble_weight", "status"].
+
+    Both MAPEs are reported because they answer different questions:
+    `validation_mape` is what the model was SELECTED and screened on,
+    `mape` is its honest out-of-sample score on the test window. A model
+    with a large gap between them was flattered by the selection window.
+
+    `ensemble_weight` is empty for weightless rules such as the default
+    trimmed mean. That is deliberate rather than a gap in the export --
+    there is no weight, and filling in an equal share would imply an
+    averaging that did not happen.
     """
-    weights = ensemble.weights if ensemble is not None else {}
-    rejected = ensemble.rejected_models if ensemble is not None else {}
+    ensembles = as_ensemble_dict(ensemble)
+    per_model_mape = per_model_mape or {}
+    per_model_validation_mape = per_model_validation_mape or {}
+
+    if not ensembles:
+        rows = [
+            {
+                "model": name,
+                "validation_mape": per_model_validation_mape.get(name),
+                "mape": value,
+                "ensemble_method": None,
+                "rule_applied": None,
+                "ensemble_weight": None,
+                "status": "not_in_ensemble",
+            }
+            for name, value in per_model_mape.items()
+        ]
+        return pd.DataFrame(rows, columns=_SUMMARY_COLUMNS)
 
     rows = []
-    for name, value in (per_model_mape or {}).items():
-        if name in weights:
-            status = "in_ensemble"
-        elif name in rejected:
-            status = "rejected"
-        else:
-            status = "not_in_ensemble"
-        rows.append({
-            "model": name,
-            "mape": value,
-            "ensemble_weight": weights.get(name),
-            "status": status,
-        })
+    for method, result in ensembles.items():
+        weights = result.weights or {}
+        for name, value in per_model_mape.items():
+            if name in result.members:
+                status = "in_ensemble"
+            elif name in result.rejected_models:
+                status = "rejected"
+            else:
+                status = "not_in_ensemble"
+            rows.append({
+                "model": name,
+                "validation_mape": per_model_validation_mape.get(name),
+                "mape": value,
+                "ensemble_method": method,
+                "rule_applied": result.rule_applied if status == "in_ensemble" else None,
+                "ensemble_weight": weights.get(name),
+                "status": status,
+            })
 
-    if ensemble_mape is not None:
-        rows.append({
-            "model": "ensemble",
-            "mape": ensemble_mape,
-            "ensemble_weight": 1.0,
-            "status": "ensemble",
-        })
+        scored = result.mape.value if result.mape is not None else ensemble_mape
+        if scored is not None:
+            rows.append({
+                "model": "ensemble",
+                "validation_mape": None,
+                "mape": scored,
+                "ensemble_method": method,
+                "rule_applied": result.rule_applied,
+                "ensemble_weight": 1.0,
+                "status": "degraded" if result.degraded else "ensemble",
+            })
 
     return pd.DataFrame(rows, columns=_SUMMARY_COLUMNS)
 
 
-def build_rejected_models_table(ensemble: "Optional[EnsembleResult]") -> pd.DataFrame:
+def build_rejected_models_table(
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]",
+) -> pd.DataFrame:
     """
-    One row per model excluded from the ensemble by the MAPE threshold.
+    One row per model excluded from a combination, per method.
 
-    Columns: ["model", "mape", "mape_threshold", "reason"]. Built from
-    EnsembleResult.rejected_models (a dict of ThresholdRejectionError).
-    `mape` may be NaN for a model whose MAPE itself was NaN (e.g. every
-    test-set actual was zero). Returns a header-only DataFrame when there
-    is no ensemble or nothing was rejected.
+    Columns: ["model", "ensemble_method", "mape", "mape_threshold",
+    "reason"]. Built from EnsembleResult.rejected_models (a dict of
+    ThresholdRejectionError). `mape` may be NaN for a model whose MAPE
+    itself was NaN (e.g. every actual in the window was zero).
+
+    The `ensemble_method` column matters because exclusion is not
+    necessarily the same across rules: a model with a NaN validation MAPE
+    cannot be weighted, so the weighted rules drop it, while the trimmed
+    rule needs no MAPE and keeps it. Returns a header-only DataFrame when
+    nothing was rejected anywhere.
     """
-    if ensemble is None or not ensemble.rejected_models:
-        return pd.DataFrame(columns=_REJECTED_COLUMNS)
+    ensembles = as_ensemble_dict(ensemble)
 
     rows = [
         {
             "model": name,
+            "ensemble_method": method,
             "mape": error.mape_value,
             "mape_threshold": error.allowed_max,
             "reason": str(error),
         }
-        for name, error in ensemble.rejected_models.items()
+        for method, result in ensembles.items()
+        for name, error in result.rejected_models.items()
     ]
     return pd.DataFrame(rows, columns=_REJECTED_COLUMNS)
 
 
 def export_forecast_csvs(
     forecast_results: "Dict[str, ForecastResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     per_model_mape: "Optional[Dict[str, float]]" = None,
+    per_model_validation_mape: "Optional[Dict[str, float]]" = None,
     ensemble_mape: "Optional[float]" = None,
     output_dir: str = ".",
     prefix: str = "forecast",
@@ -205,52 +272,75 @@ def export_forecast_csvs(
     """
     Write the run's CSVs to disk.
 
-    Five files, always written (even when a table is empty, so the output
-    set is predictable), into output_dir (created if it doesn't exist):
+    Always written (even when a table is empty, so the output set is
+    predictable), into output_dir (created if it doesn't exist):
 
-      {prefix}_final_ensemble.csv    the ensemble's blended forecast
-      {prefix}_final_best_model.csv  the single lowest-MAPE model's forecast
+      {prefix}_final_ensemble_{method}.csv  one per combination method
+      {prefix}_final_best_model.csv  the single best model's forecast
       {prefix}_per_model.csv         every model's forecast, stacked
-      {prefix}_rejected_models.csv   models excluded by the MAPE threshold
-      {prefix}_model_summary.csv     per-model MAPE / weight / status
+      {prefix}_rejected_models.csv   models excluded, per method
+      {prefix}_model_summary.csv     per-model MAPEs / weight / status
 
-    Both "final" candidates are written deliberately: a weighted ensemble
+    Both "final" candidates are written deliberately: a combined ensemble
     is not guaranteed to beat the best individual model, so rather than
     baking that choice in, the run exports both plus the scores needed to
     choose between them.
 
     Args:
         forecast_results: {model_name: ForecastResult} from forecast().
-        ensemble: the forecaster's forecast_ensemble (EnsembleResult), or
-            None. Drives the ensemble and rejected-models files.
-        per_model_mape: {model_name: mape} from evaluate(), used to pick
-            the best model and populate the summary. Without it those two
-            files are written header-only.
-        ensemble_mape: the ensemble's own MAPE (from evaluate()), added as
-            an "ensemble" row in the summary for direct comparison.
+        ensemble: the forecaster's forecast_ensemble ({method:
+            EnsembleResult}), a single EnsembleResult, or None. Drives the
+            combined-forecast and rejected-models files.
+        per_model_mape: {model_name: test-window mape} from evaluate(),
+            used to pick the best model and populate the summary. Without
+            it those two files are written header-only.
+        per_model_validation_mape: {model_name: validation-window mape},
+            reported alongside so the selection-vs-reported gap is visible.
+        ensemble_mape: fallback for the combined score when an
+            EnsembleResult carries none of its own (the forecast()
+            context, where no future actuals exist).
         output_dir: directory to write into (created if missing).
         prefix: filename prefix for all files.
 
     Returns:
-        {"final_ensemble": path, "final_best_model": path, "per_model":
-        path, "rejected": path, "model_summary": path}.
+        {"final_ensemble_<method>": path, "final_best_model": path,
+        "per_model": path, "rejected": path, "model_summary": path}.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    ensembles = as_ensemble_dict(ensemble)
 
     tables = {
-        "final_ensemble": (f"{prefix}_final_ensemble.csv", build_final_forecast_table(ensemble)),
         "final_best_model": (
             f"{prefix}_final_best_model.csv",
             build_best_model_forecast_table(forecast_results, per_model_mape),
         ),
         "per_model": (f"{prefix}_per_model.csv", build_per_model_forecast_table(forecast_results)),
-        "rejected": (f"{prefix}_rejected_models.csv", build_rejected_models_table(ensemble)),
+        "rejected": (f"{prefix}_rejected_models.csv", build_rejected_models_table(ensembles)),
         "model_summary": (
             f"{prefix}_model_summary.csv",
-            build_model_summary_table(per_model_mape, ensemble, ensemble_mape),
+            build_model_summary_table(
+                per_model_mape, ensembles, ensemble_mape, per_model_validation_mape
+            ),
         ),
     }
+
+    # One combined-forecast file per method, always suffixed with the
+    # method name even when only one was requested. A filename that
+    # silently changed shape depending on how many rules were asked for
+    # would be worse than a slightly longer one -- downstream jobs can
+    # glob a stable pattern.
+    if ensembles:
+        for method, result in ensembles.items():
+            tables[f"final_ensemble_{method}"] = (
+                f"{prefix}_final_ensemble_{method}.csv",
+                build_final_forecast_table(result),
+            )
+    else:
+        tables["final_ensemble"] = (
+            f"{prefix}_final_ensemble.csv",
+            build_final_forecast_table(None),
+        )
 
     written: Dict[str, str] = {}
     for key, (filename, table) in tables.items():
@@ -262,9 +352,10 @@ def export_forecast_csvs(
 
 def export_forecast(
     forecast_results: "Dict[str, ForecastResult]",
-    ensemble: "Optional[EnsembleResult]" = None,
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     per_model_mape: "Optional[Dict[str, float]]" = None,
+    per_model_validation_mape: "Optional[Dict[str, float]]" = None,
     ensemble_mape: "Optional[float]" = None,
     history=None,
     date_column: str = "ds",
@@ -296,15 +387,19 @@ def export_forecast(
         dpi: resolution for the saved plots.
 
     Returns:
-        A merged dict of every path written: the CSV keys ("final_ensemble",
-        "final_best_model", "per_model", "rejected", "model_summary") plus,
-        when plots were saved, "plot_"-prefixed plot keys ("plot_overlay",
-        "plot_ensemble", and one "plot_<model>" per model).
+        A merged dict of every path written: the CSV keys
+        ("final_ensemble_<method>", one per combination method -- or a
+        bare "final_ensemble" when no ensemble was supplied at all --
+        plus "final_best_model", "per_model", "rejected",
+        "model_summary"), and when plots were saved, "plot_"-prefixed
+        plot keys ("plot_overlay", "plot_ensemble", and one
+        "plot_<model>" per model).
     """
     written = export_forecast_csvs(
         forecast_results,
         ensemble,
         per_model_mape=per_model_mape,
+        per_model_validation_mape=per_model_validation_mape,
         ensemble_mape=ensemble_mape,
         output_dir=output_dir,
         prefix=prefix,

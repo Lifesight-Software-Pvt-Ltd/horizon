@@ -20,8 +20,22 @@ the `models=` constructor argument, or pass `models=None` to run them all.
 | `bayesianpymc` | PyMC (NUTS / MCMC) | yes (posterior credible band) | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
 All five are selected the same way — a hyperparameter grid search scored by
-MAPE on the test split — so their reported numbers are directly comparable
-and feed the ensemble on equal footing.
+MAPE on the **validation** window — and all five are then refit on train +
+validation and reported on the **test** window, so their numbers are directly
+comparable and feed the ensemble on equal footing. SARIMAX included: it used to
+be the odd one out, self-tuning through a private search over a tail it carved
+out of train itself, which is no longer the case (see below).
+
+Non-negative output is **not** guaranteed library-wide. CatBoost, NeuralProphet
+and Bayesian PyMC clamp negative predictions at 0 only when the training target
+was itself never negative — a data-driven decision, so a series that
+legitimately goes negative is returned unaltered. SARIMAX is non-negative
+because its back-transform clips the log-space forecast at 0 before
+`expm1` — fitting in `log1p` space alone would not guarantee it, since
+`expm1` of a negative log value is itself negative. Prophet applies no clamp at all and can
+emit negative point forecasts on a low-level series. If your downstream use
+cannot tolerate that, clip the output yourself; nothing in the library does it
+for you.
 
 ### prophet
 
@@ -45,13 +59,57 @@ was itself never negative). CatBoost-native `save()`/`load()`.
 ### sarimax
 
 Fits `log1p(y)` as a (seasonal) ARIMA process with a standardised exogenous
-matrix, and returns raw-unit `yhat`. Differencing order `d` is ADF-derived
-from the data; `(p, q)`, seasonal `(P, Q)`, and `fourier_order_annual` are
-grid-searched. Design points worth knowing:
+matrix, and returns raw-unit `yhat`.
 
+**Selection works exactly like every other model's.** `(p, q)`, seasonal
+`(P, Q)` and `fourier_order_annual` come from the shared, forecaster-level
+hyperparameter grid, scored on the validation window. Only the differencing
+order `d` is decided inside the wrapper, by an ADF test on the log target —
+that is a property of the data, not a hyperparameter to tune. (SARIMAX
+previously ran its own internal search over a validation tail it carved out of
+train itself, on the grounds that shared selection meant selecting on the
+window that got reported. The three-way split removed that concern for
+everybody, so the private search went with it. Any older documentation saying
+SARIMAX "self-tunes internally and has no grid" is wrong.)
+
+Design points worth knowing:
+
+- **A deterministic trend term is passed when nothing is differenced.** With
+  `d=0` and `D=0`, statsmodels' default of no constant means a *zero-mean*
+  process — and this wrapper fits in `log1p` space, where a typical business
+  series sits around 7. Asked to fit a zero-mean model to data centred at 7, the
+  optimiser pushes the AR root to ~1 so the level decays as slowly as possible;
+  the fit looks respectable in-sample while the forecast mean-reverts toward
+  zero. On synthetic data this scored ~98% MAPE on a trending daily series and
+  ~98% on a flat one; with the term in place, ~6–7% and ~4% respectively. The
+  term used is `"ct"` (constant *and* linear trend), not just `"c"`: ADF's
+  default constant-only regression will happily call a trending series
+  stationary, so "not differenced" cannot be read as "has no trend", and a
+  constant alone leaves the forecast reverting to the training mean. On a
+  genuinely flat series the slope is estimated at essentially zero and costs
+  nothing. Fits with `d>=1` are completely unaffected — differenced series
+  behave exactly as they always did.
 - **Prediction interval is a constant-variance band** (`mean ± z·σ` in log
   space), not `conf_int()`'s horizon-growing variance, which blows the raw
   upper bound up over long horizons.
+- **The band can under-cover when the model is misspecified — by design, not
+  a bug.** Like all analytic ARIMA-family intervals, it propagates only the
+  fitted model's *innovation* variance; it carries no parameter-estimation or
+  model-misspecification uncertainty. So whenever the fit slightly misses the
+  true structure, real errors exceed a band that is only "correct" under the
+  idealised model. This bites hardest on **low-noise, strongly-structured
+  series** (e.g. a large deterministic seasonal swing with little residual
+  noise): the band is sized by the small noise while the errors are dominated
+  by structural misfit. A calibration sweep on such synthetic data measured
+  ~75% empirical coverage against a 95% nominal band (and, tellingly, raising
+  the Fourier order did *not* fix it — confirming it's the interval
+  assumption, not seasonal resolution). On noisier real-world data the analytic
+  band is relatively wider and coverage is usually much closer to nominal. The
+  point forecast (`yhat`/MAPE) is unaffected — this is purely about interval
+  width. **When calibrated uncertainty matters more than the point estimate,
+  prefer `bayesianpymc`'s posterior-predictive band** (it integrates parameter
+  uncertainty by sampling and stayed ~94%-calibrated on the same series) **or
+  read the spread across the ensemble.**
 - **Annual Fourier order is a hyperparameter** (`0` = off), because no fixed
   setting suited both daily and weekly real data.
 - **Divergence guard**: if a fit saturates the log-space explosion clip across
@@ -110,6 +168,11 @@ Gaussian fit would chase). Design points worth knowing:
   helps on weak/collinear seasonality, a loose one preserves strong
   seasonality, and neither is universally better. Weekly samples cleanly at
   the full 2000/2000.
+- **Non-negative clipping is data-driven**, matching CatBoost and
+  NeuralProphet: the floor at 0 is applied only when the training target was
+  itself never negative. It used to be unconditional, which silently rewrote
+  every negative prediction on a legitimately-negative target (profit, margin,
+  net change).
 - **`save()`/`load()` write the PyMC `InferenceData` to a NetCDF sidecar** and
   pickle the rest; predictions reload exactly from the pickled posterior draws.
 
@@ -126,6 +189,7 @@ ensemble**, which operates on the `yhat` point forecasts alone.
 ## See also
 
 - [`ensemble_methods.md`](ensemble_methods.md) — how the per-model forecasts
-  are combined and weighted (and why the ensemble isn't guaranteed to win).
+  are combined (trimmed mean by default) and why the ensemble isn't guaranteed
+  to win.
 - [`future_exog.md`](future_exog.md) — how `forecast()` fills in future values
   for your independent columns when you don't supply them.

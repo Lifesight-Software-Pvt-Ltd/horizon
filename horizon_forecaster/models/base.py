@@ -2,7 +2,7 @@
 Abstract base class for all model wrappers in horizon_forecaster.
 
 Every wrapper (ProphetWrapper, SARIMAXWrapper, CatBoostWrapper,
-PyMCWrapper, NeuralProphetWrapper) must inherit from BaseModel and
+BayesianPyMCWrapper, NeuralProphetWrapper) must inherit from BaseModel and
 implement `fit()` and `predict()`. This is the single most important
 interface in the library — every wrapper depends on it, and
 `forecaster.py`'s orchestration loop is written entirely against this

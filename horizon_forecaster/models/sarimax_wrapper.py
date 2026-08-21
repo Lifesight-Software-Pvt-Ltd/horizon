@@ -7,17 +7,17 @@ here -- the log transform, the annual Fourier terms, and the back-transform
 safeguards.
 
 Selection: SARIMAX uses the SAME forecaster-level grid search as every
-other model. It previously self-tuned via an internal validation-MAPE
-search, which was more statistically honest (it never saw the test split)
-but made SARIMAX the odd one out: Prophet/CatBoost/NeuralProphet all pick
-their hyperparameters by scoring candidates on the test split, so their
-reported MAPE is optimistic while SARIMAX's was not. Comparing those
-numbers head-to-head -- and, worse, deriving inverse-MAPE ensemble weights
-from them -- systematically penalised SARIMAX for being more rigorous. One
-selection mechanism for every model is the more useful property here,
-so the grid now varies (p, q), the seasonal (P, Q), and the annual Fourier
-order, while `d` stays ADF-derived (a property of the data, not a
-hyperparameter).
+other model. It previously self-tuned via an internal search over a
+validation tail it carved out of train itself, which made it the odd one
+out: every other model was selected by the orchestrator, on the
+orchestrator's window. Since 1.0 the orchestrator scores every model's
+candidates on a dedicated validation window that no reported number comes
+from, so the concern that motivated SARIMAX's private search -- that
+shared selection meant selecting on the reported window -- no longer
+applies to anyone. One selection mechanism for every model is the more
+useful property here, so the grid varies (p, q), the seasonal (P, Q), and
+the annual Fourier order, while `d` stays ADF-derived (a property of the
+data, not a hyperparameter).
 
 Annual Fourier lives here, not in the adapter, because that is the only
 way the grid can choose it. Real data made this necessary: on a ~3-year
@@ -219,9 +219,14 @@ class SARIMAXWrapper(BaseModel):
                 model_name=self.model_name,
             )
 
-        yhat = np.expm1(np.clip(corrected_log, 0.0, cap))
-        yhat_lower = np.expm1(np.clip(mean_log - z * sigma, 0.0, cap))
-        yhat_upper = np.expm1(np.clip(mean_log + z * sigma, 0.0, cap))
+        # All three go through _back_transform so the clip/floor/expm1
+        # chain lives in exactly one place. The bounds pass resid_var=0.0
+        # to suppress the +sigma^2/2 lift: it corrects the MEAN of the
+        # lognormal, and shifting a quantile by it would just move the
+        # whole interval without making it cover anything better.
+        yhat = self._back_transform(mean_log, None, self._clip_anchor_log)
+        yhat_lower = self._back_transform(mean_log - z * sigma, 0.0, self._clip_anchor_log)
+        yhat_upper = self._back_transform(mean_log + z * sigma, 0.0, self._clip_anchor_log)
 
         return pd.DataFrame(
             {
@@ -284,6 +289,50 @@ class SARIMAXWrapper(BaseModel):
             return 1
         return 0 if p_value <= 0.05 else 1
 
+    @staticmethod
+    def _trend_for(order, seasonal_order) -> str:
+        """
+        Choose the deterministic trend term for a given differencing.
+
+        This is not cosmetic. statsmodels' SARIMAX defaults to no constant
+        at all, which is only correct when the series is differenced --
+        differencing removes the level, so a constant would imply a drift
+        nobody asked for. With d=0 and D=0, however, "no constant" means a
+        ZERO-MEAN process, and this wrapper fits in log1p space where a
+        typical business series sits around 7 (log1p of ~1,100). Asked to
+        fit a zero-mean model to data centred at 7, the optimiser has only
+        one way out: push the AR root to ~1 so the level decays as slowly
+        as possible. The fit then looks respectable in-sample and the
+        forecast mean-reverts toward zero, gently at first and then not.
+
+        Observed directly on a trending daily series: ADF returned d=0, and
+        the resulting 80-period forecast fell from ~945 to 3.3 against
+        actuals near 1,300 (97.7% MAPE). Over a shorter 28-period horizon
+        the same defect merely halved the forecast -- which is far more
+        dangerous, because it reads as a plausible downturn rather than an
+        obvious failure, and the existing divergence guard only watches for
+        explosions upward.
+
+        The term used when nothing is differenced is "ct" (constant AND
+        linear trend), not just "c". A constant alone stops the collapse to
+        zero but leaves the forecast reverting to the training mean, which
+        on a growing series is still a confident prediction of decline
+        (measured at ~30% MAPE on the same trending series, versus ~7% with
+        the trend term). ADF with its default constant-only regression will
+        happily call a trending series stationary, so "not differenced"
+        cannot be taken to mean "has no trend" -- the model needs a level
+        AND a slope to be stationary around. On a genuinely flat series the
+        slope is estimated at essentially zero and costs nothing (4.1% with
+        "c" vs 3.9% with "ct" on flat synthetic data).
+
+        Deliberately narrow: this changes only the branch that was broken.
+        The differencing decision itself is untouched, so every series that
+        currently gets d>=1 -- random walks, level shifts, exponential
+        growth -- fits exactly as it did before.
+        """
+        differenced = order[1] > 0 or seasonal_order[1] > 0
+        return "n" if differenced else "ct"
+
     def _fit_one(self, y_log, exog, order, seasonal_order, enforce_stationarity, maxiter):
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
@@ -294,6 +343,7 @@ class SARIMAXWrapper(BaseModel):
                 exog=exog,
                 order=order,
                 seasonal_order=seasonal_order,
+                trend=self._trend_for(order, seasonal_order),
                 enforce_stationarity=enforce_stationarity,
                 enforce_invertibility=False,
             )
@@ -324,6 +374,15 @@ class SARIMAXWrapper(BaseModel):
         return (self._resid_var if resid_var is None else resid_var) / 2.0
 
     def _back_transform(self, mean_log, resid_var, anchor_log) -> np.ndarray:
+        """
+        Log space back to raw units: apply the lognormal bias correction,
+        floor at 0 (expm1(0)), cap at the explosion clip, then expm1.
+
+        The single place this conversion is written. `predict()` calls it
+        for the point forecast and both interval bounds -- the bounds pass
+        `resid_var=0.0` because the +sigma^2/2 correction targets the mean
+        of the distribution and must not be applied to a quantile of it.
+        """
         cap = anchor_log + self.log_clip_headroom
         return np.expm1(np.clip(mean_log + self._bias_shift(resid_var), 0.0, cap))
 

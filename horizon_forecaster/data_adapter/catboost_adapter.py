@@ -181,12 +181,3 @@ class CatBoostAdapter(BaseAdapter):
 
         return df
 
-    @staticmethod
-    def _validate_columns_present(df: pd.DataFrame, required_columns: list) -> None:
-        missing = [col for col in required_columns if col not in df.columns]
-        if missing:
-            raise InvalidConfigError(
-                f"Missing required column(s) in input data: {missing}",
-                param_name="raw_df columns",
-                provided_value=list(df.columns),
-            )

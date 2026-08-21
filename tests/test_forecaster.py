@@ -1,3 +1,4 @@
+import math
 import warnings
 
 import pandas as pd
@@ -67,10 +68,36 @@ def test_constructor_validates_training_size():
             df, date_column="date", target_column="orders", frequency="daily", training_size=30, models=["prophet"]
         )
 
-def test_constructor_default_training_size_is_80_percent():
+def test_constructor_defaults_to_frequency_sized_evaluation_windows():
+    # 60 daily rows is below the ~210 needed for the full 56/28 defaults,
+    # so they scale down proportionally (see utils._MAX_DEFAULTED_
+    # EVALUATION_SHARE) while keeping the 2:1 validation:test ratio.
     df = make_raw_df()
-    forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
-    assert forecaster.training_fraction == 0.8
+    with pytest.warns(UserWarning, match="too short for the default"):
+        forecaster = HorizonForecaster(
+            df, date_column="date", target_column="orders", frequency="daily",
+            models=["prophet"],
+        )
+    assert (forecaster._n_train, forecaster._n_validation, forecaster._n_test) == (36, 16, 8)
+
+
+def test_constructor_uses_full_default_windows_on_a_long_series():
+    df = make_raw_df(n=400)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet"],
+    )
+    assert (forecaster._n_validation, forecaster._n_test) == (56, 28)
+    assert forecaster._n_train == 400 - 56 - 28
+
+
+def test_constructor_rejects_mixing_the_percentage_and_window_routes():
+    df = make_raw_df(n=400)
+    with pytest.raises(InvalidConfigError, match="cannot be combined"):
+        HorizonForecaster(
+            df, date_column="date", target_column="orders", frequency="daily",
+            models=["prophet"], training_size=80, test_size=10,
+        )
 
 def test_constructor_drops_zero_variance_independent_columns():
     df = make_raw_df(with_zero_variance_col=True)
@@ -110,10 +137,15 @@ def test_constructor_warns_when_declared_frequency_mismatches_actual_data():
         HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="weekly", models=["prophet"])
 
 def test_constructor_does_not_warn_when_frequency_matches_data():
+    # Explicit window sizes, so the short-series scaling warning (which is
+    # about the split, not the frequency) can't mask what this asserts.
     daily_df = make_raw_df(n=60, freq="D")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        HorizonForecaster(daily_df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
+        HorizonForecaster(
+            daily_df, date_column="date", target_column="orders", frequency="daily",
+            models=["prophet"], validation_size=10, test_size=5,
+        )
 
 def test_constructor_warns_but_does_not_block_on_irregular_data():
     """
@@ -274,7 +306,11 @@ def test_grid_search_winner_matches_evaluate_result():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", models=["prophet"])
     result = forecaster.evaluate()["prophet"]
-    assert result.mape.value == result.grid_search_summary[0]["mape"]
+    # The grid summary holds VALIDATION scores -- that is the window
+    # candidates were chosen on. result.mape is the test-window score and
+    # is a different number by design; if these two ever match again, the
+    # selection/reporting separation has regressed.
+    assert result.validation_mape.value == result.grid_search_summary[0]["mape"]
 
 
 def test_grid_search_runs_only_once_across_repeated_evaluate_calls():
@@ -307,7 +343,7 @@ def test_forecast_runs_grid_search_itself_when_called_before_evaluate():
 
     forecaster.forecast(horizon=5)
     assert forecaster._selected_hyperparameters["prophet"] is not None
-    assert "prophet" in forecaster._grid_search_results
+    assert "prophet" in forecaster._selection_cache
 
 
 # ---------- evaluate() ----------
@@ -321,10 +357,15 @@ def test_evaluate_returns_structured_result():
     assert isinstance(results, dict)
     assert isinstance(result, EvaluationResult)
     assert result.model_name == "prophet"
-    assert result.n_train == 48  # 60 * 0.8
-    assert result.n_test == 12
-    assert len(result.test_predictions) == 12
+    # 60 daily rows is below the ~210 the full 56/28 defaults need, so they
+    # scale to 40% of the data (16 + 8), leaving 36 to train on.
+    assert (result.n_train, result.n_validation, result.n_test) == (36, 16, 8)
+    assert len(result.test_predictions) == 8
     assert result.fitted_model.is_fitted is True
+    # The two scores must come from DIFFERENT windows -- checking they are
+    # merely "not None" cannot fail, since both are non-optional fields.
+    assert result.validation_mape.total_count == result.n_validation
+    assert result.mape.total_count == result.n_test
 
 
 def test_evaluate_produces_low_mape_on_clean_trend():
@@ -486,11 +527,11 @@ def test_catboost_test_split_features_are_anchored_to_train_history_not_test_spl
         df, date_column="date", target_column="orders", frequency="daily",
         models=["catboost"], model_params={"catboost": {"iterations": 50, "depth": 3}},
     )
-    n_train, n_test, adapted_train, adapted_test_features, y_test = forecaster._prepare_split("catboost")
+    adapted_train, adapted_test_features, y_test = forecaster._prepare_split("catboost")
 
     assert adapted_test_features["time_idx"].iloc[0] == adapted_train["time_idx"].iloc[-1] + 1
-    # and time_idx must vary per row across the test split, not be frozen
-    assert adapted_test_features["time_idx"].nunique() == n_test
+    # and time_idx must vary per row across the scoring window, not be frozen
+    assert adapted_test_features["time_idx"].nunique() == forecaster._n_validation
 
 
 # ---------- forecast() ----------
@@ -864,6 +905,44 @@ def test_grid_search_fails_the_model_only_when_every_candidate_fails():
     assert isinstance(forecaster.evaluate_errors["sarimax"], ModelConvergenceError)
 
 
+def test_grid_starved_of_training_rows_falls_back_instead_of_failing_the_model():
+    """
+    A training window below the model's row floor fails every candidate,
+    but that is a property of the WINDOW, not of any hyperparameter -- and
+    it does not mean the model is unusable, because both later fits see
+    more data. Here 20 daily rows split to a 12-row training window (under
+    Prophet's floor of 14) while forecast() refits on all 20, which clears
+    it. So selection defers to the first configured candidate and records
+    an undefined validation MAPE, rather than refusing to forecast at all.
+    """
+    df = make_raw_df(n=20)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet"],
+    )
+    with pytest.warns(UserWarning, match="every hyperparameter candidate failed"):
+        results = forecaster.forecast(horizon=5)
+
+    assert "prophet" in results
+    assert len(results["prophet"].forecast) == 5
+
+    selection = forecaster._selection_cache["prophet"]
+    assert math.isnan(selection.validation_mape.value)
+    # Nothing was ranked, so there is no ranking to report.
+    assert selection.grid_search_summary is None
+    # A NaN score cannot be weighted, so the weighted rules must drop it --
+    # while the trimmed rule, which needs no MAPE, keeps it.
+    forecaster_all = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily",
+        models=["prophet"], ensemble_method=None,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecaster_all.forecast(horizon=5)
+    assert forecaster_all.forecast_ensemble["trimmed"].members == ["prophet"]
+    assert "prophet" in forecaster_all.forecast_ensemble["inverse_mape"].rejected_models
+
+
 def test_total_grid_failure_preserves_the_original_exception_type():
     """
     When every candidate fails the SAME way, the cause is not
@@ -964,7 +1043,7 @@ def test_constructor_defaults_for_ensemble_params():
     df = make_raw_df()
     forecaster = HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily")
     assert forecaster.mape_threshold == 40.0
-    assert forecaster.ensemble_weighting == "inverse_mape"
+    assert forecaster.ensemble_methods == ["trimmed"]
     assert forecaster.evaluate_ensemble is None
     assert forecaster.forecast_ensemble is None
 
@@ -975,10 +1054,10 @@ def test_constructor_validates_mape_threshold():
         HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", mape_threshold=150)
 
 
-def test_constructor_validates_ensemble_weighting():
+def test_constructor_validates_ensemble_method():
     df = make_raw_df()
     with pytest.raises(InvalidConfigError):
-        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", ensemble_weighting="bogus")
+        HorizonForecaster(df, date_column="date", target_column="orders", frequency="daily", ensemble_method="bogus")
 
 
 def test_evaluate_populates_ensemble_with_default_permissive_threshold():
@@ -989,11 +1068,15 @@ def test_evaluate_populates_ensemble_with_default_permissive_threshold():
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
     )
     forecaster.evaluate()
-    ensemble = forecaster.evaluate_ensemble
+    ensemble = forecaster.evaluate_ensemble["trimmed"]
     assert ensemble is not None
     assert ensemble.combined is not None
-    assert set(ensemble.weights.keys()) == {"prophet", "catboost"}
-    assert abs(sum(ensemble.weights.values()) - 1.0) < 1e-6
+    # Two members: trimming is undefined, so it degrades to a plain mean
+    # and reports that rather than silently calling itself trimmed.
+    assert set(ensemble.members) == {"prophet", "catboost"}
+    assert ensemble.rule_applied == "mean"
+    assert ensemble.degraded is True
+    assert ensemble.weights is None
     assert ensemble.mape is not None  # actuals are available in the evaluate() context
     assert set(ensemble.combined.columns) == {"ds", "yhat"}
 
@@ -1004,11 +1087,12 @@ def test_evaluate_ensemble_uses_configured_weighting_strategy():
         df, date_column="date", target_column="orders", frequency="daily",
         models=["prophet", "catboost"],  # 2-model equal-weighting check
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}},
-        ensemble_weighting="equal",
+        ensemble_method="equal",
     )
     forecaster.evaluate()
-    assert forecaster.evaluate_ensemble.weights["prophet"] == pytest.approx(0.5)
-    assert forecaster.evaluate_ensemble.weights["catboost"] == pytest.approx(0.5)
+    assert list(forecaster.evaluate_ensemble) == ["equal"]
+    assert forecaster.evaluate_ensemble["equal"].weights["prophet"] == pytest.approx(0.5)
+    assert forecaster.evaluate_ensemble["equal"].weights["catboost"] == pytest.approx(0.5)
 
 
 def test_evaluate_ensemble_rejects_model_above_threshold():
@@ -1031,29 +1115,45 @@ def test_evaluate_ensemble_rejects_model_above_threshold():
     )
     results = forecaster.evaluate()
     assert "prophet" in results
-    assert forecaster.evaluate_ensemble.combined is None
-    assert forecaster.evaluate_ensemble.weights == {}
-    assert forecaster.evaluate_ensemble.mape is None
-    assert "prophet" in forecaster.evaluate_ensemble.rejected_models
+    ensemble = forecaster.evaluate_ensemble["trimmed"]
+    assert ensemble.combined is None
+    assert ensemble.members == []
+    assert ensemble.rule_applied == "none"
+    # None, not {} -- there is no weighting to report either way now.
+    assert ensemble.weights is None
+    # Screening must read the VALIDATION score, never the reported one.
+    # Without this the wiring could be switched back to the test window --
+    # reintroducing exactly the leak the three-way split exists to close --
+    # and every other test would still pass.
+    rejection = ensemble.rejected_models["prophet"]
+    assert rejection.mape_value == results["prophet"].validation_mape.value
+    assert rejection.mape_value != results["prophet"].mape.value
+    assert forecaster.evaluate_ensemble["trimmed"].mape is None
+    assert "prophet" in forecaster.evaluate_ensemble["trimmed"].rejected_models
 
 
-def test_forecast_ensemble_reuses_evaluate_weights_and_warns_when_evaluate_not_called_first():
+def test_forecast_screens_on_validation_mape_without_running_a_full_evaluate():
+    """
+    forecast() needs a validation MAPE to screen and weight, but it does
+    NOT need evaluate(): selection has to happen anyway to know which
+    hyperparameters to fit with, and that produces the score for free.
+    Before 1.0 this ran the whole of evaluate() internally, additionally
+    paying for a test-window prediction it then threw away.
+    """
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
-    assert forecaster._evaluate_mape_cache is None
-    with pytest.warns(UserWarning, match=r"running evaluate\(\) internally"):
-        forecaster.forecast(horizon=5)
+    assert forecaster._selection_cache == {}
+    forecaster.forecast(horizon=5)
 
-    assert forecaster._evaluate_mape_cache is not None
-    assert forecaster.evaluate_ensemble is not None  # populated as a side effect
+    assert forecaster._selection_cache  # populated by selection, not by evaluate()
+    assert forecaster.evaluate_ensemble is None  # evaluate() was never run
     assert forecaster.forecast_ensemble is not None
-    assert forecaster.forecast_ensemble.weights == forecaster.evaluate_ensemble.weights
-    assert set(forecaster.forecast_ensemble.combined.columns) == {"ds", "yhat"}
-    assert len(forecaster.forecast_ensemble.combined) == 5
-    assert forecaster.forecast_ensemble.mape is None  # no actuals exist for the future
+    assert set(forecaster.forecast_ensemble["trimmed"].combined.columns) == {"ds", "yhat"}
+    assert len(forecaster.forecast_ensemble["trimmed"].combined) == 5
+    assert forecaster.forecast_ensemble["trimmed"].mape is None  # no actuals exist for the future
 
 
 def test_forecast_does_not_rewarn_or_recompute_evaluate_on_second_call():
@@ -1063,13 +1163,14 @@ def test_forecast_does_not_rewarn_or_recompute_evaluate_on_second_call():
         model_params={"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 100, "depth": 3}, "bayesianpymc": _FAST_PYMC},
     )
     forecaster.forecast(horizon=5)
-    cache_after_first_call = forecaster._evaluate_mape_cache
+    selection_after_first_call = dict(forecaster._selection_cache)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # any warning now fails the test
-        forecaster.forecast(horizon=8)
+    forecaster.forecast(horizon=8)
 
-    assert forecaster._evaluate_mape_cache is cache_after_first_call  # same object, not recomputed
+    # Same selection objects, not re-searched.
+    assert forecaster._selection_cache == selection_after_first_call
+    for name, selection in selection_after_first_call.items():
+        assert forecaster._selection_cache[name] is selection
 
 
 def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
@@ -1085,7 +1186,7 @@ def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
         forecaster.forecast(horizon=5)  # must not warn -- evaluate() already ran
 
 
-def test_forecast_ensemble_is_none_when_internal_evaluate_totally_fails():
+def test_forecast_succeeds_when_the_model_cannot_be_scored_on_validation():
     """
     n=16 -> evaluate()'s 80% train split is 12 rows, below the daily
     floor of 14 (fails outright), but forecast()'s own full-data refit
@@ -1100,9 +1201,11 @@ def test_forecast_ensemble_is_none_when_internal_evaluate_totally_fails():
         df, date_column="date", target_column="orders", frequency="daily",
         models=["prophet"], model_params={"prophet": {"seasonality_mode": "additive"}},
     )
-    with pytest.warns(UserWarning, match=r"running evaluate\(\) internally"):
+    with pytest.warns(UserWarning, match="could not be scored on the validation window"):
         results = forecaster.forecast(horizon=3)
 
     assert "prophet" in results
-    assert forecaster._evaluate_mape_cache == {}
-    assert forecaster.forecast_ensemble is None
+    # Scored NaN rather than failed: explicit params need no selection, so
+    # the model still forecasts -- it just carries no validation MAPE.
+    import math
+    assert math.isnan(forecaster._selection_cache["prophet"].validation_mape.value)

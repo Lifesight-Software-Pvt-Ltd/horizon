@@ -2,8 +2,8 @@
 
 An open-source ensemble time-series forecasting library that runs several
 strong forecasting models through one shared interface and combines them into
-a single weighted forecast — with transparent, per-model accuracy reporting so
-you always know *which* forecast you should trust.
+a single forecast — with transparent, per-model accuracy reporting so you
+always know *which* forecast you should trust.
 
 It is built for business time series such as revenue, orders, installs,
 conversions, or sign-ups at **daily** or **weekly** granularity, optionally
@@ -11,10 +11,12 @@ driven by independent variables (ad spend, impressions, promos, holidays,
 stockouts, and so on).
 
 Rather than betting on one model, Horizon Forecaster fits Prophet, CatBoost,
-SARIMAX, NeuralProphet, and a Bayesian PyMC model on the same data, scores each
-on a held-out split, and blends the accurate ones — while telling you the
-per-model MAPE, which models were excluded and why, and whether the ensemble
-actually beats the best individual model (it is not guaranteed to).
+SARIMAX, NeuralProphet, and a Bayesian PyMC model on the same data, tunes and
+screens each one on a **validation** window, reports each one's accuracy on a
+separate **test** window that no selection step is ever allowed to read, and
+combines the survivors — while telling you the per-model MAPE, which models
+were excluded and why, and whether the combined forecast actually beats the
+best individual model (it is not guaranteed to).
 
 ---
 
@@ -23,14 +25,14 @@ actually beats the best individual model (it is not guaranteed to).
 Every model is an `(adapter, wrapper)` pair registered in one `MODEL_REGISTRY`,
 and all of them run through the same `evaluate()` / `forecast()` / ensemble /
 export / plot pipeline. They are selected the same way — a hyperparameter grid
-search scored by MAPE on the test split — so their numbers are directly
+search scored by MAPE on the validation window — so their numbers are directly
 comparable.
 
 | Model | Backend | Uncertainty bounds | Notes |
 |---|---|---|---|
-| `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. |
+| `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. Can emit negative point forecasts on a low-level series — no output clamp is applied. |
 | `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
-| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix and grid-chosen annual Fourier terms. |
+| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)`, seasonal `(P, Q)` and the annual Fourier order all come from the shared grid; only `d` is derived from the data by an ADF test inside the wrapper. |
 | `neuralprophet` | NeuralProphet (torch) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
 | `bayesianpymc` | PyMC (NUTS/MCMC) | yes | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
@@ -52,13 +54,21 @@ behaviour.
 - **Five models, one interface.** Fit and compare Prophet, CatBoost, SARIMAX,
   NeuralProphet, and Bayesian PyMC with identical calls; add a model by
   registering one `(adapter, wrapper)` pair, with no change to the orchestrator.
-- **Honest, held-out evaluation.** `evaluate()` does a chronological
-  train/test split, fits each model on the training portion, predicts the test
-  window, and reports MAPE (with explicit zero-actual handling).
-- **Threshold-based ensemble weighting.** Models at or below a configurable
-  `mape_threshold` are blended by `inverse_mape` (lower MAPE → more weight) or
-  `equal` weighting. The ensemble's own accuracy is scored against real actuals,
-  so you can check whether it beats the best single model.
+- **Honest, held-out evaluation.** `evaluate()` splits chronologically into
+  **train / validation / test**. Every decision — the hyperparameter grid
+  search, `mape_threshold` screening, inverse-MAPE weights — is scored on the
+  validation window; the winner is then refit on train + validation and scored
+  once on the test window, which no selection path ever reads. The reported
+  `mape` is therefore an out-of-sample number rather than the score a model was
+  chosen for, and the selection score is kept alongside it as
+  `validation_mape` (with explicit zero-actual handling in both).
+- **Robust combination rules.** Models at or below a configurable
+  `mape_threshold` are combined by a **trimmed mean** (the default: discard the
+  highest and lowest member each period, average the rest), or by
+  `inverse_mape` (lower validation MAPE → more weight) or `equal` weighting.
+  Ask for several at once, or all three. The combined result's own accuracy is
+  scored against real actuals, so you can check whether it beats the best
+  single model.
 - **Transparent failure & rejection reporting.** A model that fits but scores
   above the threshold is *rejected* from the ensemble (reported with its MAPE);
   a model that fails to fit at all is recorded separately. One model failing
@@ -71,7 +81,7 @@ behaviour.
   `seasonal_naive` with drift, `linear_trend`, or `cycle`), with type-aware
   handling of event flags and partial fill for the columns you *do* know.
 - **Ready-to-use outputs.** Overlay and per-model charts, a MAPE comparison bar
-  chart, and a one-call export of five CSVs plus PNGs.
+  chart, and a one-call export of the run's CSVs plus PNGs.
 - **Built-in safety warnings** for over-long horizons, auto-generated future
   driver values, and forecasts that land implausibly far outside history.
 
@@ -111,27 +121,35 @@ forecaster = HorizonForecaster(
     df,
     date_column="date",
     target_column="orders",
-    frequency="daily",                  # "daily" or "weekly"
-    independent_columns=["spend"],      # omit if you have none
-    training_size=80,                   # % used for training; the rest is the test split
-    models=None,                        # None = all five; or e.g. ["sarimax", "catboost"]
-    mape_threshold=40.0,                # ensemble inclusion cutoff (upper bound only)
-    ensemble_weighting="inverse_mape",  # or "equal"
+    frequency="daily",              # "daily" or "weekly"
+    independent_columns=["spend"],  # omit if you have none
+    validation_size=56,             # periods used for selection; None = frequency default
+    test_size=28,                   # periods reported; None = frequency default
+    models=None,                    # None = all five; or e.g. ["sarimax", "catboost"]
+    mape_threshold=40.0,            # garbage filter on the validation MAPE; None disables it
+    ensemble_method="trimmed",      # or "inverse_mape", "equal", a list, or None for all three
 )
 
-# 1) Evaluate every model on the held-out split
+# 1) Evaluate every model: tuned on validation, reported on test
 results = forecaster.evaluate()
 for name, res in results.items():
-    print(f"{name}: MAPE {res.mape.value:.2f}%")
+    print(f"{name}: test MAPE {res.mape.value:.2f}% "
+          f"(validation {res.validation_mape.value:.2f}%)")
 
-ens = forecaster.evaluate_ensemble          # scored against real actuals
-if ens and ens.combined is not None:
-    print("ensemble MAPE:", ens.mape.value, "weights:", ens.weights)
+ens = forecaster.evaluate_ensemble["trimmed"]   # dict keyed by method
+if ens.combined is not None:
+    print("ensemble MAPE:", ens.mape.value, "rule applied:", ens.rule_applied)
 
 # 2) Forecast the future (refits on all data, once, cached)
 forecasts = forecaster.forecast(horizon=30)
 future = forecasts["sarimax"].forecast      # DataFrame ["ds", "yhat"] (+ bounds where available)
 ```
+
+Training takes whatever the two evaluation windows leave. Leave
+`validation_size`/`test_size` as `None` to use the per-frequency defaults (56
+validation / 28 test for daily, 26 / 13 for weekly), pass a float strictly
+between 0 and 1 for a fraction of the data, or use `training_size=80` for the
+percentage route instead — the two routes are mutually exclusive.
 
 `evaluate()` and `forecast()` always return a dict keyed by model name (even
 for a single model). Full walkthrough — including exporting CSVs/plots and
@@ -142,18 +160,31 @@ supplying planned future driver values — in
 
 ## How the ensemble works
 
-`build_ensemble()` combines the point forecasts of every model whose MAPE is at
-or below `mape_threshold`, weighting them by inverse-MAPE or equally. Excluded
-models are reported in `rejected_models` with their MAPE and the threshold they
-exceeded — distinct from models that failed to fit, which land in
-`evaluate_errors` / `forecast_errors`.
+`build_ensembles()` combines the point forecasts of every model whose
+**validation** MAPE is at or below `mape_threshold`, using one or more
+combination rules. The default is a **trimmed mean**: per period, discard the
+highest and lowest member and average what remains. `inverse_mape` and `equal`
+weighting are still available and can be built alongside it — the models are
+already fitted by then, so extra rules are close to free.
+`evaluate_ensemble` / `forecast_ensemble` are a `Dict[str, EnsembleResult]`
+keyed by method, always a dict even for a single method. Excluded models are
+reported in `rejected_models` with their MAPE and the threshold they exceeded —
+distinct from models that failed to fit, which land in `evaluate_errors` /
+`forecast_errors`.
 
-**A weighted ensemble is not guaranteed to beat the best single model** — with
-static weights it can be dragged down on the periods where a weaker member is
-wrong. This is a real property of the method, not a bug, which is why
-`evaluate()` scores the ensemble against actuals and the exporter writes *both*
-a `final_ensemble` and a `final_best_model` CSV so you can choose per run. See
-[`docs/ensemble_methods.md`](docs/ensemble_methods.md).
+`mape_threshold` (default 40) is best understood as a **garbage filter** for
+degenerate fits rather than an accuracy screen: the trimmed rule already
+discards the worst member on every period, so screening hard *and* trimming
+spends the same robustness budget twice. Pass `None` to admit every model.
+
+**A combined ensemble is not guaranteed to beat the best single model.** With
+static weights it can be dragged down on exactly the periods where a weaker
+member is wrong. Trimming is considerably more robust to that specific failure
+(it drops the offending member on the periods where it offends) but is still
+not a guarantee. This is a real property of the method, not a bug, which is why
+`evaluate()` scores each ensemble against actuals and the exporter writes *both*
+a `final_ensemble_<method>` and a `final_best_model` CSV so you can choose per
+run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
 
 ---
 
@@ -161,8 +192,10 @@ a `final_ensemble` and a `final_best_model` CSV so you can choose per run. See
 
 `export_forecast()` writes, into one folder:
 
-- **Five CSVs** — `final_ensemble`, `final_best_model`, `per_model`,
-  `rejected`, and `model_summary` (per-model MAPE, ensemble weight, and status).
+- **CSVs** — one `final_ensemble_<method>` per combination rule, plus
+  `final_best_model`, `per_model`, `rejected` (per model *and* method), and
+  `model_summary` (validation MAPE, test MAPE, method, rule applied, weight and
+  status).
 - **Plots** (unless disabled) — an overlay chart plus one dedicated figure per
   model and the ensemble.
 
@@ -193,17 +226,31 @@ breaking that rule.
 
 ## Project status & roadmap
 
-Under active development; not yet released to PyPI.
+**Version 1.0.0.** The API described here is the stable one: the model set, the
+three-way split, the combination rules, and the export/plot layer are all
+implemented and tested across daily and weekly data. Installation is still from
+a clone — there is no PyPI package yet (see [Installation](#installation)).
 
-- **Done** — the full model set (Prophet, CatBoost, SARIMAX, NeuralProphet,
-  Bayesian PyMC), MAPE-threshold ensemble weighting, the output layer (plots +
-  CSV export), and the future-exogenous-data strategies (Phase 7) are
-  implemented and tested across daily and weekly data.
-- **In progress (Phase 8)** — final user-facing docs and exact dependency
-  pinning against tested versions.
-- **Deferred to the public release** — runnable example notebooks (a clean
-  `pip install` + Open-in-Colab only makes sense once the package is
-  published) and the gated PyPI release itself.
+1.0.0 is where the evaluation protocol was fixed: selection and reporting were
+separated into distinct windows, the trimmed mean became the default
+combination rule, and a SARIMAX trend bug that quietly collapsed undifferenced
+forecasts toward zero was corrected. `CHANGELOG.md` has the full account.
+
+Known gaps, deliberately **not** in 1.0 and all candidates for future work:
+
+- **Rolling-origin backtesting.** Every score here comes from a single test
+  window, so it reflects one particular stretch of history rather than an
+  average over several origins.
+- **Benchmark-relative metrics** (RelMAE / MASE). MAPE alone says nothing about
+  whether a model beats a seasonal naive baseline, and is unusable on series
+  with zero actuals.
+- **Family de-duplication.** Prophet and NeuralProphet are close relatives, so a
+  combination containing both is less diverse than its member count suggests;
+  nothing currently accounts for that.
+- **An error-diversity diagnostic.** The value of combining depends on members
+  making *different* errors, which the library does not yet measure or report.
+- **Runnable example notebooks and a PyPI release** — a clean `pip install` +
+  Open-in-Colab only makes sense once the package is published.
 
 A detailed, honest build log lives in [`docs/`](docs) (`build_log_phase*.md`),
 and every notable change — including the reasoning and the dead ends — is
@@ -216,7 +263,7 @@ recorded in [`CHANGELOG.md`](CHANGELOG.md).
 - [`docs/installation.md`](docs/installation.md) — install & dependencies
 - [`docs/quickstart.md`](docs/quickstart.md) — end-to-end usage
 - [`docs/supported_models.md`](docs/supported_models.md) — per-model behaviour
-- [`docs/ensemble_methods.md`](docs/ensemble_methods.md) — ensemble weighting & caveats
+- [`docs/ensemble_methods.md`](docs/ensemble_methods.md) — combination rules & caveats
 - [`docs/future_exog.md`](docs/future_exog.md) — future-driver strategies
 - [`docs/build_log_phase*.md`](docs) — how and why the library was built
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — conventions and project status

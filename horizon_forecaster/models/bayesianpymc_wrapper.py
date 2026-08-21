@@ -51,8 +51,9 @@ Design, and how it maps onto the reference notebook:
   docstring).
 
 Selection: PyMC uses the SAME forecaster-level grid search as the other
-models. Because NUTS sampling is expensive, the default grid is small and
-varies only `n_fourier` and `target_accept`; every candidate is sampled at
+models. Because NUTS sampling is expensive, the default grid is small: daily
+varies `n_fourier` x `beta_fourier_sigma` at a fixed `target_accept`,
+weekly varies `n_fourier` x `target_accept`. Every candidate is sampled at
 full draws (no cheap-selection shortcut), so the reported MAPE reflects the
 real posterior each candidate would produce in a forecast.
 """
@@ -145,6 +146,10 @@ class BayesianPyMCWrapper(BaseModel):
         self.ci_upper_pct = float(p.get("ci_upper_pct", 97.0))
         # Short (weekly) seasonal cycle is only meaningful for daily data.
         self.use_short_seasonal = bool(p.get("use_short_seasonal", frequency == "daily"))
+        # Set from the training target in fit(); None here so an unfitted
+        # (or older, unpickled) wrapper degrades to "don't clip" rather
+        # than raising AttributeError inside predict().
+        self._target_min: Optional[float] = None
 
     # ---------- fit ----------
 
@@ -174,6 +179,10 @@ class BayesianPyMCWrapper(BaseModel):
         y_raw = train_df["y"].to_numpy(dtype=float)
         self._y_mean = float(np.nanmean(y_raw))
         self._y_std = float(np.nanstd(y_raw)) + 1e-8
+        # Recorded so predict() can decide whether flooring at zero is
+        # appropriate for THIS target, mirroring CatBoostWrapper's
+        # _target_min. See the note in back() below.
+        self._target_min = float(np.nanmin(y_raw))
         y_sc = (y_raw - self._y_mean) / self._y_std
 
         t = self._time_steps(train_df["ds"])
@@ -280,7 +289,24 @@ class BayesianPyMCWrapper(BaseModel):
             )
 
         def back(z: np.ndarray) -> np.ndarray:
-            return np.clip(z * self._y_std + self._y_mean, 0.0, None)
+            """
+            Undo the target z-scoring, flooring at zero only when the
+            training target itself never went negative.
+
+            The floor used to be unconditional, which silently corrupted
+            any target that legitimately goes below zero -- net revenue
+            after refunds, inventory deltas, week-on-week change. Such a
+            series would have every negative prediction quietly rewritten
+            to 0, which is not a conservative approximation but a wrong
+            number presented with full confidence. Now data-driven, the
+            same rule CatBoostWrapper and NeuralProphetWrapper already
+            apply: a target observed to be non-negative keeps the floor,
+            and one that dips negative is returned unaltered.
+            """
+            raw = z * self._y_std + self._y_mean
+            if self._target_min is not None and self._target_min >= 0:
+                return np.clip(raw, 0.0, None)
+            return raw
 
         # Point forecast: posterior mean of the latent mean mu (= the
         # predictive mean for a Student-T with nu > 1), so MAPE is unchanged.
@@ -424,7 +450,7 @@ class BayesianPyMCWrapper(BaseModel):
     def _convergence_summary(trace) -> Dict[str, float]:
         """
         A small, picklable diagnostics summary (max R-hat, divergence count)
-        kept on the fitted wrapper for the user to inspect, computed lazily
+        kept on the fitted wrapper for the user to inspect, computed at the end of fit(); the arviz import is deferred
         so a missing arviz never breaks fit().
         """
         summary: Dict[str, float] = {}

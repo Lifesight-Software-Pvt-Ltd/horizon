@@ -1,14 +1,52 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+# 77 is the floor, not a preference: `license = "Apache-2.0"` below is a
+# PEP 639 SPDX expression, and setuptools only understands the bare-string
+# form from 77.0.0. Older versions reject it outright --
+#   invalid pyproject.toml config: `project.license`
+#   must be valid exactly by one definition ('file' or 'text')
+# -- because they expect the legacy {file = ...} / {text = ...} table.
+#
+# A plain `pip install .` hides this: pip builds in an isolated
+# environment and resolves a current setuptools regardless of what the
+# bound says. The failure surfaces on a --no-isolation build, or anywhere
+# the build backend is pinned lower. Declaring the real requirement is
+# what stops that being a confusing error rather than a clear one.
+#
+# Unrelated to the `setuptools>=68,<82` RUNTIME pin further down, which
+# exists because pytorch-lightning imports pkg_resources at import time.
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "horizon_forecaster"
-version = "0.0.1"
+version = "1.0.0"
 description = "Ensemble time-series forecasting across Prophet, NeuralProphet, SARIMAX, CatBoost, and Bayesian PyMC"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = "Apache-2.0"
+authors = [{ name = "Lifesight" }]
+keywords = [
+    "forecasting",
+    "time-series",
+    "ensemble",
+    "prophet",
+    "sarimax",
+    "catboost",
+    "neuralprophet",
+    "pymc",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "pandas==2.3.3",
     "numpy==1.26.4",
@@ -38,6 +76,12 @@ dependencies = [
     # independent upstream bug reports converging on the same pin.
     "setuptools>=68,<82",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Lifesight-Software-Pvt-Ltd/horizon"
+Repository = "https://github.com/Lifesight-Software-Pvt-Ltd/horizon"
+Changelog = "https://github.com/Lifesight-Software-Pvt-Ltd/horizon/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/Lifesight-Software-Pvt-Ltd/horizon/tree/main/docs"
 
 [project.optional-dependencies]
 dev = [
