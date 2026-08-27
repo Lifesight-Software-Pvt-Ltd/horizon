@@ -174,7 +174,7 @@ def test_build_rejected_models_table_empty_when_none_rejected():
 
 # ---------- export_forecast_csvs ----------
 
-def test_export_writes_three_readable_files(tmp_path):
+def test_export_writes_all_five_readable_files(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     err = ThresholdRejectionError("bad", model_name="catboost", mape_value=90.0, allowed_max=40.0)
     ens = make_ensemble(rejected={"catboost": err})
@@ -215,7 +215,7 @@ def test_export_uses_custom_prefix(tmp_path):
 
 
 def test_export_still_writes_all_files_when_empty(tmp_path):
-    # No ensemble, no forecasts: three header-only files should still exist.
+    # No ensemble, no forecasts: all five header-only files should still exist.
     written = export_forecast_csvs({}, None, output_dir=str(tmp_path))
     for path in written.values():
         df = pd.read_csv(path)
@@ -352,3 +352,74 @@ def test_rejected_table_records_which_method_dropped_the_model():
     table = build_rejected_models_table(ensembles)
     assert list(table["ensemble_method"]) == ["inverse_mape"]
     assert table.iloc[0]["model"] == "sarimax"
+
+
+# ---------- the {method: EnsembleResult} dict a forecaster actually produces ----------
+#
+# `HorizonForecaster.forecast_ensemble` is a Dict[str, EnsembleResult], never a
+# bare one. Before 1.0 the fixtures in this file only ever built a bare result,
+# and the shape a real run produces reached several entry points untested --
+# which is exactly how export_forecast(save_plots=True) shipped raising
+# AttributeError on an ordinary run. These pin the dict shape at the two
+# entry points that had no direct coverage.
+
+def test_build_final_forecast_table_accepts_the_forecaster_dict():
+    # Regression: this builder is deliverable #1 in the module docstring and
+    # was the last consumer not normalising its input, so a caller holding
+    # forecaster.forecast_ensemble and calling it directly got
+    # "AttributeError: 'dict' object has no attribute 'combined'".
+    table = build_final_forecast_table({"trimmed": make_trimmed_ensemble()})
+    assert list(table.columns) == ["ds", "yhat"]
+    assert list(table["yhat"]) == [12.0, 20.0, 32.0]
+
+
+def test_build_final_forecast_table_empty_dict_is_empty_but_shaped():
+    table = build_final_forecast_table({})
+    assert list(table.columns) == ["ds", "yhat"]
+    assert len(table) == 0
+
+
+def test_export_forecast_accepts_the_forecaster_dict(tmp_path):
+    # The documented one-call export, given the real dict shape AND asked for
+    # plots -- the precise combination that shipped broken.
+    import matplotlib
+    matplotlib.use("Agg")
+    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
+    written = export_forecast(
+        results,
+        {"trimmed": make_trimmed_ensemble()},
+        per_model_mape={"prophet": 10.0},
+        output_dir=str(tmp_path),
+    )
+    assert "final_ensemble_trimmed" in written
+    assert (tmp_path / "forecast_final_ensemble_trimmed.csv").exists()
+    assert "plot_ensemble" in written
+    # The combined series must actually reach the file, not just its header.
+    assert list(pd.read_csv(written["final_ensemble_trimmed"])["yhat"]) == [12.0, 20.0, 32.0]
+
+
+def test_scalar_ensemble_mape_is_not_stamped_on_every_method(tmp_path):
+    """
+    `ensemble_mape` is a single fallback score describing ONE combined
+    series. In a multi-method run the rules produce materially different
+    series, so repeating one number against all three would fabricate the
+    side-by-side comparison this table exists to support.
+    """
+    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
+    ensembles = {
+        "trimmed": make_trimmed_ensemble(),
+        "inverse_mape": make_ensemble(),
+    }
+    table = build_model_summary_table(
+        {"prophet": 10.0}, ensembles, ensemble_mape=9.0,
+    )
+    ensemble_rows = table[table["model"] == "ensemble"]
+    # Both rules are still reported -- only the borrowed score is withheld.
+    assert set(ensemble_rows["ensemble_method"]) == {"trimmed", "inverse_mape"}
+    assert ensemble_rows["mape"].isna().all()
+
+    # With a single method the fallback is unambiguous, so it IS used.
+    single = build_model_summary_table(
+        {"prophet": 10.0}, {"trimmed": make_trimmed_ensemble()}, ensemble_mape=9.0,
+    )
+    assert single[single["model"] == "ensemble"].iloc[0]["mape"] == 9.0

@@ -2,9 +2,13 @@
 Custom exception hierarchy for horizon_forecaster.
 
 Design principle: every exception carries structured, machine-readable
-attributes (model_name, reason, values) in addition to a human-readable
-message. This lets `forecaster.py` build the "rejected models" report
-programmatically, instead of parsing exception strings.
+attributes in addition to a human-readable message -- `model_name` on
+the base class, plus per-subclass detail such as required_periods/
+available_periods, original_exception, mape_value/allowed_max,
+param_name/provided_value/valid_range, and provided_frequency. This lets
+`evaluation/ensemble.py` build the "rejected models" report, and
+`exporters.py` turn it into a table, programmatically rather than by
+parsing exception strings.
 """
 
 from typing import Optional

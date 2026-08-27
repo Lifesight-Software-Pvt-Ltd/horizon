@@ -1,6 +1,6 @@
 # Quickstart
 
-A minimal end-to-end run: evaluate every model on held-out data, build a
+A minimal end-to-end run: evaluate every model on a held-out split, build a
 forecast, and export the results. For the ensemble specifics see
 [`ensemble_methods.md`](ensemble_methods.md); for per-model behaviour see
 [`supported_models.md`](supported_models.md).
@@ -32,7 +32,7 @@ df = pd.DataFrame({
 ## 2. Construct the forecaster
 
 ```python
-from horizon_forecaster.forecaster import HorizonForecaster
+from horizon_forecaster import HorizonForecaster
 
 forecaster = HorizonForecaster(
     df,
@@ -40,11 +40,11 @@ forecaster = HorizonForecaster(
     target_column="orders",
     frequency="daily",              # "daily" or "weekly"
     independent_columns=["spend"],  # omit if you have none
-    validation_size=None,           # None = the frequency default (56 daily / 26 weekly)
-    test_size=None,                 # None = the frequency default (28 daily / 13 weekly)
+    validation_size=None,           # selection window; None = frequency default (56 daily / 26 weekly)
+    test_size=None,                 # reported window; None = frequency default (28 daily / 13 weekly)
     models=None,                    # None = every registered model; or e.g. ["sarimax", "catboost"]
-    mape_threshold=40.0,            # validation-MAPE cutoff for ensemble membership; None disables it
-    ensemble_method="trimmed",      # or "inverse_mape", "equal", a list of those, or None for all three
+    mape_threshold=40.0,            # garbage filter on the VALIDATION MAPE; None admits every model
+    ensemble_method="trimmed",      # or "inverse_mape", "equal", a list of them, or None for all three
 )
 ```
 
@@ -53,56 +53,39 @@ forecaster = HorizonForecaster(
 worth doing to exclude `bayesianpymc` when you want a fast run, since its
 MCMC sampling is much slower than the others.
 
-### Choosing the split
+### Sizing the split
 
-Data is split chronologically into **three** windows, and they do different
-jobs:
+Windows are sized in **periods** by default. For `validation_size` and
+`test_size`, an `int` is a number of periods, a `float` strictly between 0 and
+1 is a fraction of the data, and `None` takes the frequency default. Training
+takes every row the two windows leave.
 
-- **train** — what models are fitted on.
-- **validation** — where every *decision* is made: the hyperparameter grid
-  search, `mape_threshold` screening, and inverse-MAPE weights.
-- **test** — what gets *reported*, and which no selection path is ever allowed
-  to read.
+If you would rather think in percentages, `training_size` is the alternative
+route — and it is **percentages only**: `training_size=80` means 80%, never 80
+periods. The remainder is divided between validation and test, two-thirds to
+validation. It is mutually exclusive with `validation_size`/`test_size`;
+passing both raises `InvalidConfigError` rather than letting one silently win.
 
-`validation_size` and `test_size` each accept an **int** (a number of periods),
-a **float strictly between 0 and 1** (a fraction of the data), or **`None`**
-(the per-frequency default: 56 validation / 28 test for daily, 26 / 13 for
-weekly). Training takes whatever is left. A float of `1.0` or more is rejected
-rather than guessed at, since `28` and `28.0` would otherwise mean the same
-thing while `0.28` meant something completely different.
+On a short series the defaults are scaled down (with a warning) rather than
+leaving nothing to train on.
 
-The defaults are absolute period counts rather than percentages on purpose. The
-test window is meant to estimate the error you will actually experience, so it
-should be about as long as a horizon somebody would really forecast and act on
-— 4 weeks of daily data, a quarter of weekly. The validation window has to rank
-3–18 grid candidates against each other, so it wants stability, which means
-more data; hence twice the test window.
+## 3. Evaluate on the held-out split
 
-If you would rather think in percentages, `training_size` still works exactly
-as it always did — a percentage (50–100) or fraction (0.5–1.0), never a number
-of periods — and the remainder is divided between validation and test, two
-thirds to validation:
+`evaluate()` splits chronologically into **train / validation / test**. Each
+model's hyperparameters are chosen by grid search on the **validation**
+window, the winner is refit on train + validation, and it is then scored once
+on the **test** window — which no selection path is ever allowed to read. So
+every result carries two MAPEs, and they are not interchangeable:
 
-```python
-HorizonForecaster(df, ..., training_size=80)   # 80% train, ~13% validation, ~7% test
-```
+| field | window | meaning |
+|---|---|---|
+| `res.validation_mape` | validation | the score every DECISION was made on. Optimistic by construction, since candidates were chosen to minimise it. |
+| `res.mape` | test | the score REPORTED — the honest out-of-sample estimate. |
 
-The two routes are **mutually exclusive**: passing `training_size` together
-with `validation_size` or `test_size` raises `InvalidConfigError` rather than
-silently letting one win.
+A large gap between them means the grid search found a candidate that suited
+the validation window specifically rather than the series generally.
 
-On a short series, the defaults scale down proportionally (they are capped at
-40% of the rows between them, preserving the 2:1 ratio) and you get a warning.
-Scores from windows that small are noisy and are not comparable to scores from
-a longer series, which uses the full windows. A size you asked for *explicitly*
-is honoured exactly, or raises — a window you deliberately chose is never
-silently shrunk.
-
-## 3. Evaluate: tuned on validation, reported on test
-
-`evaluate()` selects each model's hyperparameters on the validation window,
-refits the winner on train + validation, then predicts and scores the test
-window. It returns a dict keyed by model name (always a dict, even for one
+`evaluate()` returns a dict keyed by model name (always a dict, even for one
 model).
 
 ```python
@@ -112,39 +95,27 @@ for name, res in results.items():
     print(f"{name}: test MAPE {res.mape.value:.2f}%  "
           f"(validation {res.validation_mape.value:.2f}%; "
           f"train {res.n_train}, validation {res.n_validation}, test {res.n_test})")
-```
 
-The two MAPEs are not interchangeable. `validation_mape` is the score every
-decision was made on, and is optimistic by construction — candidates were
-chosen precisely to minimise it. `mape` is the honest out-of-sample estimate on
-the test window. A large gap between them is itself a useful diagnostic: it
-means the grid search found a candidate that suited the validation window
-specifically rather than the series generally.
-
-The refit before scoring test is deliberate. Fitting on train alone and
-predicting straight through both windows would be one fit cheaper per model,
-but it would measure a model trained on less data than would ever be deployed;
-refitting on everything available makes the reported MAPE an estimate of the
-same procedure that produces your real forecast.
-
-```python
-# The ensembles are populated as a side effect, scored against the real test actuals.
-# Always a dict keyed by combination method, even for a single method.
-ens = forecaster.evaluate_ensemble["trimmed"]
-if ens.combined is not None:
-    print("ensemble MAPE:", ens.mape.value)
-    print("rule applied:", ens.rule_applied, "| members:", ens.members)
-    print("weights:", ens.weights)                  # None for trimmed — it has no weights
-    print("trim shares:\n", ens.trim_shares)        # who got discarded, and how often
-    print("rejected:", list(ens.rejected_models))   # fit fine, but above mape_threshold
+# The ensembles are populated as a side effect, scored against the real held-out
+# actuals. evaluate_ensemble is a Dict[str, EnsembleResult] keyed by combination
+# method -- always a dict, even when a single method was requested.
+for method, ens in forecaster.evaluate_ensemble.items():
+    if ens.combined is None:
+        continue
+    print(f"[{method}] rule applied: {ens.rule_applied}"
+          f"{' (degraded)' if ens.degraded else ''}, members: {ens.members}")
+    print(f"[{method}] ensemble MAPE:", ens.mape.value)
+    print(f"[{method}] weights:", ens.weights)          # None for weightless rules such as trimmed
+    print(f"[{method}] trim shares:", ens.trim_shares)  # trimming only; None for the weighted rules
+    print(f"[{method}] rejected:", list(ens.rejected_models))
 
 # Models that failed to fit/predict at all are recorded separately:
 print("errors:", forecaster.evaluate_errors)
 ```
 
-A model in `rejected_models` fit successfully but scored above
-`mape_threshold` on validation; a model in `evaluate_errors` failed outright.
-The two are never conflated, and neither raises unless *every* model fails.
+A model in an ensemble's `rejected_models` fit successfully but wasn't
+admitted to the combination; a model in `evaluate_errors` failed outright. The
+two are never conflated, and neither raises unless *every* model fails.
 
 ## 4. Forecast the future
 
@@ -152,20 +123,15 @@ The two are never conflated, and neither raises unless *every* model fails.
 forecasts = forecaster.forecast(horizon=30)   # 30 future periods
 
 sarimax_future = forecasts["sarimax"].forecast   # DataFrame ["ds", "yhat"] (+ bounds where a model provides them)
-future_ensemble = forecaster.forecast_ensemble["trimmed"]   # dict keyed by method, as in evaluate()
+future_ensembles = forecaster.forecast_ensemble  # Dict[str, EnsembleResult], same keys as above
 ```
 
-`forecast()` refits each model on the full dataset (once, cached). A true
-future forecast has no actuals to score against, so any screening or weighting
-the ensemble needs comes from the **validation** MAPE established when each
-model's hyperparameters were selected. That selection has to happen anyway —
-`forecast()` cannot fit without knowing which parameters won — so the scores
-come for free and are cached, whether or not you ever call `evaluate()`.
-Calling `forecast()` without `evaluate()` still pays for the grid search (there
-is no way to know which parameters to fit with otherwise), but it no longer
-runs the whole of `evaluate()` internally and no longer pays for a test-window
-prediction it would throw away — so the `UserWarning` that used to flag that
-cost is gone.
+`forecast()` refits each model on the full dataset (once, cached). Its
+ensembles screen and weight on the **validation** MAPE from hyperparameter
+selection — which `forecast()` has to perform anyway in order to know which
+parameters to fit with, so those scores come for free and are cached. It does
+**not** run `evaluate()` internally, so calling `forecast()` first is no longer
+more expensive than calling it second.
 
 If your forecast depends on independent columns, supply their planned future
 values; otherwise they are auto-generated from history and a warning is
@@ -202,7 +168,10 @@ Two things worth knowing:
   to `0` ("no event unless you supply one") instead of being carried forward
   or averaged into a fractional flag — except under `seasonal_naive`, where
   they follow the cycle. Name them with `event_columns`, or they're
-  auto-detected (≤2 distinct non-negative values).
+  auto-detected (≤2 distinct non-negative values). Naming them explicitly
+  disables auto-detection, which is worth doing if one of your continuous
+  drivers happens to take only two distinct values over the history — it
+  would otherwise be treated as a flag and defaulted to 0.
 - **Partial fill.** You can supply future values for *some* columns and let
   the rest be generated — pass a DataFrame with only the columns you know.
 
@@ -219,16 +188,21 @@ to use it.
 ## 5. Export CSVs and plots
 
 ```python
+from horizon_forecaster import DEFAULT_ENSEMBLE_METHOD
 from horizon_forecaster.exporters import export_forecast
+
+default_eval_ensemble = (forecaster.evaluate_ensemble or {}).get(DEFAULT_ENSEMBLE_METHOD)
 
 paths = export_forecast(
     forecasts,
-    ensemble=forecaster.forecast_ensemble,     # the whole {method: EnsembleResult} dict
+    forecaster.forecast_ensemble,   # the whole {method: EnsembleResult} dict
     per_model_mape={m: r.mape.value for m, r in results.items()},
     per_model_validation_mape={m: r.validation_mape.value for m, r in results.items()},
-    # A forecast ensemble has no score of its own (no future actuals), so the
-    # summary borrows one from evaluate() if you pass it:
-    ensemble_mape=(ens.mape.value if ens.mape is not None else None),
+    ensemble_mape=(
+        default_eval_ensemble.mape.value
+        if default_eval_ensemble is not None and default_eval_ensemble.mape is not None
+        else None
+    ),
     history=df, date_column="date", target_column="orders",
     output_dir="output", prefix="forecast",
     save_plots=True,     # set False for CSVs only
@@ -236,52 +210,44 @@ paths = export_forecast(
 print(paths)
 ```
 
-This writes:
+This writes `final_ensemble_<method>` — **one per combination rule**, so
+asking for all three writes three of them — plus `final_best_model`,
+`per_model`, `rejected` and `model_summary`, and (unless `save_plots=False`)
+one forecast PNG per model plus an overlay.
 
-- `forecast_final_ensemble_<method>.csv` — **one per combination method**, so a
-  run with several rules produces several files. The method is always in the
-  name, even for a single rule: a filename that silently changed shape
-  depending on how many rules you asked for would be worse than a slightly
-  longer one, and downstream jobs can glob a stable pattern.
-- `forecast_final_best_model.csv` — the single best-scoring model's forecast.
-- `forecast_per_model.csv` — every model's forecast, stacked.
-- `forecast_rejected_models.csv` — one row per (model, method) exclusion; the
-  `ensemble_method` column matters because exclusion is not necessarily the
-  same across rules.
-- `forecast_model_summary.csv` — `model`, `validation_mape`, `mape`,
-  `ensemble_method`, `rule_applied`, `ensemble_weight`, `status`.
-  `ensemble_weight` is empty for weightless rules such as the default trimmed
-  mean; filling in an equal share would imply an averaging that did not happen.
-
-Unless `save_plots=False`, one forecast PNG per model plus an overlay are
-written alongside them.
+`model_summary` carries `validation_mape` and `mape` side by side, so the
+selection-vs-reported gap is visible per model. Its `ensemble_weight` column
+is deliberately blank for weightless rules such as the default trimmed mean —
+there is no weight, and filling in an equal share would imply an averaging
+that did not happen. Note `ensemble_mape` is only a fallback for the combined
+row and is used only when a single method was requested; with several methods
+the forecast-context rows are left blank rather than repeating one score
+against three different series.
 
 ## Plotting directly
 
 If you want figures without exporting, the functions in
 `horizon_forecaster.plotting` each draw onto and return a matplotlib `Axes`
 (or a `{label: Figure}` dict for the per-model variants) without calling
-`plt.show()`:
+`plt.show()`. They all accept the `{method: EnsembleResult}` dict directly:
 
 ```python
 from horizon_forecaster.plotting import plot_evaluation, plot_model_comparison
 
-plot_evaluation(results)                                       # actuals vs each model's test predictions
+plot_evaluation(results, forecaster.evaluate_ensemble)         # actuals vs each model's test predictions
 plot_model_comparison(results, forecaster.evaluate_ensemble)   # bar chart of per-model + ensemble MAPE
 ```
 
-Both accept the whole `{method: EnsembleResult}` dict. The line charts draw a
-single ensemble (the first method requested, labelled with the rule that was
-actually applied); the comparison bar chart shows one bar per method that was
-built and scored.
+The line charts draw only the **first** requested method — overlaying several
+combination rules on one time axis buries the per-model lines the chart exists
+to show. `plot_model_comparison` is the exception: comparing rules is exactly
+what a bar chart is for, so it draws one bar per method. Its bars are
+**test-window** MAPEs, not the validation scores the models were selected on.
 
 ## Important: the ensemble is not guaranteed to win
 
-A combined ensemble can score worse than the single best model — this is a real
-property of the method, not a bug. Trimming is more robust to it than static
-weights, since it discards a badly-behaved member on the specific periods where
-it misbehaves rather than applying one number across the whole horizon, but it
-is still not a guarantee. Always compare the ensemble's `mape` against each
-model's own `results[name].mape` before choosing which output to trust. Both a
-`final_ensemble_<method>` and a `final_best_model` CSV are exported for exactly
-this reason.
+A combined ensemble can score worse than the single best model — this is a
+real property of combination, not a bug. Always compare each ensemble's
+`.mape` against each model's own `results[name].mape` before choosing which
+output to trust. Both a `final_ensemble_<method>` and a `final_best_model` CSV
+are exported for exactly this reason.

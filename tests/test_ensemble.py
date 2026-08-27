@@ -5,6 +5,7 @@ import pytest
 from horizon_forecaster.evaluation.ensemble import (
     DEFAULT_ENSEMBLE_METHOD,
     ENSEMBLE_METHODS,
+    as_ensemble_dict,
     build_ensemble,
     build_ensembles,
 )
@@ -342,3 +343,43 @@ def test_build_ensembles_is_always_a_dict_even_for_one_method():
     )
     assert isinstance(results, dict)
     assert list(results) == ["trimmed"]
+
+
+# ---------- as_ensemble_dict ----------
+#
+# The shared normaliser plotting.py and exporters.py both route through. It
+# exists because two near-identical private copies drifted and shipped an
+# AttributeError, so its own behaviour is pinned here rather than only
+# exercised transitively through its consumers.
+
+def test_as_ensemble_dict_maps_none_to_an_empty_dict():
+    # None -> {} so consumers need no special case for "no ensemble asked for".
+    assert as_ensemble_dict(None) == {}
+
+
+def test_as_ensemble_dict_passes_a_dict_through_unchanged():
+    result = build_ensemble(
+        per_model_selection_mape={"a": 10.0, "b": 12.0},
+        per_model_predictions=_preds({"a": [1.0, 2.0], "b": [3.0, 4.0]}),
+        method="trimmed",
+    )
+    supplied = {"trimmed": result}
+    assert as_ensemble_dict(supplied) is supplied
+
+
+def test_as_ensemble_dict_keys_a_bare_result_by_the_REQUESTED_method():
+    """
+    A degraded trimmed run has method="trimmed" but rule_applied="mean".
+    The key must be the requested method: it is what names the export file
+    (forecast_final_ensemble_trimmed.csv), and keying by the rule that
+    happened to run would make the same request write different filenames
+    depending on how many models survived.
+    """
+    degraded = build_ensemble(
+        per_model_selection_mape={"a": 10.0, "b": 12.0},
+        per_model_predictions=_preds({"a": [1.0, 2.0], "b": [3.0, 4.0]}),
+        method="trimmed",
+    )
+    assert degraded.rule_applied == "mean" and degraded.degraded is True
+    assert list(as_ensemble_dict(degraded)) == ["trimmed"]
+    assert as_ensemble_dict(degraded)["trimmed"] is degraded

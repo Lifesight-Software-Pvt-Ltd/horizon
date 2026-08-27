@@ -182,7 +182,11 @@ class EvaluationResult:
             search (no explicit model_params override given), a list of
             every candidate tried, each as {"params": {...}, "mape": float}
             where that mape is the VALIDATION score, sorted best-to-worst.
-            None if an explicit override was used.
+            None if an explicit override was used -- and also None when a
+            grid search WAS attempted but every candidate failed on the
+            training window, so the first configured candidate was used
+            as an unselected fallback. Do not read `is None` as "an
+            override was given"; check `model_params` for that.
     """
 
     model_name: str
@@ -626,10 +630,14 @@ class HorizonForecaster:
             f"The resolved split leaves {split_description}, which is below the "
             f"minimum for {sorted(too_small)} "
             f"({', '.join(f'{n} needs {f}' for n, f in sorted(too_small.items()))}). "
-            f"Those models cannot be evaluated and will be reported in "
-            f"evaluate_errors; any remaining models run normally, and forecast() may "
-            f"still succeed for all of them since it refits on the full series. Use "
-            f"smaller validation_size/test_size, drop models via models=, or supply a "
+            f"Those models cannot be SELECTED on the validation window and will "
+            f"carry no validation MAPE, so they are excluded from any weighted "
+            f"ensemble and cannot be screened against mape_threshold. They may "
+            f"still be evaluated: the train+validation refit sees more rows than "
+            f"the training window alone, and forecast() refits on the full series "
+            f"-- any that do fail are reported in evaluate_errors, and the "
+            f"remaining models run normally either way. Use smaller "
+            f"validation_size/test_size, drop models via models=, or supply a "
             f"longer series.",
             stacklevel=3,
         )
@@ -1030,7 +1038,8 @@ class HorizonForecaster:
                 (Note: this is about fit/predict failing outright: a
                 model that fits fine but scores outside the ensemble's
                 MAPE threshold does NOT raise here -- see
-                evaluate_ensemble.rejected_models instead.)
+                evaluate_ensemble[method].rejected_models instead, since
+                exclusion is decided per combination method.)
         """
         results: Dict[str, EvaluationResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
@@ -1157,6 +1166,13 @@ class HorizonForecaster:
         _FORECAST_RANGE_TOLERANCE. This is model-agnostic: it catches an
         over-forecast regardless of which model produced it, including
         ones driven by auto-generated future independent values.
+
+        The two sides are checked independently -- a wildly oscillating
+        forecast can breach both, and reporting only the high side would
+        hide half of what went wrong. Note the low-side bound is only
+        defined for a strictly positive historical minimum: a series
+        containing a zero (sparse conversions, installs) has no
+        meaningful "this far below" multiple, so that check is skipped.
         """
         actuals = pd.to_numeric(self.raw_df[self.target_column], errors="coerce").dropna()
         if actuals.empty:
@@ -1181,7 +1197,7 @@ class HorizonForecaster:
                     f"is too long for the available history.",
                     stacklevel=3,
                 )
-            elif lower is not None and float(yhat.min()) < lower:
+            if lower is not None and float(yhat.min()) < lower:
                 warnings.warn(
                     f"{model_name}: forecast bottoms at {float(yhat.min()):,.0f}, more than "
                     f"{pct}% below the lowest value ever observed ({hist_min:,.0f}). "

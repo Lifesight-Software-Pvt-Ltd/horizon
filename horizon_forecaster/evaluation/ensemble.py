@@ -361,12 +361,22 @@ def _screen(
          become three, which is the median. That is a legitimate choice,
          but it should be a deliberate one.
 
-      2. A NaN selection MAPE, but ONLY for the weighted rules, which
-         cannot compute a weight from it. Trimming needs no MAPE at all,
-         so a model whose MAPE is undefined (typically because every
-         actual in the window was zero -- sparse conversions, installs)
-         still contributes to a trimmed combination. It genuinely learned
-         the series; only the metric broke.
+      2. A NaN selection MAPE, but ONLY for the weighted rules. For
+         'inverse_mape' that is arithmetic -- there is no 1 / NaN.
+         'equal' could weight such a member (it only reads the member
+         COUNT), and it is excluded on a different ground: a model with
+         no validation MAPE was never screened against mape_threshold
+         either, and the weighted rules hand every member a full,
+         untrimmed share of the result, so admitting an unvetted model
+         there lets it move the number with no check on it at all.
+
+         Trimming keeps it, because trimming itself bounds how far any
+         one member can move the result -- it discards the period's high
+         and low regardless of who they came from. So a model whose MAPE
+         is undefined (typically because every actual in the window was
+         zero -- sparse conversions, installs) still contributes to a
+         trimmed combination. It genuinely learned the series; only the
+         metric broke.
     """
     members: List[str] = []
     member_mapes: Dict[str, float] = {}
@@ -378,12 +388,15 @@ def _screen(
         if is_nan and method in WEIGHTING_STRATEGIES:
             rejected[model_name] = ThresholdRejectionError(
                 f"{model_name}'s validation MAPE is NaN (likely every actual in the "
-                f"validation window was zero), so the '{method}' rule cannot compute a "
-                f"weight for it. It would still be usable by the 'trimmed' rule, which "
-                f"needs no MAPE.",
+                f"validation window was zero), so it was never screened and the "
+                f"'{method}' rule cannot admit it to a full, untrimmed share of the "
+                f"result. It would still be usable by the 'trimmed' rule, which needs "
+                f"no MAPE and bounds any single member's influence itself.",
                 model_name=model_name,
                 mape_value=mape_value,
-                allowed_max=mape_threshold,
+                # Deliberately not passing allowed_max: this rejection is not a
+                # threshold breach, so echoing the threshold back would invite a
+                # reader to conclude the model scored above it.
             )
             continue
 

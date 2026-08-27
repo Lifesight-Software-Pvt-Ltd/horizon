@@ -9,7 +9,9 @@ interface in the library — every wrapper depends on it, and
 contract, never against any concrete model class directly.
 
 Exception contract (must be honored by every subclass):
-    fit()     may raise InsufficientDataError or ModelConvergenceError.
+    fit()     may raise ModelPredictionError (adapter-contract/shape
+              check, before any fitting is attempted -- the name is
+              historical), InsufficientDataError or ModelConvergenceError.
     predict() may raise ModelPredictionError.
     Both may let unexpected/unrelated exceptions propagate as-is — only
     wrap exceptions that are genuinely InsufficientData/Convergence/
@@ -58,12 +60,19 @@ class BaseModel(ABC):
         Args:
             train_df: training DataFrame, already shaped by the
                 corresponding data_adapter for this model.
-            target_column: name of the target/dependent variable column.
+            target_column: accepted for interface consistency only. Every
+                v1 wrapper reads the adapter's canonical "y" column and
+                ignores this argument -- passing another name does NOT
+                retarget the fit, it just fails the shape check below.
 
         Returns:
             self (to allow method chaining, e.g. model.fit(df, "y").predict(...)).
 
         Raises:
+            ModelPredictionError: if train_df is missing the columns the
+                adapter is contracted to supply ("ds"/"y"). Raised before
+                any fitting is attempted; the name is historical, so read
+                it as a shape/contract error rather than a prediction one.
             InsufficientDataError: if train_df does not have enough rows
                 for this model to train reliably.
             ModelConvergenceError: if the underlying library's fit
@@ -83,13 +92,16 @@ class BaseModel(ABC):
         Args:
             horizon: number of future periods to forecast (in the model's
                 configured frequency — days or weeks).
-            future_exog: optional DataFrame of future independent variable
-                values, already shaped by the data_adapter. If None, the
-                caller (forecaster.py) is responsible for having already
-                applied a future-exogenous-data strategy (carry_forward,
-                seasonal_naive, historical_average, etc.) before calling
-                predict — this method does not invent future exog data
-                itself.
+            future_exog: DataFrame of future independent variable values,
+                already shaped by the data_adapter and carrying at least
+                a "ds" column. REQUIRED in practice: every v1 wrapper
+                raises ModelPredictionError on None, because this method
+                does not invent future exog data itself — the caller
+                (forecaster.py) must have already applied a
+                future-exogenous-data strategy (carry_forward,
+                seasonal_naive, historical_average, etc.). It is typed
+                Optional only so the signature stays uniform with
+                callers that pass the value through positionally.
 
         Returns:
             DataFrame with, at minimum, columns ["ds", "yhat"] — one row
@@ -127,6 +139,16 @@ class BaseModel(ABC):
         """
         Update hyperparameters. Does not re-fit automatically — the
         caller must call fit() again after changing params.
+
+        CAVEAT: this reliably re-targets only the wrappers that read
+        self.params at fit time (Prophet, CatBoost). SARIMAXWrapper,
+        BayesianPyMCWrapper and NeuralProphetWrapper's `freq` snapshot
+        their hyperparameters into attributes in __init__, so a later
+        set_params() changes what get_params() reports without changing
+        what the next fit() actually uses. Construct a fresh wrapper
+        instead — which is what forecaster.py does on every fit, so this
+        never bites through the orchestrator. Unifying the two is
+        deferred past 1.0 because it moves fitting behaviour.
         """
         self.params.update(kwargs)
         return self

@@ -1081,7 +1081,7 @@ def test_evaluate_populates_ensemble_with_default_permissive_threshold():
     assert set(ensemble.combined.columns) == {"ds", "yhat"}
 
 
-def test_evaluate_ensemble_uses_configured_weighting_strategy():
+def test_evaluate_ensemble_uses_configured_ensemble_method():
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily",

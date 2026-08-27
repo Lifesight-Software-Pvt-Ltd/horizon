@@ -142,6 +142,3 @@ class BayesianPyMCAdapter(BaseAdapter):
                 df[col] = standardized[col].to_numpy()
 
         return df
-
-    # ---------- helpers ----------
-

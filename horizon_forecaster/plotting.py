@@ -292,7 +292,7 @@ def plot_forecast(
         ax.plot(
             ensemble.combined["ds"],
             ensemble.combined["yhat"],
-            label="ensemble forecast",
+            label=f"{_ensemble_label(ensemble)} forecast",
             color=_ENSEMBLE_COLOR,
             linestyle="--",
         )
@@ -458,6 +458,11 @@ def plot_forecast_per_model(
     figures: "Dict[str, Figure]" = {}
 
     def _figure(label, fc, is_ensemble):
+        # `label` names the rule that ACTUALLY ran for the ensemble figure,
+        # while the returned dict key stays the plain "ensemble" -- the key
+        # is a stable handle (and a filename in save_forecast_plots), the
+        # label is what a reader sees and must not call a degraded
+        # two-member mean "trimmed".
         fig, ax = plt.subplots(figsize=figsize)
         if history is not None:
             ax.plot(history[date_column], history[target_column], label="History", color=_HISTORY_COLOR)
@@ -475,7 +480,7 @@ def plot_forecast_per_model(
     for name, result in forecast_results.items():
         figures[name] = _figure(name, result.forecast, False)
     if ensemble is not None and ensemble.combined is not None:
-        figures["ensemble"] = _figure("ensemble", ensemble.combined, True)
+        figures["ensemble"] = _figure(_ensemble_label(ensemble), ensemble.combined, True)
 
     return figures
 

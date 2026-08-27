@@ -44,9 +44,11 @@ def mape(
     epsilon: float = 1e-9,
 ) -> MapeResult:
     """
-    Mean Absolute Percentage Error, with explicit handling for zero (or
-    near-zero) actuals — a common failure mode for MAPE on sparse daily
-    data (e.g. days with 0 installs/orders).
+    Mean Absolute Percentage Error, with explicit handling for zero
+    actuals — a common failure mode for MAPE on sparse daily data (e.g.
+    days with 0 installs/orders). The test is for an exact zero, not a
+    tolerance: a very small non-zero actual is kept and divided by, and
+    will produce a correspondingly enormous percentage error.
 
     Args:
         y_true: array-like of actual values.

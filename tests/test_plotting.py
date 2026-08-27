@@ -154,7 +154,8 @@ def test_plot_forecast_includes_history_and_ensemble():
     )
     labels = [ln.get_label() for ln in ax.get_lines()]
     assert "History" in labels
-    assert "ensemble forecast" in labels
+    # The forecast line names the rule that ran, matching the evaluation charts.
+    assert "ensemble (inverse_mape) forecast" in labels
     # history + 1 model + ensemble
     assert len(ax.get_lines()) == 3
 
@@ -296,9 +297,19 @@ def test_every_plot_entry_point_accepts_the_forecaster_dict():
     forecasts = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
     as_dict = {"trimmed": make_trimmed_ensemble()}
 
-    assert plot_evaluation(results, as_dict) is not None
-    assert plot_model_comparison(results, as_dict) is not None
-    assert plot_forecast(forecasts, ensemble=as_dict) is not None
+    # Assert the ensemble actually reached the chart, not merely that the
+    # call didn't raise: these functions always return an Axes, so
+    # `is not None` would still pass if the dict were silently dropped.
+    eval_ax = plot_evaluation(results, as_dict)
+    assert any("ensemble" in ln.get_label() for ln in eval_ax.get_lines())
+
+    forecast_ax = plot_forecast(forecasts, ensemble=as_dict)
+    assert any("ensemble" in ln.get_label() for ln in forecast_ax.get_lines())
+
+    # One bar per model, plus one for the ensemble.
+    comparison_ax = plot_model_comparison(results, as_dict)
+    assert len(comparison_ax.patches) == len(results) + 1
+
     assert "ensemble" in plot_evaluation_per_model(results, as_dict)
     assert "ensemble" in plot_forecast_per_model(forecasts, ensemble=as_dict)
 
@@ -326,5 +337,38 @@ def test_line_charts_label_the_rule_that_actually_ran():
 def test_weightless_ensemble_still_plots():
     """The default rule carries weights=None; nothing may assume a dict."""
     results = {"prophet": make_eval_result(5.0)}
-    assert plot_evaluation(results, make_trimmed_ensemble()) is not None
+    ax = plot_evaluation(results, make_trimmed_ensemble())
+    assert any("ensemble" in ln.get_label() for ln in ax.get_lines())
     assert "ensemble" in plot_evaluation_per_model(results, make_trimmed_ensemble())
+
+
+def test_forecast_charts_label_the_rule_that_actually_ran():
+    """
+    Same guarantee as the evaluation charts: a degraded two-member mean is a
+    materially weaker output than a five-member trimmed mean and must not be
+    drawn under the same name. The returned dict KEY stays the plain
+    "ensemble" -- it is a stable handle and a filename -- so only the drawn
+    label carries the rule.
+    """
+    forecasts = {"prophet": make_forecast_result()}
+    degraded = {"trimmed": make_trimmed_ensemble(degraded=True)}
+
+    ax = plot_forecast(forecasts, ensemble=degraded)
+    labels = [ln.get_label() for ln in ax.get_lines()]
+    assert any("(mean)" in lbl and "degraded" in lbl for lbl in labels)
+
+    figs = plot_forecast_per_model(forecasts, ensemble=degraded)
+    assert "ensemble" in figs
+    fig_labels = [ln.get_label() for ln in figs["ensemble"].axes[0].get_lines()]
+    assert any("(mean)" in lbl and "degraded" in lbl for lbl in fig_labels)
+
+
+def test_no_ensemble_note_is_shown_through_the_forecaster_dict():
+    """
+    The all-rejected run is when the "diagnosis only" warning matters most,
+    and it arrives as a dict like every other real run -- so the note must
+    survive normalisation, not just the bare-result path.
+    """
+    results = {"prophet": make_eval_result(5.0)}
+    ax = plot_evaluation(results, {"trimmed": make_ensemble(combined=False)})
+    assert _has_no_ensemble_note(ax)

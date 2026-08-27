@@ -147,17 +147,19 @@ prophet:
 # ProphetWrapper) and hardcodes verbose=False directly on the
 # CatBoostRegressor call. Putting either key in params too would collide
 # with those and raise "got multiple values for keyword argument" —
-# exactly the class of bug Prophet's random_seed had before it was
-# filtered out in Phase 2. Both live under wrapper_config instead, never
+# exactly the class of bug the explicit-constructor-argument convention
+# exists to prevent (see ProphetWrapper.__init__, which documents the
+# same reasoning). Both live under wrapper_config instead, never
 # under base_hyperparameters/hyperparameter_grid.
 catboost:
   daily:
     base_hyperparameters:
       loss_function: MAE
       # MAPE as CatBoost's own eval_metric, not just this project's
-      # external evaluation metric — keeps what the model itself
-      # optimizes/monitors during training consistent with how it's
-      # judged afterward by evaluate().
+      # external evaluation metric — keeps what the model MONITORS during
+      # training consistent with how it's judged afterward by evaluate().
+      # (loss_function above is what it actually optimizes; eval_metric
+      # only reports, and with no eval_set passed it is purely cosmetic.)
       eval_metric: MAPE
     hyperparameter_grid:
       - iterations: 500
@@ -385,7 +387,7 @@ catboost:
 sarimax:
   daily:
     base_hyperparameters:
-      alpha: 0.05                 # prediction-interval width (yhat_lower/upper)
+      alpha: 0.05                 # significance level for yhat_lower/upper (0.05 -> a 95% band)
       log_clip_headroom: 1.5      # explosion guard: cap log yhat at the anchor + this
       clip_anchor_quantile: 0.99  # anchor that cap on a high quantile, not the raw max
       bias_correction: true       # +sigma^2/2 lognormal lift; false = median (MAPE-optimal)
@@ -427,9 +429,10 @@ sarimax:
 # ---------------------------------------------------------------------------
 # NeuralProphet (torch / PyTorch Lightning). Phase 6, Part 2.
 #
-# Unlike sarimax, this DOES use the standard forecaster-level grid search --
-# the reference notebook already selected by held-out MAPE, which is exactly what
-# hyperparameter_grid does, so no self-tuning wrapper is needed.
+# This uses the standard forecaster-level grid search, like every other model
+# (sarimax included since 1.0) -- the reference notebook already selected by
+# held-out MAPE, which is exactly what hyperparameter_grid does, so no
+# self-tuning wrapper is needed.
 #
 # n_lags is fixed at 0 (no autoregression) in v1: NeuralProphet fixes
 # n_forecasts at construction while BaseModel is fit-once/predict-any-horizon,
@@ -449,11 +452,11 @@ sarimax:
 # the consistent outlier -- badly on a mid-series level shift (18.7% vs ~2%)
 # and on strong seasonality -- while the structural models fit those clean
 # signals near-perfectly. The cause was under-fitting: too few epochs (a
-# neural model trained by SGD needs more than 50-150 to converge) and too
+# neural model trained by SGD needs more than the old 50-100 to converge) and too
 # little trend flexibility to track a level shift. So the grid now spans a
 # middle learning rate (0.03) and higher epochs (150/300), and the trend gets
-# more changepoints (n_changepoints) placed slightly later in the history
-# (n_changepoints), while changepoints_range stays at its 0.8 default -- see the
+# more changepoints (n_changepoints), while changepoints_range stays at its
+# 0.8 default -- see the
 # inline note below for the 0.9 experiment that regressed and was reverted. The
 # grid selects the best by validation MAPE, so a setting
 # that overfits a given dataset simply won't be chosen. n_lags stays 0 (the

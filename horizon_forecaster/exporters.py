@@ -64,17 +64,27 @@ _SUMMARY_COLUMNS = [
 ]
 
 
-def build_final_forecast_table(ensemble: "Optional[EnsembleResult]") -> pd.DataFrame:
+def build_final_forecast_table(
+    ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]",
+) -> pd.DataFrame:
     """
     The final blended forecast as a ["ds", "yhat"] table.
 
+    Accepts the {method: EnsembleResult} dict a forecaster actually
+    produces, a single EnsembleResult, or None. Given several methods it
+    tables the FIRST one, matching plotting._primary_ensemble -- a single
+    two-column table cannot represent several rules at once, and
+    export_forecast_csvs() writes one file per method anyway rather than
+    relying on this choice.
+
     Returns an empty (header-only) DataFrame when no ensemble was formed
-    -- ensemble is None, or every model was rejected so ensemble.combined
-    is None -- so a caller always gets a well-shaped table.
+    -- ensemble is None or empty, or every model was rejected so
+    combined is None -- so a caller always gets a well-shaped table.
     """
-    if ensemble is None or ensemble.combined is None:
+    result = next(iter(as_ensemble_dict(ensemble).values()), None)
+    if result is None or result.combined is None:
         return pd.DataFrame(columns=_FINAL_COLUMNS)
-    return ensemble.combined[_FINAL_COLUMNS].reset_index(drop=True)
+    return result.combined[_FINAL_COLUMNS].reset_index(drop=True)
 
 
 def build_per_model_forecast_table(
@@ -211,8 +221,19 @@ def build_model_summary_table(
                 "status": status,
             })
 
-        scored = result.mape.value if result.mape is not None else ensemble_mape
-        if scored is not None:
+        # The scalar `ensemble_mape` fallback describes ONE combined series,
+        # so it is only unambiguous when one method was built. With several,
+        # stamping it on every method would report the same score against
+        # three materially different series -- and comparing the rules is
+        # exactly what this table is for. Leave those blank instead.
+        if result.mape is not None:
+            scored = result.mape.value
+        elif len(ensembles) == 1:
+            scored = ensemble_mape
+        else:
+            scored = None
+
+        if scored is not None or result.combined is not None:
             rows.append({
                 "model": "ensemble",
                 "validation_mape": None,
