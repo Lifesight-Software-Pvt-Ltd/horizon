@@ -32,7 +32,7 @@ comparable.
 |---|---|---|---|
 | `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. Can emit negative point forecasts on a low-level series — no output clamp is applied. |
 | `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
-| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)`, seasonal `(P, Q)` and the annual Fourier order all come from the shared grid; only `d` is derived from the data by an ADF test inside the wrapper. |
+| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)` and the annual Fourier order come from the shared grid, joined by seasonal `(P, Q)` at daily frequency (weekly disables the seasonal order, since an s=52 term is prohibitively slow, and leans on the Fourier terms instead); only `d` is derived from the data by an ADF test inside the wrapper. |
 | `neuralprophet` | NeuralProphet (torch) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
 | `bayesianpymc` | PyMC (NUTS/MCMC) | yes | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
@@ -89,8 +89,10 @@ behaviour.
 
 ## Installation
 
-Requires **Python 3.10–3.12** and a C/C++ toolchain (Prophet and PyMC compile
-at install/first use). The project is not yet on PyPI, so install from a clone:
+Requires **Python 3.10–3.13** and a C/C++ toolchain (Prophet and PyMC compile
+at install/first use; on 3.13 numpy is built from source too — see
+[`docs/installation.md`](docs/installation.md)). A PyPI release is coming; for
+now, install from a clone:
 
 ```bash
 git clone https://github.com/Lifesight-Software-Pvt-Ltd/horizon.git
@@ -164,7 +166,7 @@ supplying planned future driver values — in
 **validation** MAPE is at or below `mape_threshold`, using one or more
 combination rules. The default is a **trimmed mean**: per period, discard the
 highest and lowest member and average what remains. `inverse_mape` and `equal`
-weighting are still available and can be built alongside it — the models are
+weighting are also available and can be built alongside it — the models are
 already fitted by then, so extra rules are close to free.
 `evaluate_ensemble` / `forecast_ensemble` are a `Dict[str, EnsembleResult]`
 keyed by method, always a dict even for a single method. Excluded models are
@@ -193,7 +195,7 @@ run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
 `export_forecast()` writes, into one folder:
 
 - **CSVs** — one `final_ensemble_<method>` per combination rule, plus
-  `final_best_model`, `per_model`, `rejected` (per model *and* method), and
+  `final_best_model`, `per_model`, `rejected_models` (per model *and* method), and
   `model_summary` (validation MAPE, test MAPE, method, rule applied, weight and
   status).
 - **Plots** (unless disabled) — an overlay chart plus one dedicated figure per
@@ -216,25 +218,23 @@ shared contract:
   native `save()` / `load()`.
 
 Adding a model means writing that pair and adding one `MODEL_REGISTRY` entry —
-nothing in the orchestrator changes. A guiding rule enforced throughout the
-build: if a new model ever forces a change to the orchestrator's core logic,
-that signals a gap in the shared contract to fix in the contract, not a
-special-case in the orchestrator. All five current models were added without
-breaking that rule.
+nothing in the orchestrator changes. The rule that keeps it that way: if a new
+model forces a change to the orchestrator's core logic, that signals a gap in
+the shared contract, to be fixed in the contract rather than special-cased in
+the orchestrator. All five registered models satisfy it.
 
 ---
 
 ## Project status & roadmap
 
-**Version 1.0.0.** The API described here is the stable one: the model set, the
-three-way split, the combination rules, and the export/plot layer are all
-implemented and tested across daily and weekly data. Installation is still from
-a clone — there is no PyPI package yet (see [Installation](#installation)).
+**Version 1.0.0 — stable and ready to use.** The model set, the three-way
+split, the combination rules and the export/plot layer are implemented and
+tested across daily and weekly data, on Python 3.10 through 3.13. The API
+described here is the one you can build on; anything that changes it will come
+with a version bump and a changelog entry.
 
-1.0.0 is where the evaluation protocol was fixed: selection and reporting were
-separated into distinct windows, the trimmed mean became the default
-combination rule, and a SARIMAX trend bug that quietly collapsed undifferenced
-forecasts toward zero was corrected. `CHANGELOG.md` has the full account.
+Install from a clone today (see [Installation](#installation)); a PyPI release
+is next, and the publishing workflow is already in place for it.
 
 Known gaps, deliberately **not** in 1.0 and all candidates for future work:
 
@@ -249,12 +249,13 @@ Known gaps, deliberately **not** in 1.0 and all candidates for future work:
   nothing currently accounts for that.
 - **An error-diversity diagnostic.** The value of combining depends on members
   making *different* errors, which the library does not yet measure or report.
-- **Runnable example notebooks and a PyPI release** — a clean `pip install` +
-  Open-in-Colab only makes sense once the package is published.
+- **Runnable example notebooks.** A clean `pip install` plus an Open-in-Colab
+  badge is the form these should take, so they follow the PyPI release.
 
-A detailed, honest build log lives in [`docs/`](docs) (`build_log_phase*.md`),
-and every notable change — including the reasoning and the dead ends — is
-recorded in [`CHANGELOG.md`](CHANGELOG.md).
+The reasoning behind the design — the contracts, the per-model decisions, and
+the failure modes that produced them — is in
+[`docs/design_notes.md`](docs/design_notes.md); the release record is in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -265,18 +266,26 @@ recorded in [`CHANGELOG.md`](CHANGELOG.md).
 - [`docs/supported_models.md`](docs/supported_models.md) — per-model behaviour
 - [`docs/ensemble_methods.md`](docs/ensemble_methods.md) — combination rules & caveats
 - [`docs/future_exog.md`](docs/future_exog.md) — future-driver strategies
-- [`docs/build_log_phase*.md`](docs) — how and why the library was built
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — conventions and project status
+- [`docs/design_notes.md`](docs/design_notes.md) — why the library is built this way
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute, and what is in scope
 - [`CHANGELOG.md`](CHANGELOG.md) — full change history
 
 ---
 
 ## Contributing
 
-Conventions, the model-adding pattern, and current status are documented in
-[`CONTRIBUTING.md`](CONTRIBUTING.md). In short: every model follows the same
-adapter → wrapper → config → tests pattern, and each new model must pass through
+Contributions are welcome — bug fixes, new models, new combination rules or
+future-driver strategies. Please open an issue before a pull request for
+anything beyond a typo; [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the setup,
+the conventions, what is in scope and what is likely to be turned down, and
+[`docs/design_notes.md`](docs/design_notes.md) explains why the load-bearing
+decisions are what they are. In short: every model follows the same
+adapter → wrapper → config → tests pattern, and a new model must pass through
 the existing pipeline without modifying the orchestrator.
+
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Security issues go through
+[`SECURITY.md`](SECURITY.md), not the public issue tracker.
 
 ---
 

@@ -2,43 +2,55 @@
 
 ## Requirements
 
-- **Python 3.10, 3.11, or 3.12** (`requires-python = ">=3.10,<3.13"`). The
-  CI matrix runs all three. Attempting 3.13 fails at metadata resolution with
-  `requires a different Python: 3.13.x not in '<3.13,>=3.10'`.
-
-  The upper bound is **forced by NeuralProphet**, not chosen. Prophet,
-  statsmodels, CatBoost and PyMC all install cleanly on 3.13 (with numpy
-  2.x); `neuralprophet==0.8.0` declares `numpy>=1.25.0,<2.0.0`, and the
-  lowest numpy published for 3.13 is 2.1.0 — an unsatisfiable constraint, and
-  the reason this project pins `numpy==1.26.4` in the first place. Newer
-  NeuralProphet releases cap Python explicitly instead (0.9.0 requires
-  `<=3.12`; even `1.0.0rc10` requires `<3.13`), so no NeuralProphet release
-  currently supports 3.13 at all.
-
-  This bound therefore lifts when NeuralProphet ships a release that accepts
-  numpy 2 and declares 3.13 support — not before, and not by anything in this
-  repository.
+- **Python 3.10 through 3.13** (`requires-python = ">=3.10,<3.14"`). All four
+  are tested; the CI matrix is triggered manually by a maintainer, so see
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md) before relying on it for a change of
+  your own.
 - A working C/C++ toolchain for the heavier model backends — Prophet
   (cmdstanpy) and PyMC compile at install/first-use time. On most Linux and
   macOS setups this is already present; on Windows the Prophet install is
   smoothest under conda.
 
+### Python 3.13: slower to install, identical to run
+
+3.13 is fully supported — the test suite passes identically to 3.12, and a
+seeded five-model run matches it to two decimals on every per-model MAPE. But
+the install behaves differently, and it is worth knowing why before you wait
+through it.
+
+`neuralprophet==0.8.0` requires `numpy<2`, which is why this project pins
+`numpy==1.26.4`. numpy publishes no 3.13 wheel for its 1.x line, so on 3.13
+pip falls back to the source distribution and **compiles numpy**. Two
+consequences:
+
+- **The C toolchain is required, not merely helpful**, and the build adds
+  several minutes. Verified working on Linux x86-64 and macOS arm64. Every
+  other dependency installs as an ordinary 3.13 wheel.
+- **Linear algebra is slower**, because a source build links whatever BLAS
+  the system provides rather than the tuned one numpy bundles into its
+  wheels — roughly 3× on raw matmul and SVD, but only about 5% on a real
+  run, since the time here goes to Stan sampling, torch training and tree
+  building rather than large linear-algebra calls.
+
+Where you have the choice, **3.12 is the faster platform.** This all resolves
+if NeuralProphet ships a release accepting numpy 2, at which point 3.13 gets
+a normal wheel install like every other version.
+
 ### Google Colab
 
-Colab's **default** runtime tracks the latest Python and has moved to 3.13, so
-a plain `pip install` there now fails with the message above — including in
-notebooks that worked previously, since the notebook did not change but the
-default runtime underneath it did.
+Colab's default runtime is Python 3.13 and works as-is; the install just
+spends the extra minutes building numpy.
 
-Pin the runtime instead: **Runtime → Change runtime type → Runtime version →
-2026.07** (Python 3.12.13), then re-run the install. A pinned past runtime
-boots in 2–3 minutes rather than seconds, which is expected. Google retains
-each past runtime for one year after its release, so re-pin to the newest
-runtime still shipping Python 3.12 when 2026.07 lapses.
+To skip that wait and get the faster BLAS, pin the runtime instead:
+**Runtime → Change runtime type → Runtime version → 2026.07** (Python
+3.12.13). A pinned past runtime boots in 2–3 minutes rather than seconds,
+which is expected. Google retains each past runtime for one year after
+release, so re-pin to the newest one still shipping 3.12 when 2026.07
+lapses.
 
 ## Install from source
 
-The project is not yet published to PyPI, so install from a clone:
+A PyPI release is coming. For now, install from a clone:
 
 ```bash
 git clone https://github.com/Lifesight-Software-Pvt-Ltd/horizon.git
@@ -49,7 +61,7 @@ pip install -e .
 `pip install -e .` is an *editable* install: it symlinks the source tree, so
 your changes take effect without reinstalling. The runtime dependencies
 (pandas, numpy, prophet, neuralprophet, statsmodels, catboost, pymc,
-matplotlib, pyyaml) are pinned in `pyproject.toml` and installed
+matplotlib, pyyaml, setuptools) are pinned in `pyproject.toml` and installed
 automatically.
 
 ## Development install
@@ -90,4 +102,4 @@ load-bearing rather than cosmetic (both documented inline in
   transitive dependency (pytorch-lightning, via neuralprophet) imports at
   runtime.
 
-If you bump either, run the full CI matrix (3.10–3.12) before trusting it.
+If you bump either, run the full CI matrix (3.10–3.13) before trusting it.

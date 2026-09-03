@@ -53,6 +53,29 @@ forecaster = HorizonForecaster(
 worth doing to exclude `bayesianpymc` when you want a fast run, since its
 MCMC sampling is much slower than the others.
 
+### Skipping the grid search
+
+By default each model is tuned by a grid search scored on the validation
+window, which is where most of the runtime goes. `model_params` overrides that
+per model with hyperparameters of your own, and the search is skipped entirely
+for any model you name:
+
+```python
+forecaster = HorizonForecaster(
+    df,
+    date_column="date",
+    target_column="orders",
+    model_params={
+        "prophet": {"seasonality_mode": "additive"},
+        "catboost": {"iterations": 300, "depth": 6},
+    },
+)
+```
+
+Models you do not name are still tuned normally. This is the fast path when you
+already know what works for your series — and it is what the test suite uses to
+keep runs short.
+
 ### Sizing the split
 
 Windows are sized in **periods** by default. For `validation_size` and
@@ -130,8 +153,8 @@ future_ensembles = forecaster.forecast_ensemble  # Dict[str, EnsembleResult], sa
 ensembles screen and weight on the **validation** MAPE from hyperparameter
 selection — which `forecast()` has to perform anyway in order to know which
 parameters to fit with, so those scores come for free and are cached. It does
-**not** run `evaluate()` internally, so calling `forecast()` first is no longer
-more expensive than calling it second.
+**not** run `evaluate()` internally, so calling `forecast()` first costs no more
+than calling it second.
 
 If your forecast depends on independent columns, supply their planned future
 values; otherwise they are auto-generated from history and a warning is
@@ -212,8 +235,9 @@ print(paths)
 
 This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
-`per_model`, `rejected` and `model_summary`, and (unless `save_plots=False`)
-one forecast PNG per model plus an overlay.
+`per_model`, `rejected_models` and `model_summary`, and (unless
+`save_plots=False`) one forecast PNG per model, one for the ensemble, and an
+overlay.
 
 `model_summary` carries `validation_mape` and `mape` side by side, so the
 selection-vs-reported gap is visible per model. Its `ensemble_weight` column

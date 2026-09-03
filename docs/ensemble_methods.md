@@ -2,14 +2,13 @@
 
 How `HorizonForecaster` combines multiple models' predictions into one
 series. This is a reference for how to use and configure it; for the design
-decisions and how they were verified, see `docs/build_log_phase3-4-5.md`.
+decisions and how they were verified, see [`design_notes.md`](design_notes.md) §3.
 
 ## What it does
 
 `evaluate()` and `forecast()` already run every requested model
 independently and return a `Dict[str, EvaluationResult]`/
-`Dict[str, ForecastResult]` keyed by model name — that behavior is
-unchanged. On top of that, each call also builds a combined **ensemble**
+`Dict[str, ForecastResult]` keyed by model name. On top of that, each call also builds a combined **ensemble**
 prediction from whichever models are admitted, and exposes it as a side
 effect on the `HorizonForecaster` instance:
 
@@ -139,10 +138,10 @@ hyperparameters were selected. That selection has to happen anyway —
 `forecast()` cannot fit without knowing which parameters won — so the scores
 come for free and are cached, whether or not `evaluate()` was ever called.
 
-`forecast()` does **not** run `evaluate()` internally (before 1.0 it did,
-which additionally paid for a test-window prediction it then discarded), and
-there is no added-cost warning any more. The test-window MAPE that
-`evaluate()` reports is never used for screening or weighting.
+`forecast()` does **not** run `evaluate()` internally — it needs only the
+cached selection, not a test-window prediction it would discard. The
+test-window MAPE that `evaluate()` reports is never used for screening or
+weighting.
 
 ## Known limitation: the ensemble is not automatically better
 
@@ -172,9 +171,8 @@ This covers the ensemble *combination* logic only. The "plots + CSV" output
 side lives in `plotting.py` and `exporters.py`, which consume the
 `EnsembleResult` this doc describes. The ensemble logic itself is written
 generically against whatever is registered in `forecaster.py`'s
-`MODEL_REGISTRY`, and that generality has been confirmed in practice: SARIMAX,
-NeuralProphet and Bayesian PyMC were each added with **no changes to this
-module**. All five models are registered today.
+`MODEL_REGISTRY`: all five registered models feed it with **no model-specific
+code in this module**.
 
 Uncertainty bounds are deliberately an individual-model concept and are never
 propagated into a combined output: averaging confidence/credible intervals

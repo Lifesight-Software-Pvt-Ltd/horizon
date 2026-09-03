@@ -1,12 +1,22 @@
 name: Tests
+
+# Triggered manually from the Actions tab, not on push or pull request. The
+# suite fits real Prophet, CatBoost, SARIMAX, NeuralProphet and PyMC models and
+# takes roughly 25-60 minutes per Python version, so it is run deliberately
+# rather than on every commit. Contributors run it locally; a maintainer runs
+# the matrix as part of review. See CONTRIBUTING.md.
 on: workflow_dispatch
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # 3.13 builds numpy from source (neuralprophet pins numpy<2, which has
+        # no 3.13 wheel), so this job is slower than the others by design --
+        # see docs/installation.md.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

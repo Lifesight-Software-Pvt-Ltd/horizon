@@ -39,9 +39,8 @@ The adapter builds features from a fixed-reference trend index plus cyclical
 (sin/cos) seasonal encodings and calendar fields — every feature is computable
 from dates alone, with no dependence on the target's recent history. That is
 deliberate: it lets one batched `predict()` cover any horizon without a
-recursive per-step loop, and it replaced an earlier lag/rolling-feature design
-that failed badly across sudden level shifts on real data (see the Phase 3
-build log). Non-negative clipping is data-driven (only when the training target
+recursive per-step loop. The alternative — lag and rolling features — degrades
+badly across sudden level shifts on real data (see [`design_notes.md`](design_notes.md) §5). Non-negative clipping is data-driven (only when the training target
 was itself never negative). CatBoost-native `save()`/`load()`.
 
 ### sarimax

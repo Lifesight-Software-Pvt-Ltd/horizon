@@ -30,7 +30,7 @@ HorizonForecaster(
 | `historical_average` | **Season-aware** mean/median — by day-of-week (daily) or week-of-year (weekly), not one flat mean. | Drivers with a stable seasonal shape and no strong trend. |
 | `seasonal_naive` | The seasonal cycle repeated, **plus drift** (the fitted historical trend). Falls back to `carry_forward` under one full cycle of history. | Long horizons on drivers that are both seasonal and trending. |
 | `linear_trend` | A fitted trend line projected forward. | Steadily trending drivers (e.g. a spend ramp). |
-| `cycle` | Legacy: replays/tiles the trailing history (the pre-Phase-7 default). | Reproducing the old behaviour exactly. |
+| `cycle` | Replays/tiles the trailing history verbatim, and is exempt from the flag handling below. | Reproducing a naive seasonal repeat exactly. |
 
 All strategies are defined for **any horizon** — short ones take the tail,
 long ones tile — so the same choice works whether you forecast 7 periods or
@@ -89,5 +89,5 @@ model, where the assumed drivers can dominate the result.
   trend can't push a spend column negative; a driver that genuinely goes
   negative in history is left unclipped.
 - Out-of-range *clamping* (keeping a future value within the training range) is
-  handled by the model adapters, not here — the strategies stay
-  separation-clean.
+  handled by the SARIMAX and Bayesian PyMC adapters — the only two that
+  transform their exog — not here; the strategies stay separation-clean.
