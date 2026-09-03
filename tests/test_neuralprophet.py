@@ -32,6 +32,33 @@ FAST_PARAMS = {
     "weekly_seasonality": False,
     "daily_seasonality": False,
     "accelerator": "cpu",
+    # Load-bearing, and it mirrors what default_params.yaml sets for BOTH
+    # frequencies (asserted by test_data_adapter_neuralprophet.py).
+    #
+    # Metrics-on makes NeuralProphet attach a PyTorch Lightning logger, and
+    # that logger is a landmine whose blast radius depends on what else is
+    # installed in the environment. Measured by running this exact suite on
+    # two Colab images:
+    #
+    #   Python 3.12  omegaconf >= 2.2 rejects ConfigTrain's
+    #                loss_func: Union[str, _Loss, Callable] inside
+    #                save_hparams_to_yaml()      -> ConfigValueError
+    #   Python 3.13  the TensorBoard logger probes tf.io.gfile, importing
+    #                TensorFlow -> jax -> np.dtypes.StringDType, which does
+    #                not exist under the numpy 1.x this project pins
+    #
+    # Same trigger, different explosion, the same ten tests down in both.
+    # Neither reproduces on a machine lacking omegaconf >= 2.2 or
+    # TensorFlow, which is why this went unnoticed locally.
+    #
+    # The forecaster ALWAYS merges the YAML's collect_metrics=false on top
+    # of any model_params, so metrics-on is a configuration Horizon never
+    # ships. Driving the wrapper with it enabled was therefore testing a
+    # state that cannot occur in production, while importing a whole class
+    # of environmental fragility. (The integration test at the bottom of
+    # this file passed throughout for exactly this reason -- it goes via
+    # the forecaster, so it received the merge.)
+    "collect_metrics": False,
 }
 
 
