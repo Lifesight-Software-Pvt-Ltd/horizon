@@ -11,13 +11,16 @@ from horizon_forecaster.exceptions import (
     UnsupportedFrequencyError,
 )
 
+
 def test_base_exception_message_without_model_name():
     err = HorizonForecasterError("something went wrong")
     assert str(err) == "something went wrong"
 
+
 def test_base_exception_message_with_model_name():
     err = HorizonForecasterError("something went wrong", model_name="prophet")
     assert str(err) == "[prophet] something went wrong"
+
 
 def test_all_custom_exceptions_are_catchable_as_base():
     """
@@ -38,6 +41,7 @@ def test_all_custom_exceptions_are_catchable_as_base():
         with pytest.raises(HorizonForecasterError):
             raise exc
 
+
 def test_insufficient_data_error_carries_period_info():
     err = InsufficientDataError(
         "not enough history",
@@ -49,6 +53,7 @@ def test_insufficient_data_error_carries_period_info():
     assert err.required_periods == 104
     assert err.available_periods == 30
 
+
 def test_model_convergence_error_carries_original_exception():
     original = ValueError("singular matrix")
     err = ModelConvergenceError(
@@ -58,6 +63,7 @@ def test_model_convergence_error_carries_original_exception():
     )
     assert err.original_exception is original
     assert isinstance(err.original_exception, ValueError)
+
 
 def test_threshold_rejection_error_carries_mape_and_bounds():
     err = ThresholdRejectionError(
@@ -71,6 +77,7 @@ def test_threshold_rejection_error_carries_mape_and_bounds():
     assert err.allowed_min == 1.0
     assert err.allowed_max == 100.0
 
+
 def test_all_models_rejected_error_carries_rejected_list():
     rejected = [
         {"model_name": "prophet", "reason": "threshold", "mape": 120.0},
@@ -80,9 +87,11 @@ def test_all_models_rejected_error_carries_rejected_list():
     assert err.rejected_models == rejected
     assert len(err.rejected_models) == 2
 
+
 def test_all_models_rejected_error_defaults_to_empty_list():
     err = AllModelsRejectedError("no models survived")
     assert err.rejected_models == []
+
 
 def test_invalid_config_error_carries_param_context():
     err = InvalidConfigError(
@@ -94,6 +103,7 @@ def test_invalid_config_error_carries_param_context():
     assert err.param_name == "training_size"
     assert err.provided_value == 30
     assert err.valid_range == (50, 100)
+
 
 def test_unsupported_frequency_error_carries_provided_value():
     err = UnsupportedFrequencyError("only daily/weekly supported", provided_frequency="monthly")

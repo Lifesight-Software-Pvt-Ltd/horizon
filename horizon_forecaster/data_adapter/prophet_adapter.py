@@ -14,6 +14,7 @@ import pandas as pd
 from horizon_forecaster.data_adapter.base_adapter import BaseAdapter
 from horizon_forecaster.exceptions import InvalidConfigError
 
+
 class ProphetAdapter(BaseAdapter):
     """
     Reshapes raw user data into Prophet's expected ds/y format.

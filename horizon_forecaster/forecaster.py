@@ -15,9 +15,9 @@ the HorizonForecaster class docstring for why.
 
 Adding a new model to this orchestrator should mean adding ONE entry to
 MODEL_REGISTRY below, nothing else in this file. If a new model ever
-forces a change to this file's core logic beyond that, that's a signal
-a Phase 1/2 contract (BaseModel/BaseAdapter) had a gap -- fix the
-contract, don't special-case the orchestrator.
+forces a change to this file's core logic beyond that, that is a signal
+the shared contract (BaseModel/BaseAdapter) has a gap -- fix the
+contract, rather than special-casing the orchestrator.
 """
 
 import warnings
@@ -92,6 +92,7 @@ def _default_params() -> dict:
     with open(_CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
+
 # Warn once the requested horizon exceeds this fraction of the available
 # history. Deliberately strict: the previous rule only fired when the
 # horizon exceeded TWICE the entire history, so forecasting 100 weeks from
@@ -108,8 +109,7 @@ _HORIZON_WARNING_FRACTION = 0.5
 _FORECAST_RANGE_TOLERANCE = 0.5
 
 # Every model this orchestrator can run. Only models with a real
-# adapter/wrapper implementation belong here. SARIMAX landed in Phase 6
-# (Part 1), NeuralProphet in Part 2, and Bayesian PyMC in Part 3.
+# adapter/wrapper implementation belong here.
 MODEL_REGISTRY: Dict[str, dict] = {
     "prophet": {"adapter": ProphetAdapter, "wrapper": ProphetWrapper},
     "catboost": {"adapter": CatBoostAdapter, "wrapper": CatBoostWrapper},
@@ -117,6 +117,7 @@ MODEL_REGISTRY: Dict[str, dict] = {
     "neuralprophet": {"adapter": NeuralProphetAdapter, "wrapper": NeuralProphetWrapper},
     "bayesianpymc": {"adapter": BayesianPyMCAdapter, "wrapper": BayesianPyMCWrapper},
 }
+
 
 @dataclass
 class _Selection:
@@ -199,6 +200,7 @@ class EvaluationResult:
     fitted_model: BaseModel
     grid_search_summary: Optional[List[dict]] = None
 
+
 @dataclass
 class ForecastResult:
     """
@@ -223,6 +225,7 @@ class ForecastResult:
     horizon: int
     used_default_future_strategy: bool
     future_exog_used: Optional[pd.DataFrame] = None
+
 
 class HorizonForecaster:
     """
@@ -268,7 +271,7 @@ class HorizonForecaster:
             base_hyperparameters). A model with no entry (or if
             model_params is omitted entirely) uses its own grid search
             as normal -- this is independent per model.
-        mape_threshold: garbage filter (0.01-100, default 40), applied to
+        mape_threshold: degenerate-fit filter (0.01-100, default 40), applied to
             each model's VALIDATION MAPE. A model scoring above it is
             excluded from the combination and reported in
             rejected_models. Pass None to admit every model. Treat this
@@ -285,8 +288,8 @@ class HorizonForecaster:
             them; the models are already fitted by then, so extra rules
             are close to free. evaluate_ensemble/forecast_ensemble are
             keyed by method name in every case.
-        future_exog_strategy: how forecast() invents future values for the
-            independent columns when they aren't supplied (Phase 7). One of
+        future_exog_strategy: how forecast() generates future values for the
+            independent columns when they aren't supplied. One of
             future_exog.FUTURE_EXOG_STRATEGIES: "carry_forward" (default --
             hold the last value flat), "recent_average", "historical_average"
             (season-aware), "seasonal_naive" (seasonal cycle + drift),
@@ -370,7 +373,7 @@ class HorizonForecaster:
         self.mape_threshold = validate_mape_threshold(mape_threshold)
         self.ensemble_methods = self._validate_ensemble_methods(ensemble_method)
 
-        # Phase 7: future-exogenous-data strategy (how forecast() invents future
+        # Future-exogenous-data strategy (how forecast() generates future
         # driver values when they aren't supplied). Validated here like
         # ensemble_method; event_columns is validated against the surviving
         # independent columns below, once those are known.
@@ -390,7 +393,8 @@ class HorizonForecaster:
             )
         if not (isinstance(recent_average_window, int) and recent_average_window > 0):
             raise InvalidConfigError(
-                f"recent_average_window must be a positive integer (got {recent_average_window!r}).",
+                "recent_average_window must be a positive integer "
+                f"(got {recent_average_window!r}).",
                 param_name="recent_average_window",
                 provided_value=recent_average_window,
             )
@@ -415,9 +419,7 @@ class HorizonForecaster:
         # independent column) is a hard failure -- missing data is never
         # silently dropped or imputed. Done here, at construction, alongside
         # the other dataset-level validation.
-        validate_no_missing_values(
-            cleaned_df, date_column, target_column, self.independent_columns
-        )
+        validate_no_missing_values(cleaned_df, date_column, target_column, self.independent_columns)
 
         # event_columns (explicit 0/1 flags for the future-exog strategy). None
         # means "auto-detect flags"; a list means "these exact columns are the
@@ -427,7 +429,8 @@ class HorizonForecaster:
             self.event_columns: Optional[List[str]] = None
         else:
             unknown_events = [
-                c for c in event_columns
+                c
+                for c in event_columns
                 if c not in self.independent_columns and c not in dropped_columns
             ]
             if unknown_events:
@@ -487,7 +490,10 @@ class HorizonForecaster:
             if use_grid_search:
                 self._selected_hyperparameters[model_name] = None
             else:
-                self._selected_hyperparameters[model_name] = {**base_hyperparameters, **(override or {})}
+                self._selected_hyperparameters[model_name] = {
+                    **base_hyperparameters,
+                    **(override or {}),
+                }
 
         # Selection (winning params + validation MAPE) is cached separately
         # from the full EvaluationResult, because forecast() needs only the
@@ -499,7 +505,7 @@ class HorizonForecaster:
         self._forecast_models: Dict[str, BaseModel] = {}
         self._forecast_adapters: Dict[str, BaseAdapter] = {}
 
-        # Phase 7: the future independent values actually used by the most
+        # The future independent values actually used by the most
         # recent forecast() (supplied columns + strategy-generated columns),
         # exposed for inspection. None until forecast() runs with exog.
         self.future_exog_used: Optional[pd.DataFrame] = None
@@ -675,8 +681,8 @@ class HorizonForecaster:
 
         Critical detail: the scoring window is shaped via
         adapter.transform_future(), NOT adapter.transform_train().
-        Using transform_train() on the scoring window alone (the Phase 2
-        Prophet-only approach) happened to work for ProphetAdapter,
+        Using transform_train() on the scoring window alone happened to
+        work for ProphetAdapter,
         which is a stateless pure function -- but it would be actively
         WRONG for an adapter that carries state across the train/future
         boundary like CatBoostAdapter: transform_train() resets the
@@ -762,7 +768,9 @@ class HorizonForecaster:
             )
         return self._refit_cache[model_name]
 
-    def _fit_predict_mape(self, model_name: str, params: dict, adapted_fit, adapted_score_features, y_score):
+    def _fit_predict_mape(
+        self, model_name: str, params: dict, adapted_fit, adapted_score_features, y_score
+    ):
         """Fit one model with one hyperparameter set, predict the scoring window, score it."""
         WrapperClass = MODEL_REGISTRY[model_name]["wrapper"]
         wrapper_config = self._configs[model_name]["wrapper_config"]
@@ -774,16 +782,20 @@ class HorizonForecaster:
         )
         model.fit(adapted_fit, target_column="y")
 
-        forecast_df = model.predict(horizon=len(adapted_score_features), future_exog=adapted_score_features)
+        forecast_df = model.predict(
+            horizon=len(adapted_score_features), future_exog=adapted_score_features
+        )
         mape_result = mape(y_score, forecast_df["yhat"].values)
         return model, forecast_df, mape_result
 
     def _build_test_predictions(self, adapted_test_features, y_test, forecast_df) -> pd.DataFrame:
-        test_predictions = pd.DataFrame({
-            "ds": adapted_test_features["ds"].reset_index(drop=True),
-            "y": y_test,
-            "yhat": forecast_df["yhat"].values,
-        })
+        test_predictions = pd.DataFrame(
+            {
+                "ds": adapted_test_features["ds"].reset_index(drop=True),
+                "y": y_test,
+                "yhat": forecast_df["yhat"].values,
+            }
+        )
         if "yhat_lower" in forecast_df.columns:
             test_predictions["yhat_lower"] = forecast_df["yhat_lower"].values
             test_predictions["yhat_upper"] = forecast_df["yhat_upper"].values
@@ -813,7 +825,11 @@ class HorizonForecaster:
             full_params = {**base, **grid_entry}
             try:
                 model, forecast_df, mape_result = self._fit_predict_mape(
-                    model_name, full_params, adapted_train, adapted_validation_features, y_validation
+                    model_name,
+                    full_params,
+                    adapted_train,
+                    adapted_validation_features,
+                    y_validation,
                 )
             except HorizonForecasterError as e:
                 failures[str(grid_entry)] = f"{type(e).__name__}: {e}"
@@ -821,9 +837,7 @@ class HorizonForecaster:
                 continue
             candidates.append((full_params, model, forecast_df, mape_result))
 
-        if not candidates and all(
-            isinstance(e, InsufficientDataError) for e in failure_exceptions
-        ):
+        if not candidates and all(isinstance(e, InsufficientDataError) for e in failure_exceptions):
             # Every candidate failed because the TRAINING WINDOW is below
             # this model's row floor. That is not a hyperparameter problem
             # -- no choice of parameters would have helped -- and, crucially,
@@ -836,10 +850,10 @@ class HorizonForecaster:
             #
             # So fall back to the first grid entry rather than failing the
             # model outright. That entry is not arbitrary: per this config's
-            # own header, the leading candidates are the combination the
-            # project owner has used and found to work in practice, which
-            # makes it the right thing to reach for when there is no
-            # evidence to choose on. The validation MAPE is recorded as NaN,
+            # own header, the leading candidates are the settings
+            # validated on real data, which makes them the right thing to
+            # reach for when there is no evidence to choose on. The
+            # validation MAPE is recorded as NaN,
             # which is the honest description -- nothing was validated --
             # and downstream that means the trimmed rule still uses the
             # model while the weighted rules exclude it.
@@ -948,8 +962,11 @@ class HorizonForecaster:
                     model_name
                 )
                 _model, _forecast_df, validation_mape = self._fit_predict_mape(
-                    model_name, explicit_params, adapted_train,
-                    adapted_validation_features, y_validation,
+                    model_name,
+                    explicit_params,
+                    adapted_train,
+                    adapted_validation_features,
+                    y_validation,
                 )
             except HorizonForecasterError as e:
                 # With explicit params there is nothing to SELECT -- this fit
@@ -1056,8 +1073,7 @@ class HorizonForecaster:
                 # preserve the real type/message (via original_exception) so it
                 # stays debuggable rather than silently swallowed.
                 errors[model_name] = ModelConvergenceError(
-                    f"{model_name} failed with an unexpected "
-                    f"{type(e).__name__}: {e}",
+                    f"{model_name} failed with an unexpected " f"{type(e).__name__}: {e}",
                     model_name=model_name,
                     original_exception=e,
                 )
@@ -1079,9 +1095,7 @@ class HorizonForecaster:
         first_result = next(iter(results.values()))
         self.evaluate_ensemble = build_ensembles(
             methods=self.ensemble_methods,
-            per_model_selection_mape={
-                name: r.validation_mape.value for name, r in results.items()
-            },
+            per_model_selection_mape={name: r.validation_mape.value for name, r in results.items()},
             per_model_predictions={name: r.test_predictions for name, r in results.items()},
             mape_threshold=self.mape_threshold,
             actuals=first_result.test_predictions[["ds", "y"]],
@@ -1145,7 +1159,9 @@ class HorizonForecaster:
         # agnostically, in forecast() (see _resolve_future_exog there) and
         # passed in, so every model sees the same assumed future drivers.
         future_exog = adapter.transform_future(future_dates, future_independent_data)
-        forecast_df = self._forecast_models[model_name].predict(horizon=horizon, future_exog=future_exog)
+        forecast_df = self._forecast_models[model_name].predict(
+            horizon=horizon, future_exog=future_exog
+        )
 
         return ForecastResult(
             model_name=self._forecast_models[model_name].model_name,
@@ -1283,14 +1299,18 @@ class HorizonForecaster:
         for model_name in self.models:
             try:
                 results[model_name] = self._forecast_single_model(
-                    model_name, horizon, resolved_exog, future_dates, used_default, self.future_exog_used
+                    model_name,
+                    horizon,
+                    resolved_exog,
+                    future_dates,
+                    used_default,
+                    self.future_exog_used,
                 )
             except HorizonForecasterError as e:
                 errors[model_name] = e
             except Exception as e:  # noqa: BLE001 -- isolate any model failure; see evaluate()
                 errors[model_name] = ModelConvergenceError(
-                    f"{model_name} failed with an unexpected "
-                    f"{type(e).__name__}: {e}",
+                    f"{model_name} failed with an unexpected " f"{type(e).__name__}: {e}",
                     model_name=model_name,
                     original_exception=e,
                 )
@@ -1312,8 +1332,7 @@ class HorizonForecaster:
         # already cached. `actuals=None` because no ground truth for the
         # future exists yet, so no ensemble MAPE is computed.
         selection_mape = {
-            name: self._selection_cache[name].validation_mape.value
-            for name in results
+            name: self._selection_cache[name].validation_mape.value for name in results
         }
         self.forecast_ensemble = build_ensembles(
             methods=self.ensemble_methods,
@@ -1328,7 +1347,7 @@ class HorizonForecaster:
     def _resolve_future_exog(self, horizon, future_dates, supplied):
         """
         Resolve the future independent values for this forecast, once and
-        model-agnostically (Phase 7). Delegates to future_exog.resolve_future_exog, which
+        model-agnostically. Delegates to future_exog.resolve_future_exog, which
         honours PARTIAL FILL (supplied columns kept, the rest generated via
         self.future_exog_strategy) and type-aware flag handling.
 

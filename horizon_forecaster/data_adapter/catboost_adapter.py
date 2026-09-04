@@ -8,7 +8,7 @@ be engineered here as explicit columns.
 
 --- Redesigned: lag/rolling features removed (real accuracy finding) ---
 
-The original version of this adapter (Phase 3) engineered lag(1/2/3/7/14)
+The original version of this adapter engineered lag(1/2/3/7/14)
 and rolling-window(7/14) features from the target's own history. Because
 CatBoostWrapper.predict() is a single batched call (not a per-step
 recursive loop), those features had to be "frozen" once at the end of
@@ -18,12 +18,12 @@ horizon (the "direct" multi-horizon strategy).
 Real-dataset testing surfaced a serious consequence of that design: on a
 144-day held-out test window, CatBoost's MAPE was 52.6% in the first half
 of the window and 27.3% in the second half — and a targeted breakdown
-showed December_Dip days (a known, flagged demand-drop period in the
-source data) at 67-90% MAPE, far above the ~35-40% baseline on ordinary
-days. Root cause: a frozen snapshot of "recent history" has no way to
+showed a known, flagged demand-drop period in the source data at
+67-90% MAPE, far above the ~35-40% baseline on ordinary days. Root
+cause: a frozen snapshot of "recent history" has no way to
 see a sudden target level-shift (a promotional spike or a post-holiday
 dip) coming, and keeps predicting the pre-shift baseline for the entire
-horizon. A separately-built, dedicated CatBoost notebook against the
+horizon. A separately-built, dedicated CatBoost pipeline against the
 same dataset — using an explicit trend index and cyclical (sin/cos)
 seasonality instead of lag/rolling features — achieved ~16% MAPE with no
 such failure mode, because none of ITS features depend on the target's
@@ -59,6 +59,7 @@ from horizon_forecaster.exceptions import InvalidConfigError
 
 _YEARLY_PERIOD_DAYS = 365.25
 _YEARLY_PERIOD_WEEKS = 52.0
+
 
 class CatBoostAdapter(BaseAdapter):
     """
@@ -180,4 +181,3 @@ class CatBoostAdapter(BaseAdapter):
             df["monthly_cos"] = np.cos(2 * np.pi * ds.dt.day / 30.5)
 
         return df
-

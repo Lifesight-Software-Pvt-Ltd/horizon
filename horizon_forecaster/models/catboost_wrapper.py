@@ -18,6 +18,7 @@ from horizon_forecaster.exceptions import (
 )
 from horizon_forecaster.models.base import BaseModel
 
+
 class CatBoostWrapper(BaseModel):
     """
     Wraps CatBoostRegressor to conform to the BaseModel contract.
@@ -34,7 +35,7 @@ class CatBoostWrapper(BaseModel):
     CatBoostAdapter's calendar fields (day_of_week, month, quarter,
     year, ...) are trained as plain numeric alongside their cyclical
     sin/cos counterparts. This mirrors a real, independently verified
-    working reference (a dedicated CatBoost notebook against real data,
+    working reference (a dedicated CatBoost pipeline against real data,
     ~16% MAPE) that used the same kind of feature set with no explicit
     categorical designation — CatBoost's target-statistics encoding for
     categoricals wasn't shown to help on real data, so this deliberately
@@ -54,9 +55,9 @@ class CatBoostWrapper(BaseModel):
     the model *some* signal to key its trend-related splits on, but this
     does not fully remove the underlying limitation — a tree still
     cannot output a leaf value it never saw in training, no matter what
-    feature drives the split. Documented here as a real, load-bearing
-    finding for Phase 4's ensemble weighting to be aware of, not
-    silently absorbed.
+    feature drives the split. Documented here as a real,
+    load-bearing limitation for the ensemble weighting to account for,
+    not silently absorbed.
 
     Non-negative predictions: if every target value seen during fit()
     was itself non-negative (the common case for revenue/orders/counts

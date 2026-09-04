@@ -8,12 +8,14 @@ from horizon_forecaster.exceptions import InvalidConfigError
 
 def make_raw(n=40, freq="D"):
     rng = np.random.default_rng(0)
-    return pd.DataFrame({
-        "date": pd.date_range("2022-01-01", periods=n, freq=freq),
-        "orders": np.arange(n) + 50.0,
-        "spend": np.abs(rng.normal(100, 20, n)) + 1.0,
-        "promo": rng.integers(0, 2, n),
-    })
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2022-01-01", periods=n, freq=freq),
+            "orders": np.arange(n) + 50.0,
+            "spend": np.abs(rng.normal(100, 20, n)) + 1.0,
+            "promo": rng.integers(0, 2, n),
+        }
+    )
 
 
 def test_transform_train_renames_to_ds_y_and_keeps_regressors():
@@ -103,6 +105,6 @@ def test_collect_metrics_is_disabled_for_every_frequency():
 
     assert set(neuralprophet) >= {"daily", "weekly"}
     for frequency, block in neuralprophet.items():
-        assert block["base_hyperparameters"]["collect_metrics"] is False, (
-            f"{frequency} must disable collect_metrics, or NeuralProphet cannot fit"
-        )
+        assert (
+            block["base_hyperparameters"]["collect_metrics"] is False
+        ), f"{frequency} must disable collect_metrics, or NeuralProphet cannot fit"

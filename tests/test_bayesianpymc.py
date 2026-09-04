@@ -1,5 +1,5 @@
 """
-Tests for the Bayesian PyMC model (Phase 6, Part 3).
+Tests for the Bayesian PyMC model.
 
 Split into three tiers so the fast, deterministic logic is always covered
 even where the heavy dependency is absent:
@@ -10,7 +10,7 @@ even where the heavy dependency is absent:
    rows). These exercise everything up to, but not including, sampling, so
    they need no pymc either.
 3. Real-sampling integration tests -- a genuine (tiny) NUTS run, guarded by
-   importorskip("pymc"). These are the local/CI gate; they confirm the
+   importorskip("pymc"). They confirm the
    fit -> predict -> back-transform path, the credible band, save/load, and
    end-to-end wiring through HorizonForecaster.
 """
@@ -30,27 +30,30 @@ from horizon_forecaster.exceptions import (
 from horizon_forecaster.forecaster import MODEL_REGISTRY
 from horizon_forecaster.models.bayesianpymc_wrapper import BayesianPyMCWrapper
 
-
 # --------------------------------------------------------------------------
 # fixtures
 # --------------------------------------------------------------------------
+
 
 def make_raw(n=60, freq="D"):
     rng = np.random.default_rng(0)
     dates = pd.date_range("2022-01-01", periods=n, freq=freq)
     trend = np.arange(n) * 1.5 + 100.0
     season = 10.0 * np.sin(2 * np.pi * np.arange(n) / 7.0)
-    return pd.DataFrame({
-        "date": dates,
-        "orders": trend + season + rng.normal(0, 3, n),
-        "spend": np.abs(rng.normal(100, 20, n)) + 1.0,   # continuous driver
-        "promo": rng.integers(0, 2, n),                   # binary flag
-    })
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "orders": trend + season + rng.normal(0, 3, n),
+            "spend": np.abs(rng.normal(100, 20, n)) + 1.0,  # continuous driver
+            "promo": rng.integers(0, 2, n),  # binary flag
+        }
+    )
 
 
 # --------------------------------------------------------------------------
 # 1. adapter
 # --------------------------------------------------------------------------
+
 
 def test_adapter_requires_valid_frequency():
     with pytest.raises(InvalidConfigError):
@@ -100,8 +103,10 @@ def test_adapter_future_requires_independent_df_when_declared():
 def test_adapter_future_before_train_errors():
     adapter = BayesianPyMCAdapter("date", "orders", ["spend"], "daily")
     with pytest.raises(InvalidConfigError):
-        adapter.transform_future(pd.Series(pd.date_range("2022-04-01", periods=3)),
-                                 pd.DataFrame({"spend": [1.0, 2.0, 3.0]}))
+        adapter.transform_future(
+            pd.Series(pd.date_range("2022-04-01", periods=3)),
+            pd.DataFrame({"spend": [1.0, 2.0, 3.0]}),
+        )
 
 
 def test_adapter_missing_column_errors():
@@ -120,6 +125,7 @@ def test_adapter_no_independents_ok():
 # 2. wrapper geometry & guards (no sampling)
 # --------------------------------------------------------------------------
 
+
 def _geom_wrapper(frequency="daily", n_fourier=4, use_short=None):
     w = BayesianPyMCWrapper(frequency=frequency, params={"n_fourier": n_fourier})
     if use_short is not None:
@@ -132,7 +138,7 @@ def test_fourier_basis_shape_and_layout():
     w = _geom_wrapper(n_fourier=3)
     ds = pd.Series(pd.date_range("2022-01-01", periods=10, freq="D"))
     ff_long, ff_short = w._fourier_terms(ds)
-    assert ff_long.shape == (10, 6)          # 2 * n_fourier
+    assert ff_long.shape == (10, 6)  # 2 * n_fourier
     assert ff_short is not None and ff_short.shape == (10, 6)
     # first columns are the cosines; at day 0 all cosines == 1, all sines == 0
     assert np.allclose(ff_long[0, :3], 1.0)
@@ -150,8 +156,8 @@ def test_time_steps_units_by_frequency():
     ds = pd.Series(pd.date_range("2022-01-01", periods=3, freq="7D"))
     w_daily = _geom_wrapper(frequency="daily")
     w_weekly = _geom_wrapper(frequency="weekly")
-    assert np.allclose(w_daily._time_steps(ds), [0, 7, 14])      # days
-    assert np.allclose(w_weekly._time_steps(ds), [0, 1, 2])       # weeks
+    assert np.allclose(w_daily._time_steps(ds), [0, 7, 14])  # days
+    assert np.allclose(w_weekly._time_steps(ds), [0, 1, 2])  # weeks
 
 
 def test_fit_requires_ds_and_y():
@@ -162,10 +168,12 @@ def test_fit_requires_ds_and_y():
 
 def test_fit_too_few_rows_raises_insufficient():
     w = BayesianPyMCWrapper(frequency="daily", min_rows_required=35)
-    tiny = pd.DataFrame({
-        "ds": pd.date_range("2022-01-01", periods=5, freq="D"),
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0],
-    })
+    tiny = pd.DataFrame(
+        {
+            "ds": pd.date_range("2022-01-01", periods=5, freq="D"),
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
     with pytest.raises(InsufficientDataError):
         w.fit(tiny)
 
@@ -173,12 +181,15 @@ def test_fit_too_few_rows_raises_insufficient():
 def test_predict_before_fit_raises():
     w = BayesianPyMCWrapper(frequency="daily")
     with pytest.raises(ModelPredictionError):
-        w.predict(horizon=3, future_exog=pd.DataFrame({"ds": pd.date_range("2022-01-01", periods=3)}))
+        w.predict(
+            horizon=3, future_exog=pd.DataFrame({"ds": pd.date_range("2022-01-01", periods=3)})
+        )
 
 
 # --------------------------------------------------------------------------
 # registry / config wiring (no sampling)
 # --------------------------------------------------------------------------
+
 
 def test_registered_in_model_registry():
     assert "bayesianpymc" in MODEL_REGISTRY
@@ -203,7 +214,7 @@ def test_config_has_both_frequencies():
 # 3. real sampling integration (local/CI gate)
 # --------------------------------------------------------------------------
 
-pytest.importorskip("pymc", reason="pymc not installed; sampling tests are a local/CI gate")
+pytest.importorskip("pymc", reason="pymc is not installed; sampling tests are skipped")
 
 # Tiny sampler settings: correctness of the plumbing, not posterior quality.
 _FAST = {"draws": 80, "tune": 80, "chains": 1, "n_fourier": 2}

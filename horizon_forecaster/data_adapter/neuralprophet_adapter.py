@@ -66,4 +66,3 @@ class NeuralProphetAdapter(BaseAdapter):
                 df[col] = future_independent_df[col].reset_index(drop=True)
 
         return df
-

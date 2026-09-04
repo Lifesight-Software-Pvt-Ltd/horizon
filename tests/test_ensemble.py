@@ -24,6 +24,7 @@ def _preds(values_by_model, n=None):
 
 # ---------- weighting math ----------
 
+
 def test_inverse_mape_weighting_favors_lower_mape_model():
     result = build_ensemble(
         per_model_selection_mape={"a": 10.0, "b": 30.0},
@@ -73,6 +74,7 @@ def test_unknown_method_raises_value_error():
 
 # ---------- the trimmed rule ----------
 
+
 def test_trimmed_is_the_default_method():
     result = build_ensemble(
         per_model_selection_mape={"a": 10.0, "b": 20.0, "c": 30.0},
@@ -86,10 +88,15 @@ def test_trimmed_discards_the_high_and_low_member_per_period():
     # three all sit on the truth. Trimming should land exactly on it.
     result = build_ensemble(
         per_model_selection_mape={n: 10.0 for n in ("lo", "a", "b", "c", "hi")},
-        per_model_predictions=_preds({
-            "lo": [1.0, 1.0], "a": [10.0, 10.0], "b": [12.0, 12.0],
-            "c": [14.0, 14.0], "hi": [900.0, 900.0],
-        }),
+        per_model_predictions=_preds(
+            {
+                "lo": [1.0, 1.0],
+                "a": [10.0, 10.0],
+                "b": [12.0, 12.0],
+                "c": [14.0, 14.0],
+                "hi": [900.0, 900.0],
+            }
+        ),
         method="trimmed",
     )
     assert result.combined["yhat"].tolist() == [12.0, 12.0]
@@ -111,9 +118,14 @@ def test_trimmed_carries_no_weights():
 def test_four_members_is_named_median_not_trimmed():
     result = build_ensemble(
         per_model_selection_mape={n: 10.0 for n in ("a", "b", "c", "d")},
-        per_model_predictions=_preds({
-            "a": [1.0, 1.0], "b": [2.0, 2.0], "c": [4.0, 4.0], "d": [100.0, 100.0],
-        }),
+        per_model_predictions=_preds(
+            {
+                "a": [1.0, 1.0],
+                "b": [2.0, 2.0],
+                "c": [4.0, 4.0],
+                "d": [100.0, 100.0],
+            }
+        ),
         method="trimmed",
     )
     assert result.rule_applied == "median"
@@ -124,9 +136,13 @@ def test_four_members_is_named_median_not_trimmed():
 def test_trim_shares_identify_the_misbehaving_member():
     result = build_ensemble(
         per_model_selection_mape={n: 10.0 for n in ("a", "b", "runaway")},
-        per_model_predictions=_preds({
-            "a": [10.0, 10.0], "b": [11.0, 11.0], "runaway": [999.0, 999.0],
-        }),
+        per_model_predictions=_preds(
+            {
+                "a": [10.0, 10.0],
+                "b": [11.0, 11.0],
+                "runaway": [999.0, 999.0],
+            }
+        ),
         method="trimmed",
     )
     shares = result.trim_shares.set_index("model")
@@ -136,6 +152,7 @@ def test_trim_shares_identify_the_misbehaving_member():
 
 
 # ---------- the degradation ladder ----------
+
 
 def test_three_members_still_trims():
     result = build_ensemble(
@@ -199,6 +216,7 @@ def test_weighted_rules_never_report_degraded():
 
 # ---------- screening ----------
 
+
 def test_model_above_threshold_is_rejected():
     result = build_ensemble(
         per_model_selection_mape={"good": 5.0, "bad": 90.0},
@@ -247,15 +265,20 @@ def test_threshold_screening_can_degrade_the_trimmed_rule():
 
 # ---------- NaN selection MAPE ----------
 
+
 def test_nan_mape_model_is_kept_by_the_trimmed_rule():
     # A model whose MAPE is undefined (every actual in the window was zero)
     # genuinely learned the series -- only the metric broke. Trimming needs
     # no MAPE, so it should still contribute.
     result = build_ensemble(
         per_model_selection_mape={"nan_model": float("nan"), "b": 10.0, "c": 12.0},
-        per_model_predictions=_preds({
-            "nan_model": [1.0, 1.0], "b": [2.0, 2.0], "c": [3.0, 3.0],
-        }),
+        per_model_predictions=_preds(
+            {
+                "nan_model": [1.0, 1.0],
+                "b": [2.0, 2.0],
+                "c": [3.0, 3.0],
+            }
+        ),
         method="trimmed",
     )
     assert "nan_model" in result.members
@@ -274,6 +297,7 @@ def test_nan_mape_model_is_rejected_by_weighted_rules():
 
 # ---------- alignment ----------
 
+
 def test_misaligned_ds_between_models_raises_value_error():
     a = pd.DataFrame({"ds": pd.date_range("2023-01-01", periods=2), "yhat": [1.0, 2.0]})
     b = pd.DataFrame({"ds": pd.date_range("2023-06-01", periods=2), "yhat": [3.0, 4.0]})
@@ -286,6 +310,7 @@ def test_misaligned_ds_between_models_raises_value_error():
 
 
 # ---------- ensemble scoring ----------
+
 
 def test_ensemble_mape_is_computed_when_actuals_provided():
     ds = _ds(2)
@@ -308,9 +333,7 @@ def test_ensemble_mape_is_none_without_actuals():
 
 
 def test_ensemble_mape_raises_on_misaligned_actuals():
-    misaligned = pd.DataFrame(
-        {"ds": pd.date_range("2024-01-01", periods=2), "y": [1.0, 2.0]}
-    )
+    misaligned = pd.DataFrame({"ds": pd.date_range("2024-01-01", periods=2), "y": [1.0, 2.0]})
     with pytest.raises(ValueError, match="Cannot score ensemble MAPE"):
         build_ensemble(
             per_model_selection_mape={"a": 10.0},
@@ -320,6 +343,7 @@ def test_ensemble_mape_raises_on_misaligned_actuals():
 
 
 # ---------- build_ensembles ----------
+
 
 def test_build_ensembles_returns_one_result_per_method():
     results = build_ensembles(
@@ -351,6 +375,7 @@ def test_build_ensembles_is_always_a_dict_even_for_one_method():
 # exists because two near-identical private copies drifted and shipped an
 # AttributeError, so its own behaviour is pinned here rather than only
 # exercised transitively through its consumers.
+
 
 def test_as_ensemble_dict_maps_none_to_an_empty_dict():
     # None -> {} so consumers need no special case for "no ensemble asked for".

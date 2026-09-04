@@ -23,6 +23,7 @@ import pandas as pd
 
 from horizon_forecaster.exceptions import InvalidConfigError
 
+
 class BaseAdapter(ABC):
     """
     Abstract base class every model-specific data adapter must inherit

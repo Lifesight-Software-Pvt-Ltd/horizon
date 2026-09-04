@@ -1,5 +1,5 @@
 """
-Future-exogenous-data strategies (Phase 7).
+Future-exogenous-data strategies.
 
 When forecast() is called without (complete) future values for the declared
 independent columns, these strategies generate them -- model-agnostically,
@@ -22,8 +22,8 @@ Strategies (all defined for any horizon -- short takes the head, long tiles):
                         growing. Falls back to carry_forward under one cycle
                         of history.
     linear_trend        a fitted trend line projected forward.
-    cycle               legacy: replay/tile the trailing history (the Phase 2
-                        default), kept for backward compatibility.
+    cycle               legacy: replay/tile the trailing history, the
+                        pre-1.0 default, kept for backward compatibility.
 
 Type-aware: continuous drivers use the chosen strategy; binary 0/1 event
 flags (promos, holidays) default to 0 -- "no event unless you supply one" --
@@ -54,25 +54,27 @@ AGGREGATORS: Dict[str, Callable] = {"mean": np.nanmean, "median": np.nanmedian}
 @dataclass
 class _Ctx:
     """Shared, column-independent context computed once per resolve() call."""
+
     horizon: int
-    hist_steps: np.ndarray      # history time index, in frequency steps from the first date
-    future_steps: np.ndarray    # future time index, same origin
-    hist_phase: np.ndarray      # seasonal phase per history row (dow / week-of-year)
-    future_phase: np.ndarray    # seasonal phase per future row
+    hist_steps: np.ndarray  # history time index, in frequency steps from the first date
+    future_steps: np.ndarray  # future time index, same origin
+    hist_phase: np.ndarray  # seasonal phase per history row (dow / week-of-year)
+    future_phase: np.ndarray  # seasonal phase per future row
     seasonal_period: int
-    aggregator: Callable        # np.nanmean or np.nanmedian
-    window: int                 # N for recent_average
+    aggregator: Callable  # np.nanmean or np.nanmedian
+    window: int  # N for recent_average
 
 
 # --------------------------------------------------------------------------
 # small helpers
 # --------------------------------------------------------------------------
 
+
 def _phase(dates, frequency: str) -> np.ndarray:
     d = pd.to_datetime(pd.Series(dates).reset_index(drop=True))
     if frequency == "daily":
-        return d.dt.dayofweek.to_numpy()                       # 0..6
-    return (d.dt.isocalendar().week.to_numpy().astype(int) - 1)  # 0..52
+        return d.dt.dayofweek.to_numpy()  # 0..6
+    return d.dt.isocalendar().week.to_numpy().astype(int) - 1  # 0..52
 
 
 def _last_valid(hist: np.ndarray) -> float:
@@ -93,13 +95,14 @@ def _fit_trend(hist: np.ndarray, steps: np.ndarray) -> Tuple[float, float]:
 # continuous strategy functions: (hist, ctx) -> np.ndarray[horizon]
 # --------------------------------------------------------------------------
 
+
 def _carry_forward(hist, ctx):
     return np.full(ctx.horizon, _last_valid(hist))
 
 
 def _recent_average(hist, ctx):
     finite = hist[np.isfinite(hist)]
-    tail = finite[-ctx.window:] if finite.size else finite
+    tail = finite[-ctx.window :] if finite.size else finite
     val = float(ctx.aggregator(tail)) if tail.size else 0.0
     return np.full(ctx.horizon, val)
 
@@ -120,12 +123,12 @@ def _seasonal_naive(hist, ctx):
     if finite_mask.sum() < ctx.seasonal_period:
         return _carry_forward(hist, ctx)
     slope, intercept = _fit_trend(hist, ctx.hist_steps)
-    resid = hist - (intercept + slope * ctx.hist_steps)          # detrended history
+    resid = hist - (intercept + slope * ctx.hist_steps)  # detrended history
     profile = {}
     for p in np.unique(ctx.future_phase):
         m = finite_mask & (ctx.hist_phase == p)
         profile[p] = float(ctx.aggregator(resid[m])) if m.any() else 0.0
-    trend = intercept + slope * ctx.future_steps                 # drift
+    trend = intercept + slope * ctx.future_steps  # drift
     season = np.array([profile[p] for p in ctx.future_phase])
     return trend + season
 
@@ -136,12 +139,12 @@ def _linear_trend(hist, ctx):
 
 
 def _cycle(hist, ctx):
-    """Legacy: tile the trailing history to cover the horizon (Phase 2 default)."""
+    """Legacy: tile the trailing history to cover the horizon (the pre-1.0 default)."""
     n = hist.size
     if n == 0:
         return np.zeros(ctx.horizon)
     reps = int(np.ceil(ctx.horizon / n))
-    return np.tile(hist, reps)[-ctx.horizon:]
+    return np.tile(hist, reps)[-ctx.horizon :]
 
 
 FUTURE_EXOG_STRATEGIES: Dict[str, Callable] = {
@@ -158,13 +161,14 @@ FUTURE_EXOG_STRATEGIES: Dict[str, Callable] = {
 # flag handling
 # --------------------------------------------------------------------------
 
+
 def _looks_binary(hist: np.ndarray) -> bool:
     finite = hist[np.isfinite(hist)]
     return finite.size > 0 and np.unique(finite).size <= 2 and finite.min() >= 0
 
 
 def _is_flag(col: str, hist: np.ndarray, event_columns: Optional[List[str]]) -> bool:
-    if event_columns is not None:          # explicit declaration wins; no auto-detect
+    if event_columns is not None:  # explicit declaration wins; no auto-detect
         return col in event_columns
     return _looks_binary(hist)
 
@@ -182,6 +186,7 @@ def _flag_seasonal(hist, ctx):
 # --------------------------------------------------------------------------
 # public entry point
 # --------------------------------------------------------------------------
+
 
 def resolve_future_exog(
     history_df: pd.DataFrame,
@@ -210,12 +215,14 @@ def resolve_future_exog(
         raise InvalidConfigError(
             f"Unknown future_exog_strategy '{strategy}'. "
             f"Available: {sorted(FUTURE_EXOG_STRATEGIES)}.",
-            param_name="future_exog_strategy", provided_value=strategy,
+            param_name="future_exog_strategy",
+            provided_value=strategy,
         )
     if aggregator not in AGGREGATORS:
         raise InvalidConfigError(
             f"Unknown future_exog_aggregator '{aggregator}'. Available: {sorted(AGGREGATORS)}.",
-            param_name="future_exog_aggregator", provided_value=aggregator,
+            param_name="future_exog_aggregator",
+            provided_value=aggregator,
         )
 
     horizon = len(future_dates)
@@ -224,7 +231,9 @@ def resolve_future_exog(
     per = 1.0 if frequency == "daily" else 7.0
 
     def _steps(dates):
-        return (pd.to_datetime(pd.Series(dates).reset_index(drop=True)) - ref).dt.days.to_numpy() / per
+        return (
+            pd.to_datetime(pd.Series(dates).reset_index(drop=True)) - ref
+        ).dt.days.to_numpy() / per
 
     ctx = _Ctx(
         horizon=horizon,
@@ -252,11 +261,13 @@ def resolve_future_exog(
             # legacy: exempt from type-awareness; tile every column as-is
             out[col] = _cycle(hist, ctx)
         elif _is_flag(col, hist, event_columns):
-            out[col] = _flag_seasonal(hist, ctx) if strategy == "seasonal_naive" else np.zeros(horizon)
+            out[col] = (
+                _flag_seasonal(hist, ctx) if strategy == "seasonal_naive" else np.zeros(horizon)
+            )
         else:
             vals = FUTURE_EXOG_STRATEGIES[strategy](hist, ctx)
             finite = hist[np.isfinite(hist)]
-            if finite.size and finite.min() >= 0:      # non-negative driver -> no negative future
+            if finite.size and finite.min() >= 0:  # non-negative driver -> no negative future
                 vals = np.clip(vals, 0.0, None)
             out[col] = vals
         generated.append(col)

@@ -78,11 +78,11 @@ class SARIMAXAdapter(BaseAdapter):
             )
 
         # State established by transform_train(), reused by transform_future().
-        self._log_columns: Optional[List[str]] = None   # independents to log1p
-        self._means: Optional[pd.Series] = None         # train mean per independent (post-log)
-        self._stds: Optional[pd.Series] = None          # train std per independent (post-log)
-        self._std_min: Optional[pd.Series] = None       # per-col min of standardised TRAIN exog
-        self._std_max: Optional[pd.Series] = None       # per-col max of standardised TRAIN exog
+        self._log_columns: Optional[List[str]] = None  # independents to log1p
+        self._means: Optional[pd.Series] = None  # train mean per independent (post-log)
+        self._stds: Optional[pd.Series] = None  # train std per independent (post-log)
+        self._std_min: Optional[pd.Series] = None  # per-col min of standardised TRAIN exog
+        self._std_max: Optional[pd.Series] = None  # per-col max of standardised TRAIN exog
         self._exog_columns: List[str] = []
         self._is_fit: bool = False
 
@@ -247,8 +247,7 @@ class SARIMAXAdapter(BaseAdapter):
 
     def _apply_log(self, ind_df: pd.DataFrame) -> pd.DataFrame:
         out = ind_df.copy()
-        for col in (self._log_columns or []):
+        for col in self._log_columns or []:
             if col in out.columns:
                 out[col] = np.log1p(out[col])
         return out
-

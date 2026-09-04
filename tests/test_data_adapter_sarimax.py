@@ -10,12 +10,14 @@ from horizon_forecaster.exceptions import InvalidConfigError
 def make_raw(n=40, freq="D"):
     rng = np.random.default_rng(0)
     dates = pd.date_range("2022-01-01", periods=n, freq=freq)
-    return pd.DataFrame({
-        "date": dates,
-        "orders": np.arange(n) + 50.0,
-        "spend": np.abs(rng.normal(100, 20, n)) + 1.0,  # spend-like: positive, continuous
-        "promo": rng.integers(0, 2, n),                 # binary flag
-    })
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "orders": np.arange(n) + 50.0,
+            "spend": np.abs(rng.normal(100, 20, n)) + 1.0,  # spend-like: positive, continuous
+            "promo": rng.integers(0, 2, n),  # binary flag
+        }
+    )
 
 
 def test_requires_valid_frequency():
@@ -151,8 +153,7 @@ def test_annual_collinearity_r2_high_for_pure_sine_low_for_trend():
     ramp = t.astype(float)
     assert adapter._annual_collinearity_r2(pd.Series(dates), sine) > 0.95
     assert (
-        adapter._annual_collinearity_r2(pd.Series(dates), ramp)
-        < _ANNUAL_COLLINEARITY_R2_THRESHOLD
+        adapter._annual_collinearity_r2(pd.Series(dates), ramp) < _ANNUAL_COLLINEARITY_R2_THRESHOLD
     )
 
 

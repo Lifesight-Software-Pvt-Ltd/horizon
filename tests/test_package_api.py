@@ -12,7 +12,6 @@ import sys
 
 import horizon_forecaster
 
-
 # The heavy backends each wrapper imports lazily inside fit(). Importing the
 # package must not pull in any of them: a script that only needs the metrics
 # or the ensemble maths should pay none of that cost.
@@ -52,7 +51,5 @@ def test_importing_the_package_does_not_pull_in_the_heavy_stack():
         f"set({sorted(_HEAVY_BACKENDS)!r}) & set(sys.modules)); "
         "assert not leaked, leaked"
     )
-    completed = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True
-    )
+    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr

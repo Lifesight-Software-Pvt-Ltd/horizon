@@ -252,14 +252,16 @@ def _build_trim_shares(members: Sequence[str], order: np.ndarray, n_periods: int
     low_counts = np.bincount(order[0], minlength=len(members))
     high_counts = np.bincount(order[-1], minlength=len(members))
 
-    return pd.DataFrame({
-        "model": list(members),
-        "trimmed_low": low_counts,
-        "trimmed_high": high_counts,
-        "trimmed_total": low_counts + high_counts,
-        "n_periods": n_periods,
-        "trimmed_fraction": (low_counts + high_counts) / n_periods if n_periods else 0.0,
-    })
+    return pd.DataFrame(
+        {
+            "model": list(members),
+            "trimmed_low": low_counts,
+            "trimmed_high": high_counts,
+            "trimmed_total": low_counts + high_counts,
+            "n_periods": n_periods,
+            "trimmed_fraction": (low_counts + high_counts) / n_periods if n_periods else 0.0,
+        }
+    )
 
 
 def _combine(
@@ -436,7 +438,7 @@ def build_ensemble(
             least ["ds", "yhat"], for the SAME set of ds values across
             every model (the same test window, or the same future
             horizon).
-        mape_threshold: garbage filter applied to the selection MAPE, or
+        mape_threshold: degenerate-fit filter applied to the selection MAPE, or
             None to admit every model. See _screen().
         method: "trimmed" (default), "inverse_mape" or "equal".
         actuals: optional DataFrame with ["ds", "y"] real actual values,
@@ -456,9 +458,7 @@ def build_ensemble(
             f"Unknown ensemble method: '{method}'. Expected one of {ENSEMBLE_METHODS}."
         )
 
-    members, member_mapes, rejected = _screen(
-        per_model_selection_mape, mape_threshold, method
-    )
+    members, member_mapes, rejected = _screen(per_model_selection_mape, mape_threshold, method)
 
     if not members:
         return EnsembleResult(

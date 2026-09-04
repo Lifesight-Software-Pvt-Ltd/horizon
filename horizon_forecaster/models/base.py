@@ -25,6 +25,7 @@ import pandas as pd
 
 from horizon_forecaster.exceptions import ModelPredictionError
 
+
 class BaseModel(ABC):
     """
     Abstract base class that every model wrapper must inherit from.

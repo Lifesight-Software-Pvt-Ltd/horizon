@@ -12,9 +12,10 @@ Expects train_df already shaped by BayesianPyMCAdapter: columns "ds", raw
 here -- the target standardisation, the Fourier terms, the priors, the
 sampler, and the back-transform.
 
-Design, and how it maps onto the reference notebook:
+Design, and how it maps onto the reference implementation this was ported
+from:
 
-- The notebook built one Deterministic `mu` over the WHOLE series (train +
+- That implementation built one Deterministic `mu` over the WHOLE series (train +
   test) and sliced the test portion out of the posterior. That only works
   when train and test are sampled together. Under the BaseModel contract,
   fit() sees only the training rows and predict() sees only future dates,
@@ -35,15 +36,15 @@ Design, and how it maps onto the reference notebook:
 - Coefficient priors: an independent column that looks like a continuous
   driver (more than two distinct standardised values -- e.g. spend,
   impressions) gets an INFORMATIVE prior centred on its ordinary-least-
-  squares slope against the standardised target, mirroring the notebook's
-  polyfit-based spend prior. A binary flag (<= two distinct values) gets a
+  squares slope against the standardised target, mirroring the reference
+  implementation's polyfit-based spend prior. A binary flag (<= two distinct values) gets a
   plain zero-centred prior. The classification keys off the standardised
   column the adapter hands over, so no metadata crosses the boundary.
 
 - Uncertainty: yhat_lower/upper are a posterior-PREDICTIVE interval -- the
   3rd/97th percentiles of draws from `y ~ StudentT(nu, mu, sigma)`, not of
-  `mu` alone. The notebook (and an earlier cut of this wrapper) banded `mu`,
-  the latent mean, which omits the observation noise and badly under-covers
+  `mu` alone. The reference implementation (and an earlier cut of this
+  wrapper) banded `mu`, the latent mean, which omits the observation noise and badly under-covers
   (only ~34% of real actuals fell inside its nominal 94% band on daily
   data); sampling the likelihood adds that noise back so the band covers
   ~(ci_upper - ci_lower)% of outcomes. Like every wrapper these bounds are
@@ -172,9 +173,7 @@ class BayesianPyMCWrapper(BaseModel):
 
         train_df = train_df.sort_values("ds").reset_index(drop=True)
         self._reference_date = pd.to_datetime(train_df["ds"]).iloc[0]
-        self._independent_columns: List[str] = [
-            c for c in train_df.columns if c not in ("ds", "y")
-        ]
+        self._independent_columns: List[str] = [c for c in train_df.columns if c not in ("ds", "y")]
 
         y_raw = train_df["y"].to_numpy(dtype=float)
         self._y_mean = float(np.nanmean(y_raw))
@@ -193,7 +192,7 @@ class BayesianPyMCWrapper(BaseModel):
             else np.empty((n, 0))
         )
 
-        # Prior means, straight from the reference notebook (NaN-safe, so a
+        # Prior means, from the reference implementation (NaN-safe, so a
         # missing value in a driver can't leak a raw LinAlgError out of fit()).
         slope_est = _ols_slope(t, y_sc)
         tail = min(52, n)
@@ -206,15 +205,21 @@ class BayesianPyMCWrapper(BaseModel):
             for j in range(exog.shape[1])
         ]
         coef_prior_means = [
-            _ols_slope(exog[:, j], y_sc)
-            if (self._driver_mask[j] and np.nanstd(exog[:, j]) > 1e-12)
-            else 0.0
+            (
+                _ols_slope(exog[:, j], y_sc)
+                if (self._driver_mask[j] and np.nanstd(exog[:, j]) > 1e-12)
+                else 0.0
+            )
             for j in range(exog.shape[1])
         ]
 
         try:
             trace = self._sample(
-                y_sc, t, ff_long, ff_short, exog,
+                y_sc,
+                t,
+                ff_long,
+                ff_short,
+                exog,
                 slope_est=float(slope_est),
                 intercept_est=intercept_est,
                 coef_prior_means=coef_prior_means,
@@ -340,11 +345,12 @@ class BayesianPyMCWrapper(BaseModel):
         """
         Position of each date along the series, in frequency steps from the
         reference date (days for daily, weeks for weekly). Used as the trend
-        regressor; matches the notebook's positional time index but is
+        regressor; matches the reference implementation's positional time
+        index but is
         computed from real dates so it stays consistent between fit and
         predict and is robust to gaps.
         """
-        offset_days = (pd.to_datetime(ds).reset_index(drop=True) - self._reference_date)
+        offset_days = pd.to_datetime(ds).reset_index(drop=True) - self._reference_date
         days = offset_days.dt.total_seconds().to_numpy() / 86400.0
         return days if self.frequency == "daily" else days / 7.0
 
@@ -353,9 +359,9 @@ class BayesianPyMCWrapper(BaseModel):
         Return (ff_long, ff_short). ff_long is the annual cycle for both
         frequencies; ff_short is the weekly cycle for daily data (else None).
         Both are built from absolute day offsets against the reference date.
-        Column layout matches the notebook: [cos_1..cos_k, sin_1..sin_k].
+        Column layout is [cos_1..cos_k, sin_1..sin_k].
         """
-        offset_days = (pd.to_datetime(ds).reset_index(drop=True) - self._reference_date)
+        offset_days = pd.to_datetime(ds).reset_index(drop=True) - self._reference_date
         day = offset_days.dt.total_seconds().to_numpy() / 86400.0
         ff_long = self._fourier_basis(day, _ANNUAL_PERIOD_DAYS)
         ff_short = (
@@ -370,7 +376,9 @@ class BayesianPyMCWrapper(BaseModel):
 
     # ---------- sampling / posterior ----------
 
-    def _sample(self, y_sc, t, ff_long, ff_short, exog, *, slope_est, intercept_est, coef_prior_means):
+    def _sample(
+        self, y_sc, t, ff_long, ff_short, exog, *, slope_est, intercept_est, coef_prior_means
+    ):
         import pymc as pm  # lazy: keeps module import free of the heavy dependency
 
         n_fourier2 = 2 * self.n_fourier
@@ -379,7 +387,9 @@ class BayesianPyMCWrapper(BaseModel):
             intercept = pm.Normal("intercept", mu=intercept_est, sigma=self.intercept_sigma)
             mu_det = intercept + slope * t
 
-            beta_long = pm.Normal("beta_long", mu=0.0, sigma=self.beta_fourier_sigma, shape=n_fourier2)
+            beta_long = pm.Normal(
+                "beta_long", mu=0.0, sigma=self.beta_fourier_sigma, shape=n_fourier2
+            )
             mu_det = mu_det + pm.math.dot(ff_long, beta_long)
 
             if ff_short is not None:
@@ -450,7 +460,8 @@ class BayesianPyMCWrapper(BaseModel):
     def _convergence_summary(trace) -> Dict[str, float]:
         """
         A small, picklable diagnostics summary (max R-hat, divergence count)
-        kept on the fitted wrapper for the user to inspect, computed at the end of fit(); the arviz import is deferred
+        kept on the fitted wrapper for the user to inspect, computed at the
+        end of fit(); the arviz import is deferred
         so a missing arviz never breaks fit().
         """
         summary: Dict[str, float] = {}

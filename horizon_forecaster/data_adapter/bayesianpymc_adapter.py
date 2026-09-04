@@ -26,7 +26,7 @@ reuses -- the standardisation mean/std fitted on TRAIN only, plus the
 per-column standardised training range used to clamp future exog.
 
 Unlike SARIMAXAdapter, this adapter does NOT log1p spend-like columns: the
-reference PyMC notebook standardised raw spend directly, and the model's
+reference PyMC implementation standardised raw spend directly, and the model's
 priors regularise the coefficients, so the extra transform isn't needed
 here. The wrapper's own spend-like detection (for choosing an informative
 vs. a zero-centred coefficient prior) keys off the number of distinct
@@ -70,10 +70,10 @@ class BayesianPyMCAdapter(BaseAdapter):
             )
 
         # State established by transform_train(), reused by transform_future().
-        self._means: Optional[pd.Series] = None    # train mean per independent
-        self._stds: Optional[pd.Series] = None      # train std per independent
-        self._std_min: Optional[pd.Series] = None   # per-col min of standardised TRAIN exog
-        self._std_max: Optional[pd.Series] = None   # per-col max of standardised TRAIN exog
+        self._means: Optional[pd.Series] = None  # train mean per independent
+        self._stds: Optional[pd.Series] = None  # train std per independent
+        self._std_min: Optional[pd.Series] = None  # per-col min of standardised TRAIN exog
+        self._std_max: Optional[pd.Series] = None  # per-col max of standardised TRAIN exog
         self._is_fit: bool = False
 
     # ---------- public API ----------

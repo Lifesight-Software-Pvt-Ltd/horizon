@@ -25,7 +25,7 @@ def make_adapted(n=90, with_exog=True, seed=0, test_size=14, freq="D"):
 
     cols = ["spend", "promo"] if with_exog else []
     adapter = SARIMAXAdapter("date", "orders", cols, "daily")
-    train, test = raw.iloc[: n - test_size], raw.iloc[n - test_size:]
+    train, test = raw.iloc[: n - test_size], raw.iloc[n - test_size :]
     adapted_train = adapter.transform_train(train)
     adapted_future = adapter.transform_future(
         pd.Series(test["date"].to_numpy()), test[cols] if cols else None
@@ -42,6 +42,7 @@ def fitted():
 
 
 # ---------- fit / predict basics ----------
+
 
 def test_fit_uses_grid_order_and_adf_derived_d(fitted):
     model, *_ = fitted
@@ -71,12 +72,14 @@ def test_prediction_interval_is_a_stable_band_not_exploding(fitted):
 
 def test_predict_produces_reasonable_mape(fitted):
     from horizon_forecaster.evaluation.metrics import mape
+
     model, _, future, y_test = fitted
     out = model.predict(horizon=len(future), future_exog=future)
     assert mape(y_test, out["yhat"].to_numpy()).value < 30
 
 
 # ---------- annual Fourier (now the wrapper's job) ----------
+
 
 def test_fourier_order_zero_adds_no_exog_columns():
     train, future, _ = make_adapted(with_exog=False)
@@ -120,6 +123,7 @@ def test_fourier_terms_are_bounded():
 
 
 # ---------- error contract ----------
+
 
 def test_predict_before_fit_raises():
     model = SARIMAXWrapper("daily", dict(BASE), min_rows_required=35)
@@ -169,6 +173,7 @@ def test_divergence_guard_rejects_clip_saturated_forecast():
 
 # ---------- back-transform behaviour ----------
 
+
 def test_bias_correction_lifts_point_forecast():
     model = SARIMAXWrapper("daily", {**BASE, "log_clip_headroom": 100.0})
     model._resid_var = 0.5
@@ -209,6 +214,7 @@ def test_adf_differencing_order_flags_trend():
 
 # ---------- persistence ----------
 
+
 def test_save_load_roundtrip_preserves_prediction(tmp_path, fitted):
     model, _, future, _ = fitted
     path = str(tmp_path / "sarimax.pkl")
@@ -221,6 +227,7 @@ def test_save_load_roundtrip_preserves_prediction(tmp_path, fitted):
 
 # ---------- integration through the orchestrator ----------
 
+
 def test_sarimax_uses_the_standard_grid_search_like_other_models():
     from horizon_forecaster.forecaster import HorizonForecaster, MODEL_REGISTRY
 
@@ -231,13 +238,19 @@ def test_sarimax_uses_the_standard_grid_search_like_other_models():
     dates = pd.date_range("2022-01-01", periods=n, freq="D")
     y = np.clip(
         200 + 1.2 * np.arange(n) + 20 * np.sin(2 * np.pi * np.arange(n) / 7) + rng.normal(0, 12, n),
-        1, None,
+        1,
+        None,
     )
     df = pd.DataFrame({"date": dates, "orders": y, "spend": np.abs(rng.normal(300, 60, n)) + 1})
 
     f = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily",
-        independent_columns=["spend"], models=["sarimax"], mape_threshold=100,
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+        models=["sarimax"],
+        mape_threshold=100,
     )
     assert f._use_grid_search["sarimax"] is True  # no longer self-tuning
 
@@ -253,6 +266,7 @@ def test_sarimax_uses_the_standard_grid_search_like_other_models():
 
 # ---------- deterministic trend term (regression: the undifferenced collapse) ----------
 
+
 def test_trend_term_is_ct_when_nothing_is_differenced():
     """
     statsmodels defaults to NO constant. That is right for a differenced
@@ -263,11 +277,14 @@ def test_trend_term_is_ct_when_nothing_is_differenced():
     assert SARIMAXWrapper._trend_for((1, 0, 1), (0, 0, 0, 0)) == "ct"
 
 
-@pytest.mark.parametrize("order,seasonal_order", [
-    ((1, 1, 1), (0, 0, 0, 0)),   # ordinary differencing
-    ((1, 0, 1), (0, 1, 1, 7)),   # seasonal differencing only
-    ((1, 1, 1), (0, 1, 1, 7)),   # both
-])
+@pytest.mark.parametrize(
+    "order,seasonal_order",
+    [
+        ((1, 1, 1), (0, 0, 0, 0)),  # ordinary differencing
+        ((1, 0, 1), (0, 1, 1, 7)),  # seasonal differencing only
+        ((1, 1, 1), (0, 1, 1, 7)),  # both
+    ],
+)
 def test_no_trend_term_once_anything_is_differenced(order, seasonal_order):
     """Differencing removes the level; a constant would imply a drift
     nobody asked for. Untouched by the d=0 fix."""
@@ -297,18 +314,21 @@ def test_undifferenced_fit_keeps_tracking_the_trend(monkeypatch):
     rng = np.random.default_rng(11)
     n, horizon = 260, 80
     t = np.arange(n + horizon)
-    values = np.maximum(500 + 2.0 * t + 60 * np.sin(t * 2 * np.pi / 7) + rng.normal(0, 20, n + horizon), 10)
-    raw = pd.DataFrame({"date": pd.date_range("2022-01-01", periods=n + horizon, freq="D"),
-                        "orders": values})
+    values = np.maximum(
+        500 + 2.0 * t + 60 * np.sin(t * 2 * np.pi / 7) + rng.normal(0, 20, n + horizon), 10
+    )
+    raw = pd.DataFrame(
+        {"date": pd.date_range("2022-01-01", periods=n + horizon, freq="D"), "orders": values}
+    )
 
     adapter = SARIMAXAdapter(
-        date_column="date", target_column="orders",
-        independent_columns=[], frequency="daily",
+        date_column="date",
+        target_column="orders",
+        independent_columns=[],
+        frequency="daily",
     )
     train = adapter.transform_train(raw.iloc[:n])
-    future = adapter.transform_future(
-        pd.Series(raw["date"].iloc[n:].reset_index(drop=True)), None
-    )
+    future = adapter.transform_future(pd.Series(raw["date"].iloc[n:].reset_index(drop=True)), None)
 
     model = SARIMAXWrapper(frequency="daily", params=dict(BASE)).fit(train, target_column="y")
     assert model._order[1] == 0, "test must exercise the undifferenced branch"

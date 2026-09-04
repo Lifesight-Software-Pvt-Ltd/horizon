@@ -1,7 +1,6 @@
 import math
 
 import pandas as pd
-import pytest
 from types import SimpleNamespace
 
 from horizon_forecaster.exporters import (
@@ -47,6 +46,7 @@ def make_ensemble(*, combined=True, rejected=None, n=3):
 
 # ---------- final forecast table ----------
 
+
 def test_build_final_forecast_table_returns_ds_yhat():
     ens = make_ensemble()
     table = build_final_forecast_table(ens)
@@ -67,6 +67,7 @@ def test_build_final_forecast_table_combined_none_is_empty():
 
 # ---------- per-model forecast table ----------
 
+
 def test_build_per_model_table_stacks_all_models():
     results = {
         "prophet": make_forecast_result([1.0, 2.0, 3.0]),
@@ -80,7 +81,9 @@ def test_build_per_model_table_stacks_all_models():
 
 def test_build_per_model_table_keeps_bounds_and_nans_the_rest():
     results = {
-        "prophet": make_forecast_result([1.0, 2.0, 3.0], lower=[0.5, 1.5, 2.5], upper=[1.5, 2.5, 3.5]),
+        "prophet": make_forecast_result(
+            [1.0, 2.0, 3.0], lower=[0.5, 1.5, 2.5], upper=[1.5, 2.5, 3.5]
+        ),
         "catboost": make_forecast_result([4.0, 5.0, 6.0]),  # no bounds
     }
     table = build_per_model_forecast_table(results)
@@ -96,6 +99,7 @@ def test_build_per_model_table_empty_is_shaped():
 
 
 # ---------- best-model forecast table ----------
+
 
 def test_build_best_model_table_picks_lowest_mape():
     results = {
@@ -121,6 +125,7 @@ def test_build_best_model_table_empty_without_scores():
 
 # ---------- model summary table ----------
 
+
 def test_build_model_summary_reports_mape_weight_and_status():
     err = ThresholdRejectionError("bad", model_name="sarimax", mape_value=1403.0, allowed_max=30.0)
     ens = make_ensemble(rejected={"sarimax": err})  # weights = {"prophet": 1.0}
@@ -142,6 +147,7 @@ def test_build_model_summary_empty_is_shaped():
 
 
 # ---------- rejected models table ----------
+
 
 def test_build_rejected_models_table_content():
     err = ThresholdRejectionError(
@@ -174,6 +180,7 @@ def test_build_rejected_models_table_empty_when_none_rejected():
 
 # ---------- export_forecast_csvs ----------
 
+
 def test_export_writes_all_five_readable_files(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     err = ThresholdRejectionError("bad", model_name="catboost", mape_value=90.0, allowed_max=40.0)
@@ -182,7 +189,11 @@ def test_export_writes_all_five_readable_files(tmp_path):
     written = export_forecast_csvs(results, ens, output_dir=str(tmp_path))
 
     assert set(written) == {
-        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected", "model_summary",
+        "final_ensemble_inverse_mape",
+        "final_best_model",
+        "per_model",
+        "rejected",
+        "model_summary",
     }
     for path in written.values():
         # pd.read_csv never returns None -- it raises or returns a frame.
@@ -197,7 +208,9 @@ def test_export_writes_all_five_readable_files(tmp_path):
 
 def test_export_creates_missing_nested_dir(tmp_path):
     target = tmp_path / "a" / "b"
-    written = export_forecast_csvs({"prophet": make_forecast_result([1.0])}, make_ensemble(), output_dir=str(target))
+    written = export_forecast_csvs(
+        {"prophet": make_forecast_result([1.0])}, make_ensemble(), output_dir=str(target)
+    )
     assert (target / "forecast_final_ensemble_inverse_mape.csv").exists()
     assert written["final_ensemble_inverse_mape"].endswith(
         "forecast_final_ensemble_inverse_mape.csv"
@@ -205,9 +218,11 @@ def test_export_creates_missing_nested_dir(tmp_path):
 
 
 def test_export_uses_custom_prefix(tmp_path):
-    written = export_forecast_csvs(
-        {"prophet": make_forecast_result([1.0])}, make_ensemble(),
-        output_dir=str(tmp_path), prefix="run42",
+    export_forecast_csvs(
+        {"prophet": make_forecast_result([1.0])},
+        make_ensemble(),
+        output_dir=str(tmp_path),
+        prefix="run42",
     )
     assert (tmp_path / "run42_final_ensemble_inverse_mape.csv").exists()
     assert (tmp_path / "run42_per_model.csv").exists()
@@ -224,19 +239,28 @@ def test_export_still_writes_all_files_when_empty(tmp_path):
 
 # ---------- export_forecast bundle (CSVs + plots) ----------
 
+
 def test_export_forecast_writes_csvs_and_plots(tmp_path):
     import matplotlib
+
     matplotlib.use("Agg")
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
     # CSV keys + plot keys (overlay + one dedicated figure per model + ensemble)
     assert {
-        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected",
+        "final_ensemble_inverse_mape",
+        "final_best_model",
+        "per_model",
+        "rejected",
         "model_summary",
     } <= set(written)
     assert {"plot_overlay", "plot_prophet", "plot_ensemble"} <= set(written)
-    for name in ("forecast_final_ensemble_inverse_mape.csv", "forecast_overlay.png",
-                 "forecast_prophet.png", "forecast_ensemble.png"):
+    for name in (
+        "forecast_final_ensemble_inverse_mape.csv",
+        "forecast_overlay.png",
+        "forecast_prophet.png",
+        "forecast_ensemble.png",
+    ):
         assert (tmp_path / name).exists()
 
 
@@ -244,7 +268,11 @@ def test_export_forecast_save_plots_false_writes_only_csvs(tmp_path):
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path), save_plots=False)
     assert set(written) == {
-        "final_ensemble_inverse_mape", "final_best_model", "per_model", "rejected", "model_summary",
+        "final_ensemble_inverse_mape",
+        "final_best_model",
+        "per_model",
+        "rejected",
+        "model_summary",
     }
     assert not list(tmp_path.glob("*.png"))
 
@@ -255,12 +283,17 @@ def test_export_forecast_empty_still_writes_csvs_no_plots(tmp_path):
     # name, so the combined file keeps the plain unsuffixed name.
     written = export_forecast({}, None, output_dir=str(tmp_path))
     assert set(written) == {
-        "final_ensemble", "final_best_model", "per_model", "rejected", "model_summary",
+        "final_ensemble",
+        "final_best_model",
+        "per_model",
+        "rejected",
+        "model_summary",
     }
     assert not list(tmp_path.glob("*.png"))
 
 
 # ---------- the DEFAULT (weightless) rule, and multi-method runs ----------
+
 
 def make_trimmed_ensemble(*, degraded=False, n=3):
     """
@@ -321,8 +354,11 @@ def test_export_writes_one_final_file_per_ensemble_method(tmp_path):
         "equal": make_ensemble(),
     }
     written = export_forecast_csvs(
-        results, ensembles, per_model_mape={"prophet": 10.0},
-        ensemble_mape=9.0, output_dir=str(tmp_path),
+        results,
+        ensembles,
+        per_model_mape={"prophet": 10.0},
+        ensemble_mape=9.0,
+        output_dir=str(tmp_path),
     )
 
     for method in ("trimmed", "inverse_mape", "equal"):
@@ -363,6 +399,7 @@ def test_rejected_table_records_which_method_dropped_the_model():
 # AttributeError on an ordinary run. These pin the dict shape at the two
 # entry points that had no direct coverage.
 
+
 def test_build_final_forecast_table_accepts_the_forecaster_dict():
     # Regression: this builder is deliverable #1 in the module docstring and
     # was the last consumer not normalising its input, so a caller holding
@@ -383,6 +420,7 @@ def test_export_forecast_accepts_the_forecaster_dict(tmp_path):
     # The documented one-call export, given the real dict shape AND asked for
     # plots -- the precise combination that shipped broken.
     import matplotlib
+
     matplotlib.use("Agg")
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(
@@ -405,13 +443,14 @@ def test_scalar_ensemble_mape_is_not_stamped_on_every_method(tmp_path):
     series, so repeating one number against all three would fabricate the
     side-by-side comparison this table exists to support.
     """
-    results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     ensembles = {
         "trimmed": make_trimmed_ensemble(),
         "inverse_mape": make_ensemble(),
     }
     table = build_model_summary_table(
-        {"prophet": 10.0}, ensembles, ensemble_mape=9.0,
+        {"prophet": 10.0},
+        ensembles,
+        ensemble_mape=9.0,
     )
     ensemble_rows = table[table["model"] == "ensemble"]
     # Both rules are still reported -- only the borrowed score is withheld.
@@ -420,6 +459,8 @@ def test_scalar_ensemble_mape_is_not_stamped_on_every_method(tmp_path):
 
     # With a single method the fallback is unambiguous, so it IS used.
     single = build_model_summary_table(
-        {"prophet": 10.0}, {"trimmed": make_trimmed_ensemble()}, ensemble_mape=9.0,
+        {"prophet": 10.0},
+        {"trimmed": make_trimmed_ensemble()},
+        ensemble_mape=9.0,
     )
     assert single[single["model"] == "ensemble"].iloc[0]["mape"] == 9.0

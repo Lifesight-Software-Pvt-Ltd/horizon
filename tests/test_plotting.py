@@ -82,6 +82,7 @@ def make_trimmed_ensemble(*, n=3, degraded=False):
 
 # ---------- plot_evaluation ----------
 
+
 def test_plot_evaluation_draws_actual_plus_one_line_per_model():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
     ax = plot_evaluation(results)
@@ -139,6 +140,7 @@ def test_plot_evaluation_no_note_when_ensemble_formed_or_absent():
 
 # ---------- plot_forecast ----------
 
+
 def test_plot_forecast_one_line_per_model_no_history():
     results = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
     ax = plot_forecast(results)
@@ -149,7 +151,10 @@ def test_plot_forecast_includes_history_and_ensemble():
     results = {"prophet": make_forecast_result()}
     history = pd.DataFrame({"date": _ds(5), "orders": [1, 2, 3, 4, 5]})
     ax = plot_forecast(
-        results, history=history, date_column="date", target_column="orders",
+        results,
+        history=history,
+        date_column="date",
+        target_column="orders",
         ensemble=make_ensemble(),
     )
     labels = [ln.get_label() for ln in ax.get_lines()]
@@ -172,6 +177,7 @@ def test_plot_forecast_flags_when_no_ensemble_formed():
 
 
 # ---------- plot_model_comparison ----------
+
 
 def test_plot_model_comparison_one_bar_per_model():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
@@ -206,6 +212,7 @@ def test_plot_model_comparison_empty_raises():
 
 
 # ---------- dedicated per-model figures ----------
+
 
 def test_plot_evaluation_per_model_one_figure_each():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
@@ -246,6 +253,7 @@ def test_plot_forecast_per_model_empty_raises():
 
 # ---------- saving to disk ----------
 
+
 def test_save_evaluation_plots_writes_overlay_comparison_and_per_model(tmp_path):
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
     written = save_evaluation_plots(results, make_ensemble(), output_dir=str(tmp_path))
@@ -276,6 +284,7 @@ def test_save_evaluation_plots_empty_raises(tmp_path):
 
 # ---------- shared behavior ----------
 
+
 def test_plot_functions_draw_on_supplied_ax():
     fig, ax = plt.subplots()
     returned = plot_evaluation({"prophet": make_eval_result(5.0)}, ax=ax)
@@ -283,6 +292,7 @@ def test_plot_functions_draw_on_supplied_ax():
 
 
 # ---------- the dict shape the forecaster actually hands over ----------
+
 
 def test_every_plot_entry_point_accepts_the_forecaster_dict():
     """

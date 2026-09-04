@@ -1,5 +1,5 @@
 """
-CSV exporters for horizon_forecaster (Phase 5, output layer).
+CSV exporters for horizon_forecaster.
 
 Turns the outputs of HorizonForecaster.forecast() (plus its ensemble)
 into tabular CSVs. Like plotting.py, this is a pure, standalone module:
@@ -211,15 +211,17 @@ def build_model_summary_table(
                 status = "rejected"
             else:
                 status = "not_in_ensemble"
-            rows.append({
-                "model": name,
-                "validation_mape": per_model_validation_mape.get(name),
-                "mape": value,
-                "ensemble_method": method,
-                "rule_applied": result.rule_applied if status == "in_ensemble" else None,
-                "ensemble_weight": weights.get(name),
-                "status": status,
-            })
+            rows.append(
+                {
+                    "model": name,
+                    "validation_mape": per_model_validation_mape.get(name),
+                    "mape": value,
+                    "ensemble_method": method,
+                    "rule_applied": result.rule_applied if status == "in_ensemble" else None,
+                    "ensemble_weight": weights.get(name),
+                    "status": status,
+                }
+            )
 
         # The scalar `ensemble_mape` fallback describes ONE combined series,
         # so it is only unambiguous when one method was built. With several,
@@ -234,15 +236,17 @@ def build_model_summary_table(
             scored = None
 
         if scored is not None or result.combined is not None:
-            rows.append({
-                "model": "ensemble",
-                "validation_mape": None,
-                "mape": scored,
-                "ensemble_method": method,
-                "rule_applied": result.rule_applied,
-                "ensemble_weight": 1.0,
-                "status": "degraded" if result.degraded else "ensemble",
-            })
+            rows.append(
+                {
+                    "model": "ensemble",
+                    "validation_mape": None,
+                    "mape": scored,
+                    "ensemble_method": method,
+                    "rule_applied": result.rule_applied,
+                    "ensemble_weight": 1.0,
+                    "status": "degraded" if result.degraded else "ensemble",
+                }
+            )
 
     return pd.DataFrame(rows, columns=_SUMMARY_COLUMNS)
 

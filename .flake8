@@ -1,0 +1,30 @@
+[flake8]
+# Aligned with black (see [tool.black] in pyproject.toml). Run `black .`
+# before flake8; the two agree on everything except the three codes below,
+# which flake8 raises on formatting black itself produces:
+#   E203  whitespace before ':'   -- black's slice formatting
+#   W503  line break before binary operator -- black's preferred wrap
+max-line-length = 100
+extend-ignore = E203, W503
+
+exclude =
+    .git,
+    __pycache__,
+    build,
+    dist,
+    .venv,
+    venv,
+    test_env,
+    catboost_info,
+    lightning_logs
+
+per-file-ignores =
+    # Imports every model backend purely to prove they resolve together in
+    # one environment. The imports ARE the test, so they are never used.
+    tests/test_dependency_imports.py:F401
+    # matplotlib.use("Agg") must run before pyplot is imported, so the
+    # imports below it cannot sit at the top of the file.
+    tests/test_plotting.py:E402
+    # pytest.importorskip("neuralprophet") must run before the modules that
+    # import it, for the same reason.
+    tests/test_neuralprophet.py:E402

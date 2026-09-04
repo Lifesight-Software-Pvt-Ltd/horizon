@@ -3,24 +3,22 @@ Tests for ``NeuralProphetWrapper._load_torch_model()``.
 
 Kept separate from tests/test_neuralprophet.py, which is importorskip'd on
 the real NeuralProphet. This shim is pure Python indirection, so it can and
-should be verified everywhere -- including CI and the sandbox, where torch
-isn't installed. NeuralProphet and torch are stubbed into sys.modules with
+should be verified everywhere, including environments where torch is not
+installed. NeuralProphet and torch are stubbed into sys.modules with
 just enough surface for the code under test to bind to.
 
 Why this file exists: on torch >= 2.6 the primary loader fails and the
 fallback must reproduce what NeuralProphet's own load() does, including
-restore_trainer(). BOTH failures this method has had were CI-only, for the
-same structural reason -- local torch is < 2.6, so the fallback branch never
-executes locally at all, making it effectively untested code that only ran
-on the matrix. That is how a bug fix landed inside it and a regression went
-unnoticed for a full CI cycle. These stub tests exercise the fallback
-directly on any torch version, closing that gap.
+restore_trainer(). Both failures this method has had appeared only in CI, for the
+same structural reason: where local torch is < 2.6 the fallback branch never
+executes at all, making it effectively untested code that ran only on the
+matrix. These stub tests exercise the fallback directly on any torch
+version, closing that gap.
 """
 
 import sys
 
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
-
 
 # ---------- _load_torch_model: the torch >= 2.6 fallback ----------
 

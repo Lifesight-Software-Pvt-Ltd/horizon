@@ -41,7 +41,7 @@ SUPPORTED_FREQUENCIES = ("daily", "weekly")
 # These are Horizon's own defaults, chosen for users -- deliberately NOT
 # the window fractions used by any particular evaluation corpus.
 DEFAULT_EVALUATION_WINDOWS = {
-    "daily": {"validation": 56, "test": 28},   # 8 weeks / 4 weeks
+    "daily": {"validation": 56, "test": 28},  # 8 weeks / 4 weeks
     "weekly": {"validation": 26, "test": 13},  # ~6 months / ~1 quarter
 }
 
@@ -97,8 +97,7 @@ def validate_no_missing_values(
     # Column existence first, so a missing/misspelled column is a clear error
     # rather than a raw KeyError from the value checks below.
     missing_columns = [
-        c for c in [date_column, target_column, *independent_columns]
-        if c not in df.columns
+        c for c in [date_column, target_column, *independent_columns] if c not in df.columns
     ]
     if missing_columns:
         raise InvalidConfigError(
@@ -128,6 +127,7 @@ def validate_no_missing_values(
             param_name="raw_df",
             provided_value=problems,
         )
+
 
 def clean_zero_variance(
     df: pd.DataFrame, exclude_columns: Optional[List[str]] = None
@@ -159,6 +159,7 @@ def clean_zero_variance(
 
     cleaned = cleaned.drop(columns=dropped)
     return cleaned, dropped
+
 
 def infer_frequency(date_series: pd.Series) -> str:
     """
@@ -194,6 +195,7 @@ def infer_frequency(date_series: pd.Series) -> str:
             provided_frequency=str(most_common_gap),
         )
 
+
 def validate_frequency(freq: str) -> str:
     """
     Validate a user-declared frequency string against supported values.
@@ -207,6 +209,7 @@ def validate_frequency(freq: str) -> str:
             provided_frequency=freq,
         )
     return normalized
+
 
 def validate_training_size(training_size: float) -> float:
     """
@@ -232,9 +235,7 @@ def validate_training_size(training_size: float) -> float:
     return value
 
 
-def _resolve_window(
-    value: Union[int, float, None], n_total: int, param_name: str
-) -> Optional[int]:
+def _resolve_window(value: Union[int, float, None], n_total: int, param_name: str) -> Optional[int]:
     """
     Turn one window size into a row count.
 
@@ -417,6 +418,7 @@ def resolve_split(
 
     return SplitSizes(n_train, n_validation, n_test)
 
+
 # The user-facing mape_threshold is constrained to this range. 0.01 and
 # 100 are fixed internal bounds, NOT user-settable: a floor of 0.01%
 # rejects a threshold of 0 (and negatives), which would admit only a
@@ -425,6 +427,7 @@ def resolve_split(
 # signals a degenerate fit, so a higher ceiling would add nothing useful.
 MAPE_THRESHOLD_MIN = 0.01
 MAPE_THRESHOLD_MAX = 100.0
+
 
 def validate_mape_threshold(mape_threshold: Optional[float]) -> Optional[float]:
     """

@@ -1,5 +1,5 @@
 """
-Plotting helpers for horizon_forecaster (Phase 5, output layer).
+Plotting helpers for horizon_forecaster.
 
 Turns the outputs of HorizonForecaster.evaluate()/forecast() into
 matplotlib charts. Two families are provided at each stage:
@@ -31,9 +31,9 @@ Design choices, all deliberate:
   keeps the module non-blocking and directly unit-testable under a
   headless "Agg" backend.
 - Colors are auto-cycled from matplotlib's property cycle rather than a
-  hardcoded {"prophet": ..., "catboost": ...} map, so a third/fourth
-  model (Phase 6: SARIMAX/PyMC/NeuralProphet) charts correctly with no
-  change here. The ensemble is the one fixed style -- a red dashed line
+  hardcoded {"prophet": ..., "catboost": ...} map, so a newly
+  registered model charts correctly with no change here. The ensemble
+  is the one fixed style -- a red dashed line
   -- so it always stands out from the individual models.
 - Uncertainty bounds (yhat_lower/yhat_upper) are drawn as a shaded band
   only for the models that actually provide them (Prophet, SARIMAX and
@@ -71,8 +71,7 @@ _BOUND_ALPHA = 0.15
 # note makes it unmistakable that those lines are for diagnosis, NOT a
 # blessed/trusted result, so a rejected model isn't mistaken for one.
 _NO_ENSEMBLE_NOTE = (
-    "No ensemble formed — no model was admitted;\n"
-    "individual forecasts shown for diagnosis only"
+    "No ensemble formed — no model was admitted;\n" "individual forecasts shown for diagnosis only"
 )
 
 
@@ -204,7 +203,7 @@ def plot_evaluation(
 
     for name, result in evaluation_results.items():
         preds = result.test_predictions
-        line, = ax.plot(
+        (line,) = ax.plot(
             preds["ds"],
             preds["yhat"],
             label=f"{name} predicted (MAPE {result.mape.value:.2f}%)",
@@ -214,9 +213,7 @@ def plot_evaluation(
 
     ensemble = _primary_ensemble(ensemble)
     if ensemble is not None and ensemble.combined is not None:
-        mape_label = (
-            f" (MAPE {ensemble.mape.value:.2f}%)" if ensemble.mape is not None else ""
-        )
+        mape_label = f" (MAPE {ensemble.mape.value:.2f}%)" if ensemble.mape is not None else ""
         ax.plot(
             ensemble.combined["ds"],
             ensemble.combined["yhat"],
@@ -284,7 +281,7 @@ def plot_forecast(
 
     for name, result in forecast_results.items():
         fc = result.forecast
-        line, = ax.plot(fc["ds"], fc["yhat"], label=f"{name} forecast")
+        (line,) = ax.plot(fc["ds"], fc["yhat"], label=f"{name} forecast")
         _draw_bounds(ax, fc, line.get_color())
 
     ensemble = _primary_ensemble(ensemble)
@@ -403,9 +400,11 @@ def plot_evaluation_per_model(
     for name, result in evaluation_results.items():
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
-        line, = ax.plot(
-            result.test_predictions["ds"], result.test_predictions["yhat"],
-            label=f"{name} predicted", marker="o",
+        (line,) = ax.plot(
+            result.test_predictions["ds"],
+            result.test_predictions["yhat"],
+            label=f"{name} predicted",
+            marker="o",
         )
         _draw_bounds(ax, result.test_predictions, line.get_color())
         _annotate_no_ensemble(ax, ensemble)
@@ -417,9 +416,12 @@ def plot_evaluation_per_model(
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
         ax.plot(
-            ensemble.combined["ds"], ensemble.combined["yhat"],
+            ensemble.combined["ds"],
+            ensemble.combined["yhat"],
             label=_ensemble_label(ensemble),
-            color=_ENSEMBLE_COLOR, linestyle="--", marker="x",
+            color=_ENSEMBLE_COLOR,
+            linestyle="--",
+            marker="x",
         )
         _finalize(ax, f"Test set: actual vs ensemble{mape_label}")
         figures["ensemble"] = fig
@@ -465,10 +467,15 @@ def plot_forecast_per_model(
         # two-member mean "trimmed".
         fig, ax = plt.subplots(figsize=figsize)
         if history is not None:
-            ax.plot(history[date_column], history[target_column], label="History", color=_HISTORY_COLOR)
+            ax.plot(
+                history[date_column], history[target_column], label="History", color=_HISTORY_COLOR
+            )
         color = _ENSEMBLE_COLOR if is_ensemble else None
-        line, = ax.plot(
-            fc["ds"], fc["yhat"], label=f"{label} forecast", color=color,
+        (line,) = ax.plot(
+            fc["ds"],
+            fc["yhat"],
+            label=f"{label} forecast",
+            color=color,
             linestyle="--" if is_ensemble else "-",
         )
         _draw_bounds(ax, fc, line.get_color())

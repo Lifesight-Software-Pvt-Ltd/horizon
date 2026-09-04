@@ -13,6 +13,7 @@ parsing exception strings.
 
 from typing import Optional
 
+
 class HorizonForecasterError(Exception):
     """
     Base exception for all horizon_forecaster errors.
@@ -28,6 +29,7 @@ class HorizonForecasterError(Exception):
             return f"[{self.model_name}] {self.message}"
         return self.message
 
+
 class InsufficientDataError(HorizonForecasterError):
     def __init__(
         self,
@@ -40,6 +42,7 @@ class InsufficientDataError(HorizonForecasterError):
         self.available_periods = available_periods
         super().__init__(message, model_name)
 
+
 class ModelConvergenceError(HorizonForecasterError):
     def __init__(
         self,
@@ -50,6 +53,7 @@ class ModelConvergenceError(HorizonForecasterError):
         self.original_exception = original_exception
         super().__init__(message, model_name)
 
+
 class ModelPredictionError(HorizonForecasterError):
     def __init__(
         self,
@@ -59,6 +63,7 @@ class ModelPredictionError(HorizonForecasterError):
     ):
         self.original_exception = original_exception
         super().__init__(message, model_name)
+
 
 class ThresholdRejectionError(HorizonForecasterError):
     def __init__(
@@ -74,10 +79,12 @@ class ThresholdRejectionError(HorizonForecasterError):
         self.allowed_max = allowed_max
         super().__init__(message, model_name)
 
+
 class AllModelsRejectedError(HorizonForecasterError):
     def __init__(self, message: str, rejected_models: Optional[list] = None):
         self.rejected_models = rejected_models or []
         super().__init__(message)
+
 
 class InvalidConfigError(HorizonForecasterError):
     def __init__(
@@ -91,6 +98,7 @@ class InvalidConfigError(HorizonForecasterError):
         self.provided_value = provided_value
         self.valid_range = valid_range
         super().__init__(message)
+
 
 class UnsupportedFrequencyError(HorizonForecasterError):
     def __init__(self, message: str, provided_frequency: Optional[str] = None):

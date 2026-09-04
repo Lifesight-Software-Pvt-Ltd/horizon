@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+
 @dataclass
 class MapeResult:
     """
@@ -36,6 +37,7 @@ class MapeResult:
 
     def __float__(self) -> float:
         return self.value
+
 
 def mape(
     y_true,
@@ -74,8 +76,7 @@ def mape(
 
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"y_true and y_pred must have the same shape. "
-            f"Got {y_true.shape} vs {y_pred.shape}."
+            f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
     total_count = len(y_true)
@@ -118,6 +119,7 @@ def mape(
             f"Expected 'exclude' or 'epsilon'."
         )
 
+
 def wape(y_true, y_pred) -> float:
     """
     Weighted Absolute Percentage Error: sum(|actual - pred|) / sum(|actual|).
@@ -132,8 +134,7 @@ def wape(y_true, y_pred) -> float:
 
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"y_true and y_pred must have the same shape. "
-            f"Got {y_true.shape} vs {y_pred.shape}."
+            f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
     denominator = np.sum(np.abs(y_true))
@@ -141,6 +142,7 @@ def wape(y_true, y_pred) -> float:
         return float("nan")
 
     return float(np.sum(np.abs(y_true - y_pred)) / denominator * 100)
+
 
 def rmse(y_true, y_pred) -> float:
     """
@@ -151,11 +153,11 @@ def rmse(y_true, y_pred) -> float:
 
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"y_true and y_pred must have the same shape. "
-            f"Got {y_true.shape} vs {y_pred.shape}."
+            f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
 
 def mae(y_true, y_pred) -> float:
     """
@@ -166,8 +168,7 @@ def mae(y_true, y_pred) -> float:
 
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"y_true and y_pred must have the same shape. "
-            f"Got {y_true.shape} vs {y_pred.shape}."
+            f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
     return float(np.mean(np.abs(y_true - y_pred)))

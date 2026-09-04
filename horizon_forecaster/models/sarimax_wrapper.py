@@ -119,9 +119,7 @@ class SARIMAXWrapper(BaseModel):
         y_raw = train_df["y"].to_numpy(dtype=float)
         y_log = np.log1p(y_raw)
 
-        self._independent_columns: List[str] = [
-            c for c in train_df.columns if c not in ("ds", "y")
-        ]
+        self._independent_columns: List[str] = [c for c in train_df.columns if c not in ("ds", "y")]
         self._reference_date = pd.to_datetime(train_df["ds"]).iloc[0]
         exog = self._build_exog(train_df)
 
@@ -265,7 +263,7 @@ class SARIMAXWrapper(BaseModel):
         order = int(self.fourier_order_annual or 0)
         if order <= 0:
             return None
-        offset_days = (pd.to_datetime(ds).reset_index(drop=True) - self._reference_date)
+        offset_days = pd.to_datetime(ds).reset_index(drop=True) - self._reference_date
         t = offset_days.dt.total_seconds().to_numpy() / 86400.0
         terms = []
         for k in range(1, order + 1):
@@ -354,15 +352,23 @@ class SARIMAXWrapper(BaseModel):
         if self.enforce_stationarity_final:
             try:
                 return self._fit_one(
-                    y_log, exog, order, seasonal_order,
-                    enforce_stationarity=True, maxiter=self.maxiter_final,
+                    y_log,
+                    exog,
+                    order,
+                    seasonal_order,
+                    enforce_stationarity=True,
+                    maxiter=self.maxiter_final,
                 )
             except Exception:
                 pass
         try:
             return self._fit_one(
-                y_log, exog, order, seasonal_order,
-                enforce_stationarity=False, maxiter=self.maxiter_final,
+                y_log,
+                exog,
+                order,
+                seasonal_order,
+                enforce_stationarity=False,
+                maxiter=self.maxiter_final,
             )
         except Exception:
             return None

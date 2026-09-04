@@ -2,10 +2,9 @@
 NeuralProphet wrapper tests.
 
 These require the real NeuralProphet (torch / PyTorch Lightning), so the
-whole module is skipped where it isn't installed. Every test here is
-therefore effectively LOCAL-ONLY -- unlike SARIMAX, whose wrapper could be
-exercised in the sandbox. The adapter is covered separately, and without
-this dependency, in tests/test_data_adapter_neuralprophet.py.
+whole module is skipped where it isn't installed. The adapter is covered
+separately, and without this dependency, in
+tests/test_data_adapter_neuralprophet.py.
 
 Training is deliberately kept tiny (few epochs, short series) so the suite
 stays tolerable: NeuralProphet is by far the slowest model registered.
@@ -26,7 +25,7 @@ from horizon_forecaster.exceptions import (
 
 FAST_PARAMS = {
     "n_lags": 0,
-    "epochs": 5,               # tiny: these tests check contract, not accuracy
+    "epochs": 5,  # tiny: these tests check contract, not accuracy
     "learning_rate": 0.1,
     "yearly_seasonality": False,
     "weekly_seasonality": False,
@@ -73,7 +72,7 @@ def make_adapted(n=80, with_regressors=True, test_size=10, seed=0, negative=Fals
 
     cols = ["spend"] if with_regressors else []
     adapter = NeuralProphetAdapter("date", "orders", cols, "daily")
-    train, test = raw.iloc[: n - test_size], raw.iloc[n - test_size:]
+    train, test = raw.iloc[: n - test_size], raw.iloc[n - test_size :]
     adapted_train = adapter.transform_train(train)
     adapted_future = adapter.transform_future(
         pd.Series(test["date"].to_numpy()), test[cols] if cols else None
@@ -90,6 +89,7 @@ def fitted():
 
 
 # ---------- fit / predict basics ----------
+
 
 def test_fit_sets_is_fitted_and_records_regressors(fitted):
     model, *_ = fitted
@@ -119,6 +119,7 @@ def test_predict_needs_no_training_history():
 
 
 # ---------- error contract ----------
+
 
 def test_predict_before_fit_raises():
     model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30)
@@ -153,6 +154,7 @@ def test_predict_missing_regressor_raises(fitted):
 
 # ---------- clipping + determinism ----------
 
+
 def test_clips_negatives_when_training_target_was_non_negative(fitted):
     model, _, future, _ = fitted
     out = model.predict(horizon=len(future), future_exog=future)
@@ -171,13 +173,16 @@ def test_same_seed_gives_identical_predictions():
     train, future, _ = make_adapted()
     preds = []
     for _ in range(2):
-        model = NeuralProphetWrapper("daily", dict(FAST_PARAMS), min_rows_required=30, random_seed=7)
+        model = NeuralProphetWrapper(
+            "daily", dict(FAST_PARAMS), min_rows_required=30, random_seed=7
+        )
         model.fit(train)
         preds.append(model.predict(horizon=len(future), future_exog=future)["yhat"].to_numpy())
     np.testing.assert_allclose(preds[0], preds[1], rtol=1e-5)
 
 
 # ---------- persistence ----------
+
 
 def test_save_load_roundtrip_preserves_prediction(tmp_path, fitted):
     model, _, future, _ = fitted
@@ -192,6 +197,7 @@ def test_save_load_roundtrip_preserves_prediction(tmp_path, fitted):
 
 # ---------- integration through the orchestrator ----------
 
+
 def test_neuralprophet_is_registered_and_flows_through_forecaster():
     from horizon_forecaster.forecaster import HorizonForecaster, MODEL_REGISTRY
 
@@ -199,13 +205,19 @@ def test_neuralprophet_is_registered_and_flows_through_forecaster():
 
     rng = np.random.default_rng(3)
     n = 120
-    df = pd.DataFrame({
-        "date": pd.date_range("2022-01-01", periods=n, freq="D"),
-        "orders": np.clip(200 + 1.5 * np.arange(n) + rng.normal(0, 10, n), 1, None),
-    })
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2022-01-01", periods=n, freq="D"),
+            "orders": np.clip(200 + 1.5 * np.arange(n) + rng.normal(0, 10, n), 1, None),
+        }
+    )
     f = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily",
-        models=["neuralprophet"], mape_threshold=100,
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["neuralprophet"],
+        mape_threshold=100,
         model_params={"neuralprophet": dict(FAST_PARAMS)},  # skip the grid: keep it fast
     )
     results = f.evaluate()

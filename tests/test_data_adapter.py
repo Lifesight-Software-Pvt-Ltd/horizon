@@ -9,13 +9,17 @@ from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 # ProphetAdapter
 # =====================================================================
 
+
 def make_raw_df():
-    return pd.DataFrame({
-        "date": pd.date_range("2026-01-01", periods=5, freq="D"),
-        "orders": [10, 20, 15, 25, 30],
-        "spend": [100, 150, 120, 180, 200],
-        "promo_flag": [0, 1, 0, 1, 0],
-    })
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=5, freq="D"),
+            "orders": [10, 20, 15, 25, 30],
+            "spend": [100, 150, 120, 180, 200],
+            "promo_flag": [0, 1, 0, 1, 0],
+        }
+    )
+
 
 def test_prophet_adapter_transform_train_renames_date_and_target():
     raw_df = make_raw_df()
@@ -28,6 +32,7 @@ def test_prophet_adapter_transform_train_renames_date_and_target():
     assert result["y"].tolist() == [10, 20, 15, 25, 30]
     assert pd.api.types.is_datetime64_any_dtype(result["ds"])
 
+
 def test_prophet_adapter_transform_train_includes_multiple_independent_columns():
     raw_df = make_raw_df()
     adapter = ProphetAdapter(
@@ -39,11 +44,13 @@ def test_prophet_adapter_transform_train_includes_multiple_independent_columns()
     assert "spend" in result.columns
     assert "promo_flag" in result.columns
 
+
 def test_prophet_adapter_transform_train_works_with_no_independent_columns():
     raw_df = make_raw_df()
     adapter = ProphetAdapter(date_column="date", target_column="orders")
     result = adapter.transform_train(raw_df)
     assert list(result.columns) == ["ds", "y"]
+
 
 def test_prophet_adapter_transform_train_raises_on_declared_but_missing_independent_column():
     raw_df = make_raw_df()
@@ -56,15 +63,19 @@ def test_prophet_adapter_transform_train_raises_on_declared_but_missing_independ
         adapter.transform_train(raw_df)
     assert "clicks" in str(exc_info.value)
 
+
 def test_prophet_adapter_transform_train_sorts_by_date():
-    raw_df = pd.DataFrame({
-        "date": pd.to_datetime(["2026-01-03", "2026-01-01", "2026-01-02"]),
-        "orders": [30, 10, 20],
-    })
+    raw_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-01-03", "2026-01-01", "2026-01-02"]),
+            "orders": [30, 10, 20],
+        }
+    )
     adapter = ProphetAdapter(date_column="date", target_column="orders")
     result = adapter.transform_train(raw_df)
     assert result["ds"].tolist() == list(pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]))
     assert result["y"].tolist() == [10, 20, 30]
+
 
 def test_prophet_adapter_transform_train_raises_on_missing_date_column():
     raw_df = pd.DataFrame({"orders": [1, 2, 3]})
@@ -72,11 +83,13 @@ def test_prophet_adapter_transform_train_raises_on_missing_date_column():
     with pytest.raises(InvalidConfigError):
         adapter.transform_train(raw_df)
 
+
 def test_prophet_adapter_transform_train_raises_on_missing_target_column():
     raw_df = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=3)})
     adapter = ProphetAdapter(date_column="date", target_column="orders")
     with pytest.raises(InvalidConfigError):
         adapter.transform_train(raw_df)
+
 
 def test_prophet_adapter_transform_future_basic():
     future_dates = pd.Series(pd.date_range("2026-02-01", periods=3, freq="D"))
@@ -84,6 +97,7 @@ def test_prophet_adapter_transform_future_basic():
     result = adapter.transform_future(future_dates)
     assert list(result.columns) == ["ds"]
     assert len(result) == 3
+
 
 def test_prophet_adapter_transform_future_includes_provided_independent_data():
     future_dates = pd.Series(pd.date_range("2026-02-01", periods=3, freq="D"))
@@ -94,6 +108,7 @@ def test_prophet_adapter_transform_future_includes_provided_independent_data():
     result = adapter.transform_future(future_dates, future_independent_df)
     assert "spend" in result.columns
     assert result["spend"].tolist() == [100, 110, 120]
+
 
 def test_prophet_adapter_transform_future_raises_when_independent_declared_but_df_is_none():
     """
@@ -110,6 +125,7 @@ def test_prophet_adapter_transform_future_raises_when_independent_declared_but_d
     with pytest.raises(InvalidConfigError):
         adapter.transform_future(future_dates, future_independent_df=None)
 
+
 def test_prophet_adapter_transform_future_raises_on_missing_independent_column_in_df():
     future_dates = pd.Series(pd.date_range("2026-02-01", periods=3, freq="D"))
     future_independent_df = pd.DataFrame({"clicks": [1, 2, 3]})  # "spend" missing
@@ -119,6 +135,7 @@ def test_prophet_adapter_transform_future_raises_on_missing_independent_column_i
     with pytest.raises(InvalidConfigError) as exc_info:
         adapter.transform_future(future_dates, future_independent_df)
     assert "spend" in str(exc_info.value)
+
 
 def test_prophet_adapter_transform_future_with_no_independent_columns_declared():
     """
@@ -131,6 +148,7 @@ def test_prophet_adapter_transform_future_with_no_independent_columns_declared()
     result = adapter.transform_future(future_dates, future_independent_df=None)
     assert list(result.columns) == ["ds"]
 
+
 # =====================================================================
 # CatBoostAdapter
 #
@@ -142,36 +160,67 @@ def test_prophet_adapter_transform_future_with_no_independent_columns_declared()
 # set doesn't have this failure mode since nothing needs to be frozen).
 # =====================================================================
 
+
 def make_catboost_raw_df(n=30, with_spend=False, freq="D"):
-    df = pd.DataFrame({
-        "date": pd.date_range("2026-01-01", periods=n, freq=freq),
-        "orders": [100 + i * 2 for i in range(n)],
-    })
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=n, freq=freq),
+            "orders": [100 + i * 2 for i in range(n)],
+        }
+    )
     if with_spend:
         df["spend"] = [50 + i for i in range(n)]
     return df
 
+
 _DAILY_EXPECTED_COLUMNS = {
-    "ds", "y", "time_idx", "week_of_year", "month", "quarter", "year",
-    "yearly_sin", "yearly_cos", "half_yearly_sin", "half_yearly_cos",
-    "day_of_week", "day_of_year", "weekly_sin", "weekly_cos", "monthly_sin", "monthly_cos",
+    "ds",
+    "y",
+    "time_idx",
+    "week_of_year",
+    "month",
+    "quarter",
+    "year",
+    "yearly_sin",
+    "yearly_cos",
+    "half_yearly_sin",
+    "half_yearly_cos",
+    "day_of_week",
+    "day_of_year",
+    "weekly_sin",
+    "weekly_cos",
+    "monthly_sin",
+    "monthly_cos",
 }
 _WEEKLY_EXPECTED_COLUMNS = {
-    "ds", "y", "time_idx", "week_of_year", "month", "quarter", "year",
-    "yearly_sin", "yearly_cos", "half_yearly_sin", "half_yearly_cos",
+    "ds",
+    "y",
+    "time_idx",
+    "week_of_year",
+    "month",
+    "quarter",
+    "year",
+    "yearly_sin",
+    "yearly_cos",
+    "half_yearly_sin",
+    "half_yearly_cos",
 }
 
 # ---------- constructor / frequency validation ----------
+
 
 def test_catboost_adapter_requires_valid_frequency():
     with pytest.raises(InvalidConfigError):
         CatBoostAdapter(date_column="date", target_column="orders", frequency="monthly")
 
+
 def test_catboost_adapter_requires_frequency_to_be_provided():
     with pytest.raises(InvalidConfigError):
         CatBoostAdapter(date_column="date", target_column="orders")  # frequency=None default
 
+
 # ---------- transform_train ----------
+
 
 def test_catboost_adapter_transform_train_daily_produces_expected_columns():
     df = make_catboost_raw_df(n=30)
@@ -179,12 +228,14 @@ def test_catboost_adapter_transform_train_daily_produces_expected_columns():
     result = adapter.transform_train(df)
     assert set(result.columns) == _DAILY_EXPECTED_COLUMNS
 
+
 def test_catboost_adapter_transform_train_weekly_excludes_daily_only_features():
     df = make_catboost_raw_df(n=30, freq="7D")
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="weekly")
     result = adapter.transform_train(df)
     assert set(result.columns) == _WEEKLY_EXPECTED_COLUMNS
     assert "day_of_week" not in result.columns
+
 
 def test_catboost_adapter_transform_train_drops_no_rows():
     """
@@ -197,17 +248,20 @@ def test_catboost_adapter_transform_train_drops_no_rows():
     assert len(result) == 30
     assert result.isna().sum().sum() == 0
 
+
 def test_catboost_adapter_transform_train_time_idx_starts_at_zero():
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     result = adapter.transform_train(df)
     assert result["time_idx"].tolist() == list(range(30))
 
+
 def test_catboost_adapter_transform_train_time_idx_weekly_measured_in_weeks():
     df = make_catboost_raw_df(n=10, freq="7D")
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="weekly")
     result = adapter.transform_train(df)
     assert result["time_idx"].tolist() == [float(i) for i in range(10)]
+
 
 def test_catboost_adapter_transform_train_calendar_features_are_correct():
     df = make_catboost_raw_df(n=30)
@@ -218,6 +272,7 @@ def test_catboost_adapter_transform_train_calendar_features_are_correct():
     assert result.iloc[0]["month"] == first_ds.month
     assert result.iloc[0]["year"] == first_ds.year
 
+
 def test_catboost_adapter_transform_train_cyclical_features_are_bounded():
     """
     sin/cos features should always fall within [-1, 1] and never be
@@ -227,17 +282,29 @@ def test_catboost_adapter_transform_train_cyclical_features_are_bounded():
     df = make_catboost_raw_df(n=400)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     result = adapter.transform_train(df)
-    cyclical_cols = ["yearly_sin", "yearly_cos", "half_yearly_sin", "half_yearly_cos",
-                      "weekly_sin", "weekly_cos", "monthly_sin", "monthly_cos"]
+    cyclical_cols = [
+        "yearly_sin",
+        "yearly_cos",
+        "half_yearly_sin",
+        "half_yearly_cos",
+        "weekly_sin",
+        "weekly_cos",
+        "monthly_sin",
+        "monthly_cos",
+    ]
     for col in cyclical_cols:
         assert result[col].between(-1, 1).all(), col
         assert result[col].notna().all(), col
 
+
 def test_catboost_adapter_transform_train_includes_independent_columns():
     df = make_catboost_raw_df(n=30, with_spend=True)
-    adapter = CatBoostAdapter(date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily")
+    adapter = CatBoostAdapter(
+        date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily"
+    )
     result = adapter.transform_train(df)
     assert "spend" in result.columns
+
 
 def test_catboost_adapter_transform_train_works_with_no_independent_columns():
     df = make_catboost_raw_df(n=30)
@@ -245,12 +312,16 @@ def test_catboost_adapter_transform_train_works_with_no_independent_columns():
     result = adapter.transform_train(df)
     assert "spend" not in result.columns
 
+
 def test_catboost_adapter_transform_train_raises_on_declared_but_missing_independent_column():
     df = make_catboost_raw_df(n=30)  # no "spend" column
-    adapter = CatBoostAdapter(date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily")
+    adapter = CatBoostAdapter(
+        date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily"
+    )
     with pytest.raises(InvalidConfigError) as exc_info:
         adapter.transform_train(df)
     assert "spend" in str(exc_info.value)
+
 
 def test_catboost_adapter_transform_train_raises_on_missing_date_column():
     df = pd.DataFrame({"orders": list(range(30))})
@@ -258,25 +329,31 @@ def test_catboost_adapter_transform_train_raises_on_missing_date_column():
     with pytest.raises(InvalidConfigError):
         adapter.transform_train(df)
 
+
 def test_catboost_adapter_transform_train_raises_on_missing_target_column():
     df = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=30)})
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     with pytest.raises(InvalidConfigError):
         adapter.transform_train(df)
 
+
 def test_catboost_adapter_transform_train_sorts_by_date():
     n = 30
     shuffled_dates = list(pd.date_range("2026-01-01", periods=n, freq="D"))
-    df = pd.DataFrame({
-        "date": list(reversed(shuffled_dates)),
-        "orders": list(reversed([100 + i * 2 for i in range(n)])),
-    })
+    df = pd.DataFrame(
+        {
+            "date": list(reversed(shuffled_dates)),
+            "orders": list(reversed([100 + i * 2 for i in range(n)])),
+        }
+    )
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     result = adapter.transform_train(df)
     assert result["ds"].is_monotonic_increasing
     assert result["time_idx"].tolist() == list(range(n))
 
+
 # ---------- transform_future ----------
+
 
 def test_catboost_adapter_transform_future_raises_if_called_before_transform_train():
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
@@ -284,16 +361,20 @@ def test_catboost_adapter_transform_future_raises_if_called_before_transform_tra
     with pytest.raises(InvalidConfigError):
         adapter.transform_future(future_dates)
 
+
 def test_catboost_adapter_transform_future_basic_shape():
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=5, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=5, freq="D")
+    )
     result = adapter.transform_future(future_dates)
     assert len(result) == 5
     assert set(result.columns) == (_DAILY_EXPECTED_COLUMNS - {"y"})
     assert result.isna().sum().sum() == 0
+
 
 def test_catboost_adapter_transform_future_time_idx_continues_seamlessly_from_training():
     """
@@ -306,21 +387,27 @@ def test_catboost_adapter_transform_future_time_idx_continues_seamlessly_from_tr
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     train_result = adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=5, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=5, freq="D")
+    )
     result = adapter.transform_future(future_dates)
     assert result["time_idx"].iloc[0] == train_result["time_idx"].iloc[-1] + 1
     assert result["time_idx"].tolist() == [30, 31, 32, 33, 34]
     assert result["time_idx"].nunique() == 5
+
 
 def test_catboost_adapter_transform_future_calendar_and_cyclical_features_vary_per_row():
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=10, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=10, freq="D")
+    )
     result = adapter.transform_future(future_dates)
     assert result["day_of_week"].nunique() > 1
     assert result["yearly_sin"].nunique() > 1
+
 
 def test_catboost_adapter_transform_future_handles_a_non_contiguous_horizon():
     """
@@ -335,46 +422,66 @@ def test_catboost_adapter_transform_future_handles_a_non_contiguous_horizon():
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     adapter.transform_train(df)
 
-    far_future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=10), periods=3, freq="D"))
+    far_future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=10), periods=3, freq="D")
+    )
     result = adapter.transform_future(far_future_dates)
     assert result["time_idx"].tolist() == [39, 40, 41]
 
+
 def test_catboost_adapter_transform_future_includes_provided_independent_data():
     df = make_catboost_raw_df(n=30, with_spend=True)
-    adapter = CatBoostAdapter(date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily")
+    adapter = CatBoostAdapter(
+        date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily"
+    )
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D")
+    )
     future_spend = pd.DataFrame({"spend": [500, 510, 520]})
     result = adapter.transform_future(future_dates, future_spend)
     assert result["spend"].tolist() == [500, 510, 520]
 
+
 def test_catboost_adapter_transform_future_raises_when_independent_declared_but_df_is_none():
     df = make_catboost_raw_df(n=30, with_spend=True)
-    adapter = CatBoostAdapter(date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily")
+    adapter = CatBoostAdapter(
+        date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily"
+    )
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D")
+    )
     with pytest.raises(InvalidConfigError):
         adapter.transform_future(future_dates, future_independent_df=None)
 
+
 def test_catboost_adapter_transform_future_raises_on_missing_independent_column_in_df():
     df = make_catboost_raw_df(n=30, with_spend=True)
-    adapter = CatBoostAdapter(date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily")
+    adapter = CatBoostAdapter(
+        date_column="date", target_column="orders", independent_columns=["spend"], frequency="daily"
+    )
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=3, freq="D")
+    )
     future_df_missing = pd.DataFrame({"clicks": [1, 2, 3]})
     with pytest.raises(InvalidConfigError) as exc_info:
         adapter.transform_future(future_dates, future_df_missing)
     assert "spend" in str(exc_info.value)
+
 
 def test_catboost_adapter_transform_future_with_no_independent_columns_declared():
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
     adapter.transform_train(df)
 
-    future_dates = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=2, freq="D"))
+    future_dates = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=2, freq="D")
+    )
     result = adapter.transform_future(future_dates, future_independent_df=None)
     assert "spend" not in result.columns
     assert len(result) == 2

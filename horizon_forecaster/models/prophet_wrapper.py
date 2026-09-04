@@ -16,6 +16,7 @@ from horizon_forecaster.exceptions import (
 )
 from horizon_forecaster.models.base import BaseModel
 
+
 class ProphetWrapper(BaseModel):
     """
     Wraps Facebook/Meta Prophet to conform to the BaseModel contract.
@@ -149,9 +150,7 @@ class ProphetWrapper(BaseModel):
                 model_name=self.model_name,
             )
 
-        missing_regressors = [
-            c for c in self._regressor_columns if c not in future_exog.columns
-        ]
+        missing_regressors = [c for c in self._regressor_columns if c not in future_exog.columns]
         if missing_regressors:
             raise ModelPredictionError(
                 f"future_exog is missing required regressor column(s): {missing_regressors}",
@@ -166,6 +165,7 @@ class ProphetWrapper(BaseModel):
         # default 42) makes results reproducible across repeated calls
         # and across save/load cycles.
         import numpy as np
+
         np.random.seed(self.random_seed)
 
         try:

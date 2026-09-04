@@ -5,9 +5,9 @@ Expects train_df already shaped by NeuralProphetAdapter (columns "ds",
 "y", plus any regressor columns under their original names).
 
 Key design decisions, several of them deliberate departures from the
-project owner's reference notebook:
+reference implementation this was ported from:
 
-- **n_lags = 0 (no autoregression).** The reference notebook grid-searched
+- **n_lags = 0 (no autoregression).** That implementation grid-searched
   n_lags in {0, 7} and predicted on a frame CONTAINING the test period's
   real `y` values, which with n_lags > 0 makes each test point an
   effectively one-step-ahead prediction that has seen recent actuals.
@@ -38,8 +38,8 @@ project owner's reference notebook:
 
 - **yearly_seasonality defaults to "auto", not True.** Forcing yearly
   seasonality on short history is a failure mode this project has already
-  hit twice (Prophet producing negative forecasts in Phase 2; SARIMAX's
-  annual Fourier swinging MAPE from ~6% to ~65% on under half a year).
+  hit twice: Prophet produced negative forecasts, and SARIMAX's annual
+  Fourier terms swung MAPE from ~6% to ~65% on under half a year of data.
 
 - **collect_metrics is disabled** (in default_params.yaml). This is a
   correctness requirement, not a tuning choice. NeuralProphet attaches a
@@ -244,9 +244,7 @@ class NeuralProphetWrapper(BaseModel):
         if self._target_min is not None and self._target_min >= 0:
             yhat = np.clip(yhat, 0.0, None)
 
-        return pd.DataFrame(
-            {"ds": future_exog["ds"].reset_index(drop=True), "yhat": yhat}
-        )
+        return pd.DataFrame({"ds": future_exog["ds"].reset_index(drop=True), "yhat": yhat})
 
     # ---------- internals ----------
 
