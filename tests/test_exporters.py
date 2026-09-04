@@ -246,7 +246,8 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
     matplotlib.use("Agg")
     results = {"prophet": make_forecast_result([1.0, 2.0, 3.0])}
     written = export_forecast(results, make_ensemble(), output_dir=str(tmp_path))
-    # CSV keys + plot keys (overlay + one dedicated figure per model + ensemble)
+    # CSV keys + plot keys (one overlay and one ensemble figure per
+    # combination rule, plus one dedicated figure per model)
     assert {
         "final_ensemble_inverse_mape",
         "final_best_model",
@@ -254,12 +255,16 @@ def test_export_forecast_writes_csvs_and_plots(tmp_path):
         "rejected",
         "model_summary",
     } <= set(written)
-    assert {"plot_overlay", "plot_prophet", "plot_ensemble"} <= set(written)
+    assert {
+        "plot_overlay_inverse_mape",
+        "plot_prophet",
+        "plot_ensemble_inverse_mape",
+    } <= set(written)
     for name in (
         "forecast_final_ensemble_inverse_mape.csv",
-        "forecast_overlay.png",
+        "forecast_overlay_inverse_mape.png",
         "forecast_prophet.png",
-        "forecast_ensemble.png",
+        "forecast_ensemble_inverse_mape.png",
     ):
         assert (tmp_path / name).exists()
 
@@ -431,7 +436,7 @@ def test_export_forecast_accepts_the_forecaster_dict(tmp_path):
     )
     assert "final_ensemble_trimmed" in written
     assert (tmp_path / "forecast_final_ensemble_trimmed.csv").exists()
-    assert "plot_ensemble" in written
+    assert "plot_ensemble_trimmed" in written
     # The combined series must actually reach the file, not just its header.
     assert list(pd.read_csv(written["final_ensemble_trimmed"])["yhat"]) == [12.0, 20.0, 32.0]
 

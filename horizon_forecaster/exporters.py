@@ -395,8 +395,9 @@ def export_forecast(
     forecast charts, all into the same output_dir.
 
     Writes the CSVs via export_forecast_csvs(), then — unless
-    save_plots=False, or there are no forecasts to plot — the overlay and
-    per-model PNGs via horizon_forecaster.plotting.save_forecast_plots().
+    save_plots=False, or there are no forecasts to plot — the per-rule
+    overlays and the per-model/per-rule PNGs via
+    horizon_forecaster.plotting.save_forecast_plots().
     matplotlib is imported lazily here, so the CSV-only export_forecast_csvs()
     path never pays that import cost.
 
@@ -417,8 +418,11 @@ def export_forecast(
         bare "final_ensemble" when no ensemble was supplied at all --
         plus "final_best_model", "per_model", "rejected",
         "model_summary"), and when plots were saved, "plot_"-prefixed
-        plot keys ("plot_overlay", "plot_ensemble", and one
-        "plot_<model>" per model).
+        plot keys: one "plot_overlay_<method>" and one
+        "plot_ensemble_<method>" per combination method, plus one
+        "plot_<model>" per model. Asking for three rules therefore writes
+        three overlays and three ensemble figures, each against the same
+        models -- not one chart that silently shows only the first rule.
     """
     written = export_forecast_csvs(
         forecast_results,

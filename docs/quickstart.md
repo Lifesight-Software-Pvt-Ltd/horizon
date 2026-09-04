@@ -235,9 +235,15 @@ print(paths)
 
 This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
-`per_model`, `rejected_models` and `model_summary`, and (unless
-`save_plots=False`) one forecast PNG per model, one for the ensemble, and an
-overlay.
+`per_model`, `rejected_models` and `model_summary`.
+
+Unless `save_plots=False`, it also writes, **per combination rule**, an
+overlay (`forecast_overlay_<method>.png`: every model, the history, and that
+rule) and a dedicated ensemble figure (`forecast_ensemble_<method>.png`),
+alongside one figure per model (`forecast_<model>.png`). Five models and three
+rules therefore give three overlays and eight individual figures. The method
+suffix is present even for a single rule, so a downstream job can glob a
+stable pattern.
 
 `model_summary` carries `validation_mape` and `mape` side by side, so the
 selection-vs-reported gap is visible per model. Its `ensemble_weight` column
@@ -251,22 +257,43 @@ against three different series.
 ## Plotting directly
 
 If you want figures without exporting, the functions in
-`horizon_forecaster.plotting` each draw onto and return a matplotlib `Axes`
-(or a `{label: Figure}` dict for the per-model variants) without calling
-`plt.show()`. They all accept the `{method: EnsembleResult}` dict directly:
+`horizon_forecaster.plotting` draw and return without calling `plt.show()`,
+and all accept the `{method: EnsembleResult}` dict directly:
 
 ```python
-from horizon_forecaster.plotting import plot_evaluation, plot_model_comparison
+from horizon_forecaster.plotting import (
+    plot_evaluation,
+    plot_evaluation_per_model,
+    plot_model_comparison,
+)
 
-plot_evaluation(results, forecaster.evaluate_ensemble)         # actuals vs each model's test predictions
-plot_model_comparison(results, forecaster.evaluate_ensemble)   # bar chart of per-model + ensemble MAPE
+# One chart per combination rule: {method: Axes}, always a dict.
+axes = plot_evaluation(results, forecaster.evaluate_ensemble)
+axes["trimmed"]        # every model + the actuals + the trimmed ensemble
+axes["inverse_mape"]   # the same models, against the inverse-MAPE ensemble
+
+# One figure per model, plus one per rule that formed: {label: Figure}.
+figures = plot_evaluation_per_model(results, forecaster.evaluate_ensemble)
+figures["sarimax"]
+figures["ensemble_trimmed"]
+
+# All rules on one Axes -- comparing them is what a bar chart is for.
+plot_model_comparison(results, forecaster.evaluate_ensemble)
 ```
 
-The line charts draw only the **first** requested method — overlaying several
-combination rules on one time axis buries the per-model lines the chart exists
-to show. `plot_model_comparison` is the exception: comparing rules is exactly
-what a bar chart is for, so it draws one bar per method. Its bars are
-**test-window** MAPEs, not the validation scores the models were selected on.
+`plot_evaluation` and `plot_forecast` draw **one chart per combination rule**,
+each against the same models and actuals, and return a dict keyed by method —
+always a dict, even for a single rule, and keyed `"models"` when no ensemble
+was given. Overlaying several rules on one time axis would bury the per-model
+lines the chart exists to show, which is why they are separate charts rather
+than one crowded one. Passing `ax=` is therefore only valid when a single rule
+will be drawn; supplying it for several raises `ValueError` rather than
+silently dropping the rest.
+
+`plot_model_comparison` is the exception: comparing rules head-to-head is
+exactly what a bar chart is for, so every rule shares one Axes. Its bars are
+**test-window** MAPEs, not the validation scores the models were selected
+on.
 
 ## Important: the ensemble is not guaranteed to win
 

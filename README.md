@@ -198,8 +198,10 @@ run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
   `final_best_model`, `per_model`, `rejected_models` (per model *and* method), and
   `model_summary` (validation MAPE, test MAPE, method, rule applied, weight and
   status).
-- **Plots** (unless disabled) — an overlay chart plus one dedicated figure per
-  model and the ensemble.
+- **Plots** (unless disabled) — one overlay per combination rule (every
+  model against that rule), one dedicated figure per model, and one per rule.
+  Five models and three rules give three overlays and eight individual
+  figures.
 
 The plotting functions in `horizon_forecaster.plotting` can also be called
 directly; each returns a matplotlib `Axes`/`Figure` without calling

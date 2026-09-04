@@ -520,13 +520,33 @@ in the wrapper, mirroring that split.
 
 ## 6. Output layer
 
-`plotting.py` offers two chart families at each stage: compact overlays
+`plotting.py` offers two chart families at each stage: overlays
 (`plot_evaluation()`, `plot_forecast()`) and dedicated per-model figures
 (`plot_evaluation_per_model()`, `plot_forecast_per_model()`), plus
 `plot_model_comparison()`, a MAPE bar chart that makes "the ensemble is not
 automatically better" visible at a glance. The per-model figures exist
 because the overlay crowds at even two models when their lines coincide, and
 a first faceted-grid attempt made each panel too small to read.
+
+- **One chart per combination rule, not one chart for the first rule.** Both
+  overlays return `{method: Axes}` — always a dict, matching the convention
+  `evaluate()` and `evaluate_ensemble` already follow — and the per-model
+  functions emit an `ensemble_<method>` figure for every rule that formed. An
+  earlier cut collapsed to the first requested method on the grounds that
+  several rules on one time axis bury the per-model lines. The premise was
+  right and the conclusion was wrong: with `ensemble_method=None` a caller
+  pays to build all three rules and could then see only one of them, with no
+  indication the other two existed. Separate charts keep the axis readable
+  *and* keep every rule visible, each against the same models and actuals,
+  which is what makes the rules comparable against the truth rather than only
+  against each other. A caller-supplied `ax` is consequently refused for more
+  than one rule — silently ignoring the extras is the defect this shape
+  exists to prevent.
+- **The bar chart is the deliberate exception**: every rule shares one Axes,
+  because comparing rules head-to-head is what a bar chart is for. Its labels
+  are rotated, since an "ensemble (inverse_mape)" label is several times
+  longer than a model name and collides with its neighbours at that bar count
+  when drawn horizontally.
 
 - **Charts draw and return; they never call `plt.show()`.** Rendering is the
   caller's decision, which keeps the functions testable under a headless

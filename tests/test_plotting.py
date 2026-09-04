@@ -30,6 +30,20 @@ def _ds(n=3):
     return pd.date_range("2023-01-01", periods=n, freq="D")
 
 
+def _only(axes):
+    """
+    Unwrap the single-chart case.
+
+    plot_evaluation/plot_forecast return {key: Axes} -- one chart per
+    combination rule -- and most tests here build exactly one rule, so
+    this asserts that shape and hands back the Axes. The assertion is the
+    point: a test that silently indexed [0] would still pass if a rule
+    were dropped, which is the defect this shape exists to prevent.
+    """
+    assert len(axes) == 1, f"expected exactly one chart, got {sorted(axes)}"
+    return next(iter(axes.values()))
+
+
 def make_eval_result(mape_value, *, with_bounds=False, n=3):
     ds = _ds(n)
     cols = {"ds": ds, "y": [10, 20, 30][:n], "yhat": [11, 19, 31][:n]}
@@ -85,7 +99,7 @@ def make_trimmed_ensemble(*, n=3, degraded=False):
 
 def test_plot_evaluation_draws_actual_plus_one_line_per_model():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
-    ax = plot_evaluation(results)
+    ax = _only(plot_evaluation(results))
     # 1 actual + 2 model lines
     assert len(ax.get_lines()) == 3
     labels = [ln.get_label() for ln in ax.get_lines()]
@@ -95,7 +109,7 @@ def test_plot_evaluation_draws_actual_plus_one_line_per_model():
 
 def test_plot_evaluation_overlays_ensemble_with_its_mape():
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, ensemble=make_ensemble())
+    ax = _only(plot_evaluation(results, ensemble=make_ensemble()))
     labels = [ln.get_label() for ln in ax.get_lines()]
     # The line is named for the rule that actually ran, not the one requested.
     assert any(lbl.startswith("ensemble (") and "8.00%" in lbl for lbl in labels)
@@ -103,7 +117,7 @@ def test_plot_evaluation_overlays_ensemble_with_its_mape():
 
 def test_plot_evaluation_skips_ensemble_when_not_formed():
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, ensemble=make_ensemble(combined=False))
+    ax = _only(plot_evaluation(results, ensemble=make_ensemble(combined=False)))
     labels = [ln.get_label() for ln in ax.get_lines()]
     assert not any("ensemble" in lbl for lbl in labels)
 
@@ -111,8 +125,8 @@ def test_plot_evaluation_skips_ensemble_when_not_formed():
 def test_plot_evaluation_shades_bounds_only_when_present():
     with_b = {"prophet": make_eval_result(5.0, with_bounds=True)}
     without_b = {"catboost": make_eval_result(12.0, with_bounds=False)}
-    assert len(plot_evaluation(with_b).collections) == 1
-    assert len(plot_evaluation(without_b).collections) == 0
+    assert len(_only(plot_evaluation(with_b)).collections) == 1
+    assert len(_only(plot_evaluation(without_b)).collections) == 0
 
 
 def test_plot_evaluation_empty_raises():
@@ -126,7 +140,7 @@ def _has_no_ensemble_note(ax):
 
 def test_plot_evaluation_flags_when_no_ensemble_formed():
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, ensemble=make_ensemble(combined=False))
+    ax = _only(plot_evaluation(results, ensemble=make_ensemble(combined=False)))
     assert _has_no_ensemble_note(ax)
     # individual model line is still drawn (diagnosis, not suppressed)
     assert any("prophet" in ln.get_label() for ln in ax.get_lines())
@@ -134,8 +148,8 @@ def test_plot_evaluation_flags_when_no_ensemble_formed():
 
 def test_plot_evaluation_no_note_when_ensemble_formed_or_absent():
     results = {"prophet": make_eval_result(5.0)}
-    assert not _has_no_ensemble_note(plot_evaluation(results, ensemble=make_ensemble()))
-    assert not _has_no_ensemble_note(plot_evaluation(results))
+    assert not _has_no_ensemble_note(_only(plot_evaluation(results, ensemble=make_ensemble())))
+    assert not _has_no_ensemble_note(_only(plot_evaluation(results)))
 
 
 # ---------- plot_forecast ----------
@@ -143,19 +157,21 @@ def test_plot_evaluation_no_note_when_ensemble_formed_or_absent():
 
 def test_plot_forecast_one_line_per_model_no_history():
     results = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
-    ax = plot_forecast(results)
+    ax = _only(plot_forecast(results))
     assert len(ax.get_lines()) == 2
 
 
 def test_plot_forecast_includes_history_and_ensemble():
     results = {"prophet": make_forecast_result()}
     history = pd.DataFrame({"date": _ds(5), "orders": [1, 2, 3, 4, 5]})
-    ax = plot_forecast(
-        results,
-        history=history,
-        date_column="date",
-        target_column="orders",
-        ensemble=make_ensemble(),
+    ax = _only(
+        plot_forecast(
+            results,
+            history=history,
+            date_column="date",
+            target_column="orders",
+            ensemble=make_ensemble(),
+        )
     )
     labels = [ln.get_label() for ln in ax.get_lines()]
     assert "History" in labels
@@ -172,7 +188,7 @@ def test_plot_forecast_empty_raises():
 
 def test_plot_forecast_flags_when_no_ensemble_formed():
     results = {"prophet": make_forecast_result()}
-    ax = plot_forecast(results, ensemble=make_ensemble(combined=False))
+    ax = _only(plot_forecast(results, ensemble=make_ensemble(combined=False)))
     assert _has_no_ensemble_note(ax)
 
 
@@ -224,7 +240,7 @@ def test_plot_evaluation_per_model_one_figure_each():
 def test_plot_evaluation_per_model_adds_ensemble_figure_when_formed():
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
     figs = plot_evaluation_per_model(results, ensemble=make_ensemble())
-    assert set(figs) == {"prophet", "catboost", "ensemble"}
+    assert set(figs) == {"prophet", "catboost", "ensemble_inverse_mape"}
 
 
 def test_plot_evaluation_per_model_flags_and_omits_ensemble_when_not_formed():
@@ -243,7 +259,7 @@ def test_plot_evaluation_per_model_empty_raises():
 def test_plot_forecast_per_model_one_figure_each_plus_ensemble():
     results = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
     figs = plot_forecast_per_model(results, ensemble=make_ensemble())
-    assert set(figs) == {"prophet", "catboost", "ensemble"}
+    assert set(figs) == {"prophet", "catboost", "ensemble_inverse_mape"}
 
 
 def test_plot_forecast_per_model_empty_raises():
@@ -257,7 +273,13 @@ def test_plot_forecast_per_model_empty_raises():
 def test_save_evaluation_plots_writes_overlay_comparison_and_per_model(tmp_path):
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
     written = save_evaluation_plots(results, make_ensemble(), output_dir=str(tmp_path))
-    assert set(written) == {"overlay", "mape_comparison", "prophet", "catboost", "ensemble"}
+    assert set(written) == {
+        "overlay_inverse_mape",
+        "mape_comparison",
+        "prophet",
+        "catboost",
+        "ensemble_inverse_mape",
+    }
     for path in written.values():
         assert path.endswith(".png")
         assert (tmp_path / path.split("/")[-1]).exists()
@@ -266,7 +288,7 @@ def test_save_evaluation_plots_writes_overlay_comparison_and_per_model(tmp_path)
 def test_save_forecast_plots_writes_overlay_and_per_model(tmp_path):
     results = {"prophet": make_forecast_result()}
     written = save_forecast_plots(results, ensemble=make_ensemble(), output_dir=str(tmp_path))
-    assert set(written) == {"overlay", "prophet", "ensemble"}
+    assert set(written) == {"overlay_inverse_mape", "prophet", "ensemble_inverse_mape"}
     for path in written.values():
         assert (tmp_path / path.split("/")[-1]).exists()
 
@@ -274,7 +296,8 @@ def test_save_forecast_plots_writes_overlay_and_per_model(tmp_path):
 def test_save_forecast_plots_creates_nested_dir(tmp_path):
     target = tmp_path / "plots" / "run1"
     save_forecast_plots({"prophet": make_forecast_result()}, output_dir=str(target))
-    assert (target / "forecast_overlay.png").exists()
+    # No ensemble was given, so the single overlay is keyed "models".
+    assert (target / "forecast_overlay_models.png").exists()
 
 
 def test_save_evaluation_plots_empty_raises(tmp_path):
@@ -288,7 +311,143 @@ def test_save_evaluation_plots_empty_raises(tmp_path):
 def test_plot_functions_draw_on_supplied_ax():
     fig, ax = plt.subplots()
     returned = plot_evaluation({"prophet": make_eval_result(5.0)}, ax=ax)
-    assert returned is ax
+    assert _only(returned) is ax
+
+
+# ---------- one chart per combination rule ----------
+
+
+def _three_rules():
+    """The shape a real ensemble_method=None run produces: all three rules."""
+    return {
+        "trimmed": make_trimmed_ensemble(),
+        "inverse_mape": make_ensemble(),
+        "equal": EnsembleResult(
+            combined=pd.DataFrame({"ds": _ds(3), "yhat": [12, 20, 32]}),
+            method="equal",
+            rule_applied="equal",
+            members=["prophet", "catboost"],
+            weights={"prophet": 0.5, "catboost": 0.5},
+            mape=MapeResult(value=9.0, excluded_zero_actual_count=0, total_count=3),
+        ),
+    }
+
+
+def test_plot_evaluation_draws_one_chart_per_rule_against_every_model():
+    """
+    The defect this shape exists to prevent: with three rules built, the
+    charts used to show only the first, so two combinations the caller had
+    paid to compute were invisible. Each rule now gets its own chart
+    carrying the SAME models and actuals, which is what makes the rules
+    comparable against the truth rather than only against each other.
+    """
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
+    axes = plot_evaluation(results, _three_rules())
+
+    assert set(axes) == {"trimmed", "inverse_mape", "equal"}
+    for method, ax in axes.items():
+        labels = [ln.get_label() for ln in ax.get_lines()]
+        # actuals + both models + exactly one ensemble line, every time
+        assert "Actual" in labels
+        assert any("prophet" in lbl for lbl in labels)
+        assert any("catboost" in lbl for lbl in labels)
+        assert sum(lbl.startswith("ensemble (") for lbl in labels) == 1
+        assert method in ax.get_title()
+
+
+def test_plot_forecast_draws_one_chart_per_rule():
+    forecasts = {"prophet": make_forecast_result(), "catboost": make_forecast_result()}
+    axes = plot_forecast(forecasts, ensemble=_three_rules())
+
+    assert set(axes) == {"trimmed", "inverse_mape", "equal"}
+    for ax in axes.values():
+        labels = [ln.get_label() for ln in ax.get_lines()]
+        assert sum(lbl.startswith("ensemble (") for lbl in labels) == 1
+
+
+def test_per_model_figures_cover_every_model_and_every_rule():
+    """Five models and three rules give eight figures, not six."""
+    results = {name: make_eval_result(5.0) for name in ("a", "b", "c", "d", "e")}
+    figs = plot_evaluation_per_model(results, _three_rules())
+    assert set(figs) == {
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "ensemble_trimmed",
+        "ensemble_inverse_mape",
+        "ensemble_equal",
+    }
+
+
+def test_saved_files_carry_the_method_suffix_even_for_a_single_rule(tmp_path):
+    """
+    The suffix is unconditional for the same reason the CSV exporter
+    suffixes final_ensemble_{method}.csv: a filename that changed shape
+    with the number of rules requested could not be globbed downstream.
+    """
+    written = save_forecast_plots(
+        {"prophet": make_forecast_result()},
+        ensemble={"trimmed": make_trimmed_ensemble()},
+        output_dir=str(tmp_path),
+    )
+    assert (tmp_path / "forecast_overlay_trimmed.png").exists()
+    assert (tmp_path / "forecast_ensemble_trimmed.png").exists()
+    assert all(Path(path).exists() for path in written.values())
+
+
+def test_supplied_ax_is_refused_for_several_rules():
+    """
+    Drawing three rules onto one caller-supplied Axes would reintroduce
+    the overlaying this shape avoids, and quietly dropping two of them is
+    the original defect -- so it is an error the caller can act on.
+    """
+    fig, ax = plt.subplots()
+    with pytest.raises(ValueError, match="several combination methods"):
+        plot_evaluation({"prophet": make_eval_result(5.0)}, _three_rules(), ax=ax)
+
+
+def test_no_ensemble_still_produces_one_chart():
+    """The return shape never depends on whether an ensemble was asked for."""
+    axes = plot_evaluation({"prophet": make_eval_result(5.0)})
+    assert set(axes) == {"models"}
+
+
+def test_bar_chart_labels_every_rule_and_rotates_them():
+    """
+    All three rules share one Axes here -- comparing them head-to-head is
+    what a bar chart is for. Rotation is what keeps the long ensemble
+    labels from colliding with their neighbours at that bar count.
+    """
+    results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
+    ax = plot_model_comparison(results, _three_rules())
+
+    assert len(ax.patches) == 5  # two models + three rules
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert "ensemble (trimmed)" in labels
+    assert "ensemble (inverse_mape)" in labels
+    assert all(t.get_rotation() > 0 for t in ax.get_xticklabels())
+
+
+def test_bar_chart_note_only_when_no_rule_formed_at_all():
+    """
+    A blanket "no ensemble formed" note would contradict a chart that
+    still shows a real ensemble bar, so it appears only when EVERY
+    requested rule came back empty.
+    """
+    results = {"prophet": make_eval_result(5.0)}
+    mixed = {
+        "trimmed": make_trimmed_ensemble(),
+        "equal": make_ensemble(combined=False, with_mape=False),
+    }
+    assert not _has_no_ensemble_note(plot_model_comparison(results, mixed))
+
+    all_empty = {
+        "trimmed": make_ensemble(combined=False, with_mape=False),
+        "equal": make_ensemble(combined=False, with_mape=False),
+    }
+    assert _has_no_ensemble_note(plot_model_comparison(results, all_empty))
 
 
 # ---------- the dict shape the forecaster actually hands over ----------
@@ -310,18 +469,18 @@ def test_every_plot_entry_point_accepts_the_forecaster_dict():
     # Assert the ensemble actually reached the chart, not merely that the
     # call didn't raise: these functions always return an Axes, so
     # `is not None` would still pass if the dict were silently dropped.
-    eval_ax = plot_evaluation(results, as_dict)
+    eval_ax = _only(plot_evaluation(results, as_dict))
     assert any("ensemble" in ln.get_label() for ln in eval_ax.get_lines())
 
-    forecast_ax = plot_forecast(forecasts, ensemble=as_dict)
+    forecast_ax = _only(plot_forecast(forecasts, ensemble=as_dict))
     assert any("ensemble" in ln.get_label() for ln in forecast_ax.get_lines())
 
     # One bar per model, plus one for the ensemble.
     comparison_ax = plot_model_comparison(results, as_dict)
     assert len(comparison_ax.patches) == len(results) + 1
 
-    assert "ensemble" in plot_evaluation_per_model(results, as_dict)
-    assert "ensemble" in plot_forecast_per_model(forecasts, ensemble=as_dict)
+    assert "ensemble_trimmed" in plot_evaluation_per_model(results, as_dict)
+    assert "ensemble_trimmed" in plot_forecast_per_model(forecasts, ensemble=as_dict)
 
 
 def test_save_helpers_accept_the_forecaster_dict(tmp_path):
@@ -330,16 +489,16 @@ def test_save_helpers_accept_the_forecaster_dict(tmp_path):
     as_dict = {"trimmed": make_trimmed_ensemble()}
 
     written = save_evaluation_plots(results, as_dict, output_dir=str(tmp_path))
-    assert "ensemble" in written
+    assert "ensemble_trimmed" in written
     written = save_forecast_plots(forecasts, ensemble=as_dict, output_dir=str(tmp_path))
-    assert "ensemble" in written
+    assert "ensemble_trimmed" in written
     assert all(Path(p).exists() for p in written.values())
 
 
 def test_line_charts_label_the_rule_that_actually_ran():
     """A two-member plain mean must not be labelled 'trimmed'."""
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, {"trimmed": make_trimmed_ensemble(degraded=True)})
+    ax = _only(plot_evaluation(results, {"trimmed": make_trimmed_ensemble(degraded=True)}))
     labels = [ln.get_label() for ln in ax.get_lines()]
     assert any("(mean)" in lbl and "degraded" in lbl for lbl in labels)
 
@@ -347,9 +506,9 @@ def test_line_charts_label_the_rule_that_actually_ran():
 def test_weightless_ensemble_still_plots():
     """The default rule carries weights=None; nothing may assume a dict."""
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, make_trimmed_ensemble())
+    ax = _only(plot_evaluation(results, make_trimmed_ensemble()))
     assert any("ensemble" in ln.get_label() for ln in ax.get_lines())
-    assert "ensemble" in plot_evaluation_per_model(results, make_trimmed_ensemble())
+    assert "ensemble_trimmed" in plot_evaluation_per_model(results, make_trimmed_ensemble())
 
 
 def test_forecast_charts_label_the_rule_that_actually_ran():
@@ -357,19 +516,20 @@ def test_forecast_charts_label_the_rule_that_actually_ran():
     Same guarantee as the evaluation charts: a degraded two-member mean is a
     materially weaker output than a five-member trimmed mean and must not be
     drawn under the same name. The returned dict KEY stays the plain
-    "ensemble" -- it is a stable handle and a filename -- so only the drawn
-    label carries the rule.
+    "ensemble_<method>", keyed by the rule REQUESTED -- it is a stable
+    handle and a filename -- so only the drawn label carries the rule that
+    actually ran.
     """
     forecasts = {"prophet": make_forecast_result()}
     degraded = {"trimmed": make_trimmed_ensemble(degraded=True)}
 
-    ax = plot_forecast(forecasts, ensemble=degraded)
+    ax = _only(plot_forecast(forecasts, ensemble=degraded))
     labels = [ln.get_label() for ln in ax.get_lines()]
     assert any("(mean)" in lbl and "degraded" in lbl for lbl in labels)
 
     figs = plot_forecast_per_model(forecasts, ensemble=degraded)
-    assert "ensemble" in figs
-    fig_labels = [ln.get_label() for ln in figs["ensemble"].axes[0].get_lines()]
+    assert "ensemble_trimmed" in figs
+    fig_labels = [ln.get_label() for ln in figs["ensemble_trimmed"].axes[0].get_lines()]
     assert any("(mean)" in lbl and "degraded" in lbl for lbl in fig_labels)
 
 
@@ -380,5 +540,5 @@ def test_no_ensemble_note_is_shown_through_the_forecaster_dict():
     survive normalisation, not just the bare-result path.
     """
     results = {"prophet": make_eval_result(5.0)}
-    ax = plot_evaluation(results, {"trimmed": make_ensemble(combined=False)})
+    ax = _only(plot_evaluation(results, {"trimmed": make_ensemble(combined=False)}))
     assert _has_no_ensemble_note(ax)
