@@ -12,3 +12,10 @@ build/
 .coverage
 htmlcov/
 .DS_Store
+catboost_info/
+lightning_logs/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+output/

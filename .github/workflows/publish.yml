@@ -19,9 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     # Required for PyPI Trusted Publishing (OIDC): GitHub mints a short-lived
     # identity token for this job, which PyPI/TestPyPI exchange for a
-    # short-lived (15-minute) upload token. No stored secrets involved --
-    # nothing to generate, rotate, or leak. This replaces the previous
-    # twine + long-lived API token approach.
+    # short-lived (15-minute) upload token. No stored secrets are involved --
+    # nothing to generate, rotate, or leak.
     permissions:
       id-token: write
     steps:

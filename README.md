@@ -128,7 +128,7 @@ forecaster = HorizonForecaster(
     validation_size=56,             # periods used for selection; None = frequency default
     test_size=28,                   # periods reported; None = frequency default
     models=None,                    # None = all five; or e.g. ["sarimax", "catboost"]
-    mape_threshold=40.0,            # garbage filter on the validation MAPE; None disables it
+    mape_threshold=40.0,            # degenerate-fit filter on the validation MAPE; None disables it
     ensemble_method="trimmed",      # or "inverse_mape", "equal", a list, or None for all three
 )
 
@@ -174,8 +174,8 @@ reported in `rejected_models` with their MAPE and the threshold they exceeded â€
 distinct from models that failed to fit, which land in `evaluate_errors` /
 `forecast_errors`.
 
-`mape_threshold` (default 40) is best understood as a **garbage filter** for
-degenerate fits rather than an accuracy screen: the trimmed rule already
+`mape_threshold` (default 40) is best understood as a filter for
+**degenerate fits** rather than an accuracy screen: the trimmed rule already
 discards the worst member on every period, so screening hard *and* trimming
 spends the same robustness budget twice. Pass `None` to admit every model.
 

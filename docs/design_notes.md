@@ -36,8 +36,8 @@ entry and nothing else. If a new model forces a change to the orchestrator's
 core logic, that is evidence of a gap in the `BaseAdapter`/`BaseModel`
 contract — fix the contract, do not special-case the orchestrator. All five
 current models were absorbed under this rule without an orchestrator change,
-including the two that fought it hardest (NeuralProphet's autoregression and
-PyMC's whole-series posterior; see §5).
+including the two that came closest to breaking it: NeuralProphet's
+autoregression and PyMC's whole-series posterior (see §5).
 
 **Pure modules stay pure.** `evaluation/metrics.py`,
 `evaluation/ensemble.py`, `future_exog.py`, `plotting.py` and `exporters.py`
@@ -155,7 +155,7 @@ alone scored 1.31% MAPE, CatBoost 12.77%, and their ~91%/9% inverse-MAPE
 blend scored **1.58%** — worse than Prophet alone despite Prophet carrying
 almost all the weight. Weights are fixed across the horizon while each
 model's per-period error is not, so a strong ensemble can still be dragged
-down on precisely the periods where a weak member is wrong. Trimming drops
+off on precisely the periods where a weak member is wrong. Trimming drops
 the offending member on the periods where it offends.
 
 **A combined forecast is still not guaranteed to beat the best single
@@ -177,7 +177,7 @@ first-class `degraded` field rather than a warning, and `rule_applied` names
 what actually ran: over exactly four members, trimming leaves two values
 whose mean *is* the median, and it says `"median"`.
 
-### `mape_threshold` is a garbage filter
+### `mape_threshold` filters degenerate fits
 
 It defaults to 40 and accepts `None` to admit everything. It is there to drop
 degenerate fits, not to screen for accuracy: sweeping the equivalent cutoff
@@ -242,8 +242,8 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   projects both. A flat driver degrades to pure seasonal naive; under one
   full cycle of history it falls back to `carry_forward`.
 - **Partial fill.** A supplied column is used as-is and only the missing
-  columns are generated — matching the real case, "I know next quarter's
-  planned spend but not the promo calendar."
+  columns are generated — matching the common case where next quarter's
+  planned spend is known but the promotional calendar is not.
 - **Transparency.** The resolved values (supplied + generated, with `ds`) are
   exposed as `forecaster.future_exog_used` and on each `ForecastResult`, so
   the assumptions behind a scenario can be inspected rather than trusted
@@ -294,8 +294,8 @@ gap-robust; sin/cos encodings cover yearly and half-yearly cycles, with
 weekly and monthly added for daily data; calendar fields and independent
 columns pass through.
 
-This replaced a lag(1/2/3/7/14) + rolling(7/14) design, and the reason is
-worth keeping. Because `predict()` is one batched call rather than a
+This replaced a lag(1/2/3/7/14) + rolling(7/14) design, and the reason it
+was replaced still applies. Because `predict()` is one batched call rather than a
 per-step recursive loop, those features had to be frozen at train-end and
 broadcast across the whole horizon. On real revenue data that scored 39.95%
 MAPE against Prophet's 18.68%. Two plausible explanations were tested and
@@ -432,12 +432,13 @@ operation.
   dict, so the new default refuses to unpickle it. The wrapper tries
   NeuralProphet's own loader first and falls back. Allowlisting via
   `add_safe_globals()` was rejected — a saved NeuralProphet drags in a tree of
-  its own config classes, so it becomes whack-a-mole across versions —
+  its own config classes, so the allowlist would need revising with every
+  version —
   and `weights_only=False` is appropriate for a file written by this
   library's own `save()`. The fallback must also call
   `restore_trainer(accelerator="cpu")`: `save()` deliberately nulls the
   Lightning trainer (it is not picklable), so a bare `torch.load` returns a
-  structurally complete model that dies on the *next* `predict()`.
+  structurally complete model that fails on the *next* `predict()`.
   `test_neuralprophet_compat.py` stubs `neuralprophet` and `torch` to drive
   this path on any torch version, because it never executes on an older one.
 - **Config widened to stop under-fitting.** On a synthetic sweep
@@ -449,7 +450,7 @@ operation.
   smooth-trend series (5.6% → 11.8%) by leaving a short, noisy final segment
   to extrapolate from; reverting to the 0.8 default kept the win.
 - `yearly_seasonality="auto"`, not forced — forcing it on short history has
-  produced garbage twice in this project. Non-negative clipping is
+  produced unusable forecasts twice in this project. Non-negative clipping is
   data-driven, mirroring CatBoost. No uncertainty bounds in 1.0, though
   `quantiles=[...]` is a natural follow-up now the output layer handles them.
 
@@ -491,8 +492,8 @@ in the wrapper, mirroring that split.
   directly: the trace is written to `<path>.nc` via arviz and the rest of the
   wrapper is pickled. `predict()` depends only on the pickled numpy state, so
   a reload reproduces predictions exactly even if the sidecar is absent.
-- **The daily config is tuned for sampling cost, and it is a speed problem,
-  not a validity one.** Weekly (≈100 rows, one annual cycle) samples cleanly
+- **The daily config is tuned for sampling cost. The constraint is speed,
+  not validity.** Weekly (≈100 rows, one annual cycle) samples cleanly
   at 2000 tune / 2000 draws. Daily (≈1144 rows) took about an hour on a first
   full-grid run: an annual basis, a weekly basis, and drivers that themselves
   track the annual cycle make a poorly-conditioned ridge, and NUTS answers
@@ -505,10 +506,10 @@ in the wrapper, mirroring that split.
   the collinear synthetic it halved sampling time *and* improved MAPE (1.0 →
   14.55%, 0.3 → 11.56%) — but it underfits strong, well-supported
   seasonality, so which wins is data-dependent and belongs in the grid.
-  A correction worth recording: an early diagnostic reported ~40% divergences
-  and the daily posterior was briefly called untrustworthy. That was an
-  artifact of an 80-step warmup in a throwaway test. With adequate warmup the
-  posterior is clean (0 divergences, R-hat ≈ 1.0).
+  One correction is worth recording: an early diagnostic reported ~40%
+  divergences, and the daily posterior was briefly judged untrustworthy. That
+  figure was an artifact of an 80-step warmup in a throwaway test. With
+  adequate warmup the posterior is clean (0 divergences, R-hat ≈ 1.0).
 - It remains by far the slowest model — a full NUTS sample per grid
   candidate. That is inherent to the approach. `nutpie` was considered as a
   further speedup and not adopted in 1.0: it addresses speed only, and the
@@ -618,14 +619,19 @@ Beyond unit tests, three things repeatedly found what unit tests did not:
   are clean parametric signals, which is exactly the regime where structural
   models look perfect and everything else looks broken.
 
-Two habits are worth carrying forward, both learned the expensive way. **Get
-the traceback before writing the fix**: the NeuralProphet `ConfigValueError`
-was first diagnosed by reading source rather than confirming against a stack
-trace, producing a fix that was plausible, self-consistent, and wrong, while
-contrary evidence sat in plain sight and got explained away. And **check a
-rule against real data before shipping it**: the first plausibility check
-used "entirely outside the historical range", which both missed the real case
-(the tail decayed back inside) and would have false-positived on every
+Two practices are recommended for anyone working on this library, both
+established after a defect that could have been avoided by them.
+
+**Obtain the traceback before writing the fix.** The NeuralProphet
+`ConfigValueError` was first diagnosed by reading library source rather than
+by confirming against a stack trace. The resulting fix was plausible,
+internally consistent, and wrong, and contrary evidence that was already
+visible was rationalised rather than investigated.
+
+**Check a proposed rule against real data before shipping it.** The first
+version of the plausibility check used "entirely outside the historical
+range", which both missed the case that motivated it (the forecast tail
+decayed back inside the range) and would have raised false positives on every
 healthy trend.
 
 ---

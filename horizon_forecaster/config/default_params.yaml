@@ -34,9 +34,8 @@
 #
 # Only daily/weekly are supported currently, per project scope.
 
-# Prophet's grid: 6 candidates per frequency. The first 4 reflect a
-# combination the project owner has actually used and found to work well in
-# practice on datasets with enough history to support them. The last 2 use
+# Prophet's grid: 6 candidates per frequency. The first 4 are settings
+# validated on real datasets with enough history to support them. The last 2 use
 # yearly_seasonality='auto' -- Prophet's own data-span-aware setting, which
 # safely disables yearly seasonality when there isn't enough history for it
 # rather than forcing it on regardless.
@@ -127,8 +126,8 @@ prophet:
 # across genuinely different model types, not just a second copy of it.
 #
 # hyperparameter_grid here is the full cartesian product of the ranges
-# below (a grid the project owner has used successfully before), kept
-# as the complete 16-combination grid rather than a curated subset,
+# below, validated on real data and kept as the complete 16-combination
+# grid rather than a curated subset,
 # plus 2 additional safe/conservative fallback candidates (see the
 # note further down, next to those entries) — 18 candidates total:
 #   iterations:    [500, 1000]
@@ -341,8 +340,7 @@ catboost:
       random_seed: 42
 
 # ---------------------------------------------------------------------------
-# SARIMAX (statsmodels). Phase 6, Part 1; converted to the standard grid
-# search after real-dataset testing.
+# SARIMAX (statsmodels).
 #
 # Everything under base_hyperparameters is interpreted by SARIMAXWrapper
 # itself (NOT passed to any statsmodels constructor blindly); wrapper_config
@@ -427,12 +425,12 @@ sarimax:
       random_seed: 42
 
 # ---------------------------------------------------------------------------
-# NeuralProphet (torch / PyTorch Lightning). Phase 6, Part 2.
+# NeuralProphet (torch / PyTorch Lightning).
 #
 # This uses the standard forecaster-level grid search, like every other model
-# (sarimax included since 1.0) -- the reference notebook already selected by
-# held-out MAPE, which is exactly what hyperparameter_grid does, so no
-# self-tuning wrapper is needed.
+# (sarimax included since 1.0). The reference implementation this was ported
+# from already selected by held-out MAPE, which is exactly what
+# hyperparameter_grid does, so no self-tuning wrapper is needed.
 #
 # n_lags is fixed at 0 (no autoregression) in v1: NeuralProphet fixes
 # n_forecasts at construction while BaseModel is fit-once/predict-any-horizon,
@@ -445,8 +443,8 @@ sarimax:
 # slow and makes two runs on the same data non-comparable.
 #
 # yearly_seasonality is "auto", NOT true -- forcing yearly seasonality on
-# short history has already produced garbage twice in this project (Prophet in
-# Phase 2, SARIMAX's annual Fourier in Phase 6 Part 1).
+# short history has produced unusable forecasts twice in this project, once
+# for Prophet and once for SARIMAX's annual Fourier terms.
 #
 # Grid + trend widened after synthetic-sweep testing showed NeuralProphet was
 # the consistent outlier -- badly on a mid-series level shift (18.7% vs ~2%)
@@ -525,7 +523,7 @@ neuralprophet:
       random_seed: 42
 
 # ---------------------------------------------------------------------------
-# Bayesian PyMC (NUTS/MCMC). Phase 6, Part 3.
+# Bayesian PyMC (NUTS/MCMC).
 #
 # A Bayesian structural model: linear trend + Fourier seasonality (annual
 # for both frequencies, plus a weekly cycle for daily) + a linear regression
@@ -543,11 +541,11 @@ neuralprophet:
 # meaningfully longer than the others.
 #
 # DAILY vs WEEKLY settings differ, on purpose. Weekly (short history, a
-# single annual cycle) samples cleanly and fast at the reference notebook's
-# 2000/2000 draws. Daily is a heavier regime: ~1000+ rows, and BOTH an
+# single annual cycle) samples cleanly and fast at the reference
+# implementation's 2000/2000 draws. Daily is a heavier regime: ~1000+ rows, and BOTH an
 # annual and a weekly Fourier basis that compete with any independent
 # columns which themselves track the annual cycle (the exact overlap SARIMAX
-# already warns about -- e.g. Shopify_spends/OOS_weightage). With enough
+# already warns about -- a seasonal spend or stockout driver, say). With enough
 # warmup the posterior is fine (0 divergences, R-hat ~1.0), but that
 # collinear ridge makes NUTS take very deep leapfrog trees, so cost per draw
 # is large -- a full-draw daily run took ~an hour. The daily block therefore:

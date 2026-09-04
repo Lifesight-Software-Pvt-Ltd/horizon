@@ -170,8 +170,12 @@ actually needed them.
 - `pytest --cov=horizon_forecaster` passes locally, and you have said which
   Python version you ran.
 - New behaviour has real tests; a bug fix has a test that fails without it.
-- `black .` (line length 100, configured in `pyproject.toml`) and `flake8` are
-  clean.
+- `black .` and `flake8` are clean. Both are configured to agree: line
+  length 100 in `pyproject.toml`'s `[tool.black]`, and the matching
+  `.flake8` (which also carries the per-file ignores for the handful of
+  deliberate exceptions in `tests/`). The repository is formatted and lint-
+  clean as it stands, so `black .` should leave your diff untouched apart
+  from the lines you actually changed.
 - `CHANGELOG.md` has an `Added`/`Fixed`/`Changed` entry if a user of the
   library would notice the change. Open a new `## [Unreleased]` section above
   the latest release if one is not there; do not file under

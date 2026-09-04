@@ -1,6 +1,6 @@
 # Future-exogenous-data strategies
 
-When you call `forecast()` with independent (driver) columns but don't supply
+When you call `forecast()` with independent (driver) columns but do not supply
 their future values, `HorizonForecaster` has to *assume* them. A
 **future-exogenous-data strategy** decides how. The values are generated
 once, model-agnostically, and fed to every model, so the comparison stays
@@ -26,7 +26,7 @@ HorizonForecaster(
 | Strategy | What it does | Good when |
 |---|---|---|
 | `carry_forward` *(default)* | Holds the last observed value flat across the horizon. | A neutral baseline; short horizons; slowly-changing drivers. |
-| `recent_average` | Mean (or median) of the last `recent_average_window` periods. | A one-off recent spike/dip you don't want to project forward. |
+| `recent_average` | Mean (or median) of the last `recent_average_window` periods. | A one-off recent spike or dip you do not want to project forward. |
 | `historical_average` | **Season-aware** mean/median — by day-of-week (daily) or week-of-year (weekly), not one flat mean. | Drivers with a stable seasonal shape and no strong trend. |
 | `seasonal_naive` | The seasonal cycle repeated, **plus drift** (the fitted historical trend). Falls back to `carry_forward` under one full cycle of history. | Long horizons on drivers that are both seasonal and trending. |
 | `linear_trend` | A fitted trend line projected forward. | Steadily trending drivers (e.g. a spend ramp). |
@@ -86,7 +86,7 @@ model, where the assumed drivers can dominate the result.
 
 - History is coerced to numeric and every aggregation is NaN-aware.
 - A **non-negative** driver's generated future is clipped at 0, so a projected
-  trend can't push a spend column negative; a driver that genuinely goes
+  trend cannot push a spend column negative; a driver that genuinely goes
   negative in history is left unclipped.
 - Out-of-range *clamping* (keeping a future value within the training range) is
   handled by the SARIMAX and Bayesian PyMC adapters — the only two that

@@ -41,8 +41,8 @@ HorizonForecaster(
 )
 ```
 
-- **`mape_threshold`** (0.01–100, default `40`, or `None`): a **garbage
-  filter** applied to each model's **validation** MAPE — the score it was
+- **`mape_threshold`** (0.01–100, default `40`, or `None`): a
+  **degenerate-fit filter** applied to each model's **validation** MAPE — the score it was
   selected on, not the test score it reports. A model scoring above it is
   excluded from the combination and reported in `rejected_models`. This is an
   **upper bound only** — an unusually low MAPE is never rejected. Pass `None`
@@ -52,7 +52,7 @@ HorizonForecaster(
   the default combination rule already discards the worst member on every
   period, so screening hard *and* trimming spends the same robustness budget
   twice — five members screened down to three leaves the median. The `0.01`
-  and `100` limits are fixed internally and only constrain the value you're
+  and `100` limits are fixed internally and only constrain the value you are
   allowed to pass; the `0.01` floor rejects a threshold of `0`, which would
   admit only a literally perfect model.
 
@@ -98,11 +98,11 @@ Each value in the dict is an `EnsembleResult` (`evaluation/ensemble.py`):
 | `weights` | `{"prophet": 0.7, "catboost": 0.3}` — normalized weights per member. **`None`** for weightless rules such as the default `trimmed`: there is no weight, and reporting an equal split would imply an averaging that did not happen. |
 | `trim_shares` | Trimming only: a per-member DataFrame of how often each member was discarded as the period's high or low. More diagnostically useful than weights — it identifies which model misbehaves, and on how much of the horizon. `None` for the weighted rules and for the degraded fallbacks. |
 | `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per model excluded before combination, with its MAPE and the threshold it exceeded (if any). |
-| `mape` | The ensemble's own `MapeResult`, scored against real actuals. Only set in the `evaluate()` context (held-out actuals exist); always `None` for `forecast_ensemble`, since there's no ground truth for the future yet. |
+| `mape` | The ensemble's own `MapeResult`, scored against real actuals. Only set in the `evaluate()` context (held-out actuals exist); always `None` for `forecast_ensemble`, since there is no ground truth for the future yet. |
 
 A model in `rejected_models` is **not the same thing** as a model in
 `evaluate_errors`/`forecast_errors`. A rejected model fit and predicted
-successfully — it just wasn't admitted to the combination. A model in
+successfully; it was simply not admitted to the combination. A model in
 `evaluate_errors` failed to fit or predict at all. These are reported
 completely separately, and rejection never raises an exception, even if every
 model gets excluded — `evaluate()` still returns everyone's individual results
@@ -110,7 +110,7 @@ normally; only that method's `combined` comes back `None`.
 
 ### Exclusion is per method
 
-Two independent things can exclude a model, and they don't apply to every
+Two independent things can exclude a model, and they do not apply to every
 rule:
 
 1. **`mape_threshold`**, when set. Applies to every rule.
@@ -132,7 +132,7 @@ the same model can be dropped by one rule and kept by another in the same run.
 ## `forecast()` reuses the selection MAPE
 
 `forecast()` has no held-out actuals of its own to score accuracy against — a
-true future forecast can't be checked against anything yet. So its screening
+true future forecast cannot be checked against anything yet. So its screening
 and weighting reuse the **validation** MAPE established when each model's
 hyperparameters were selected. That selection has to happen anyway —
 `forecast()` cannot fit without knowing which parameters won — so the scores
@@ -150,9 +150,9 @@ Confirmed by direct testing, not assumed: a combined ensemble can score
 alone scored 1.31% MAPE, CatBoost alone scored 12.77%, and the
 inverse-MAPE-weighted ensemble of the two (weighted ~91%/9% toward Prophet)
 scored 1.58% — worse than Prophet alone. Weights are static across the whole
-forecast horizon, while each model's real per-period error isn't; an
-otherwise-strong ensemble can still get dragged down on exactly the periods
-where the weaker model is wrong, in a way one fixed weight per model can't
+forecast horizon, while each model's real per-period error is not; an
+otherwise-strong ensemble can still be pulled off on exactly the periods
+where the weaker model is wrong, in a way one fixed weight per model cannot
 correct for.
 
 Trimming is considerably more robust to this specific failure — it discards

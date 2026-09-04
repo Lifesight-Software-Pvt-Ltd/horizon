@@ -30,7 +30,7 @@ ensemble on equal footing.
 Fits Prophet with regressors from your independent columns. Grid varies
 `seasonality_mode` and the yearly/weekly seasonality strength. Emits genuine
 prediction intervals; its uncertainty simulation is explicitly seeded so
-`yhat_lower`/`yhat_upper` don't drift between calls on the same fitted model.
+`yhat_lower`/`yhat_upper` do not drift between calls on the same fitted model.
 Prophet-safe `save()`/`load()` (not generic pickle).
 
 ### catboost
@@ -63,7 +63,7 @@ grid-searched. Design points worth knowing:
   noise): the band is sized by the small noise while the errors are dominated
   by structural misfit. A calibration sweep on such synthetic data measured
   ~75% empirical coverage against a 95% nominal band (and, tellingly, raising
-  the Fourier order did *not* fix it — confirming it's the interval
+  the Fourier order did *not* fix it, confirming it is the interval
   assumption, not seasonal resolution). On noisier real-world data the analytic
   band is relatively wider and coverage is usually much closer to nominal. The
   point forecast (`yhat`/MAPE) is unaffected — this is purely about interval
@@ -77,7 +77,7 @@ grid-searched. Design points worth knowing:
   most of the horizon, `predict()` raises and the orchestrator drops the model
   into `evaluate_errors` rather than emitting a degenerate flat line.
 - **Exog is clamped to the training range** so an out-of-range future value
-  can't extrapolate a fitted coefficient into a blow-up.
+  cannot extrapolate a fitted coefficient into a divergence.
 - **Annual-collinearity warning**: if an independent column strongly tracks
   the annual cycle (it explains the same variance as the Fourier terms), a
   warning is raised — on short histories the two compete and the higher-Fourier
@@ -145,6 +145,6 @@ ensemble**, which operates on the `yhat` point forecasts alone.
 ## See also
 
 - [`ensemble_methods.md`](ensemble_methods.md) — how the per-model forecasts
-  are combined and weighted (and why the ensemble isn't guaranteed to win).
+  are combined and weighted (and why the ensemble is not guaranteed to win).
 - [`future_exog.md`](future_exog.md) — how `forecast()` fills in future values
-  for your independent columns when you don't supply them.
+  for your independent columns when you do not supply them.
