@@ -61,7 +61,7 @@ dependencies = [
     "neuralprophet==0.8.0",
     "statsmodels==0.15.0",
     "catboost==1.2.10",
-    "pymc==5.25.1",
+    "pymc==5.26.0",
     # Pinned to the 3.10.x line specifically: matplotlib 3.11.0 (the
     # version that resolved naturally on a Python 3.12 machine) already
     # dropped Python 3.10 support, which broke CI's 3.10 matrix job.
