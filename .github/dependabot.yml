@@ -19,3 +19,18 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels: ["dependencies", "python"]
+    ignore:
+      # neuralprophet 0.8.0 declares numpy>=1.25,<2, so any numpy 2.x bump
+      # is unresolvable. Lift when NeuralProphet accepts numpy 2.
+      - dependency-name: "numpy"
+        versions: [">=2.0.0"]
+      # setuptools 82 removed pkg_resources, which pytorch-lightning (via
+      # neuralprophet) imports at runtime. The <82 bound in pyproject.toml
+      # is load-bearing; see the comment there.
+      - dependency-name: "setuptools"
+        versions: [">=82.0.0"]
+      # 0.9.0 drops Python 3.13 (requires-python <=3.12) and still pins
+      # numpy<2, so it gains nothing. CONTRIBUTING.md records that
+      # unpinning NeuralProphet was evaluated and turned down.
+      - dependency-name: "neuralprophet"
+        versions: [">0.8.0"]
