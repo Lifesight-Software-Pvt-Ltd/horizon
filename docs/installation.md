@@ -3,7 +3,7 @@
 ## Requirements
 
 - **Python 3.10 through 3.13** (`requires-python = ">=3.10,<3.14"`). All four
-  are tested; the CI matrix is triggered manually by a maintainer, so see
+  are tested; the test matrix is triggered manually by a maintainer, so see
   [`CONTRIBUTING.md`](../CONTRIBUTING.md) before relying on it for a change of
   your own.
 - A working C/C++ toolchain for the heavier model backends — Prophet

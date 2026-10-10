@@ -1082,9 +1082,9 @@ class HorizonForecaster:
 
         if not results:
             self.evaluate_ensemble = None
+            error_summary = {k: str(v) for k, v in errors.items()}
             raise AllModelsRejectedError(
-                f"All requested models failed during evaluate(): "
-                f"{ {k: str(v) for k, v in errors.items()} }",
+                f"All requested models failed during evaluate(): {error_summary}",
                 rejected_models=list(errors.keys()),
             )
 
@@ -1320,9 +1320,9 @@ class HorizonForecaster:
 
         if not results:
             self.forecast_ensemble = None
+            error_summary = {k: str(v) for k, v in errors.items()}
             raise AllModelsRejectedError(
-                f"All requested models failed during forecast(): "
-                f"{ {k: str(v) for k, v in errors.items()} }",
+                f"All requested models failed during forecast(): {error_summary}",
                 rejected_models=list(errors.keys()),
             )
 

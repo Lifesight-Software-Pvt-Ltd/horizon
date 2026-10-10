@@ -1,0 +1,36 @@
+name: Lint
+
+# Runs on every pull request and on pushes to main. This is the only
+# automated check that gates a PR: the model test suite fits real backends
+# and takes 25-60 minutes per Python version, so it stays on manual
+# dispatch (see tests.yml and CONTRIBUTING.md).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Newest supported version on purpose: pycodestyle tokenizes
+          # f-string interiors on 3.12+, so this catches E201/E202 that
+          # older interpreters let through.
+          python-version: "3.13"
+      - name: Install linters
+        run: pip install black flake8
+      - name: black --check
+        run: black --check --diff .
+      - name: flake8
+        run: flake8 .

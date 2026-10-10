@@ -82,9 +82,11 @@ pytest --cov=horizon_forecaster
 If you have not done an editable install, `PYTHONPATH=. pytest tests/` works
 too.
 
-**CI will not run on your PR.** `.github/workflows/tests.yml` covers Python
-3.10 through 3.13 but is triggered manually (`on: workflow_dispatch`) by a
-maintainer, so run the suite locally before you open one and say in the PR
+**Only linting runs automatically on your PR.** `.github/workflows/lint.yml`
+runs `black --check` and `flake8` on every pull request and must pass before
+a merge. The test suite in `.github/workflows/tests.yml` covers Python 3.10
+through 3.13 but is triggered manually (`on: workflow_dispatch`) by a
+maintainer, so run the suite locally before you open a PR and say in the PR
 which Python version you ran it on. A maintainer runs the matrix as part of
 review.
 
@@ -191,8 +193,8 @@ actually needed them.
   the wrong way and only real data settled it.
 
 Keep the PR focused on one thing, and describe what you verified rather than
-what you intended. Review may be slow; the maintainers run the CI matrix by
-hand.
+what you intended. Review may be slow; the lint check runs automatically, but
+the maintainers run the test matrix by hand.
 
 ## Project status
 
