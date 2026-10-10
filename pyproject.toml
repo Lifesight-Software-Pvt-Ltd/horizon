@@ -12,7 +12,7 @@
 # the build backend is pinned lower. Declaring the real requirement is
 # what stops that being a confusing error rather than a clear one.
 #
-# Unrelated to the `setuptools>=68,<82` RUNTIME pin further down, which
+# Unrelated to the `setuptools>=68,<85` RUNTIME pin further down, which
 # exists because pytorch-lightning imports pkg_resources at import time.
 requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -81,7 +81,7 @@ dependencies = [
     # exactly this reason, since pip satisfied it with 82+, which no
     # longer has the module at all. Confirmed fix via multiple
     # independent upstream bug reports converging on the same pin.
-    "setuptools>=68,<82",
+    "setuptools>=68,<85",
 ]
 
 [project.urls]
