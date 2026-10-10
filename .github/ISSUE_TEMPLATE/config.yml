@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Lifesight-Software-Pvt-Ltd/horizon/security/advisories/new
+    about: Report privately through GitHub's advisory form. Do not open a public issue; see SECURITY.md.
+  - name: Question or usage help
+    url: https://github.com/Lifesight-Software-Pvt-Ltd/horizon/issues/new?labels=question&title=Question%3A+
+    about: Ask how to do something with the library. Check docs/quickstart.md and docs/supported_models.md first.

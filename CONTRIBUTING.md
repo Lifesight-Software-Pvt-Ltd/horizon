@@ -7,6 +7,16 @@ here rather than adding a second style alongside it.
 Everyone taking part is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
+## Licensing of contributions
+
+Horizon Forecaster is licensed under the [Apache License 2.0](LICENSE). By
+submitting a contribution you agree that it is licensed under the same terms,
+as described in section 5 of the license, and that you have the right to
+submit it — it is your own work, or you are permitted by its owner or by the
+license it already carries to contribute it. No separate contributor
+agreement is required. Lifesight Software Pvt. Ltd. retains copyright in the
+project as a whole; you retain copyright in your contribution.
+
 ## Start with an issue
 
 **Open an issue before opening a pull request**, for anything larger than a

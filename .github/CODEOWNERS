@@ -1,0 +1,13 @@
+# Code owners are automatically requested for review on every pull request,
+# and the "Protect main" ruleset requires an approval from one of them.
+# Order matters: the last matching pattern wins.
+
+# Default owners for everything in the repository.
+*                                   @deepraj-ls @rohitlifesight @anil-ls
+
+# Governance, licensing and community files need an admin's eyes.
+/LICENSE                            @deepraj-ls @rohitlifesight @anil-ls
+/NOTICE                             @deepraj-ls @rohitlifesight @anil-ls
+/SECURITY.md                        @deepraj-ls @rohitlifesight @anil-ls
+/CODE_OF_CONDUCT.md                 @deepraj-ls @rohitlifesight @anil-ls
+/.github/                           @deepraj-ls @rohitlifesight @anil-ls
