@@ -359,7 +359,7 @@ class SARIMAXWrapper(BaseModel):
                     enforce_stationarity=True,
                     maxiter=self.maxiter_final,
                 )
-            except Exception:
+            except Exception:  # nosec B110 -- retried below with relaxed settings
                 pass
         try:
             return self._fit_one(

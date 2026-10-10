@@ -96,6 +96,7 @@ dev = [
     "pytest-cov",
     "black",
     "flake8",
+    "bandit",
 ]
 
 [tool.pytest.ini_options]
@@ -103,6 +104,14 @@ testpaths = ["tests"]
 
 [tool.black]
 line-length = 100
+
+[tool.bandit]
+# Security lint over the package only. Tests are excluded: they assert,
+# monkeypatch and write temp files on purpose. The handful of deliberate
+# pickle / torch.load / try-except-pass sites in the package carry inline
+# `# nosec BXXX` markers with the reason beside them, so a new occurrence
+# anywhere else still fails the scan.
+exclude_dirs = ["tests"]
 
 [tool.setuptools.packages.find]
 # Explicit include list, rather than relying on setuptools' automatic

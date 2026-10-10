@@ -3,7 +3,7 @@
 ## Requirements
 
 - **Python 3.10 through 3.13** (`requires-python = ">=3.10,<3.14"`). All four
-  are tested; the CI matrix is triggered manually by a maintainer, so see
+  are tested; the test suite is run by hand rather than in CI, so see
   [`CONTRIBUTING.md`](../CONTRIBUTING.md) before relying on it for a change of
   your own.
 - A working C/C++ toolchain for the heavier model backends — Prophet
@@ -102,4 +102,5 @@ load-bearing rather than cosmetic (both documented inline in
   transitive dependency (pytorch-lightning, via neuralprophet) imports at
   runtime.
 
-If you bump either, run the full CI matrix (3.10–3.13) before trusting it.
+If you bump either, run the full suite on every supported Python version
+(3.10–3.13) before trusting it.

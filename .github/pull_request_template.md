@@ -16,7 +16,7 @@ For a feature: what it makes possible that was not possible before.
 <!-- What you ran and what it showed --- not what you intended to happen. -->
 
 - [ ] `pytest --cov=horizon_forecaster` passes locally, on Python <!-- version -->
-- [ ] `black .` and `flake8` are clean
+- [ ] `black .`, `flake8` and `bandit -c pyproject.toml -r horizon_forecaster` are clean
 - [ ] New behaviour has real tests (a bug fix has a test that fails without it)
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`, if a user would notice
 - [ ] `docs/` updated, if this changes documented behaviour or a design decision
@@ -27,6 +27,7 @@ For a feature: what it makes possible that was not possible before.
 
 <!--
 Anything you are unsure about, decisions you went back and forth on, or
-anything you could not test. CI is triggered manually by a maintainer, so say
-if there is a platform or Python version you could not cover.
+anything you could not test. Only linting runs automatically; the test suite
+is run by hand, so say if there is a platform or Python version you could not
+cover.
 -->

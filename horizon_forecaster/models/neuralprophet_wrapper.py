@@ -287,7 +287,7 @@ class NeuralProphetWrapper(BaseModel):
         object (frequency, params, min_rows_required, random_seed,
         regressor columns, and the clipping decision).
         """
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         from neuralprophet import save as np_save
 
@@ -311,10 +311,10 @@ class NeuralProphetWrapper(BaseModel):
         Reload a NeuralProphetWrapper saved with save(), using
         NeuralProphet's own load utility plus the sidecar envelope.
         """
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         with open(f"{path}.wrapper", "rb") as f:
-            envelope = pickle.load(f)
+            envelope = pickle.load(f)  # nosec B301 -- trusted: written by save()
 
         instance = cls(
             frequency=envelope["frequency"],
@@ -375,7 +375,7 @@ class NeuralProphetWrapper(BaseModel):
         except Exception:
             import torch
 
-            model = torch.load(path, map_location="cpu", weights_only=False)
+            model = torch.load(path, map_location="cpu", weights_only=False)  # nosec B614
             # Mirror np_load()'s own post-load step. "cpu" (rather than
             # None, which would defer to the model's stored accelerator) to
             # stay consistent with map_location above -- this branch has

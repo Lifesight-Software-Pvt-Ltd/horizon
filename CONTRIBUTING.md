@@ -43,8 +43,8 @@ rejections here are about scope, not quality.
   orchestrator to change, that is a gap in the `BaseAdapter`/`BaseModel`
   contract, and the contract is what gets fixed.
 - Dependency bumps without evidence. Several pins are load-bearing and
-  commented inline in `pyproject.toml`; a bump needs a manual CI matrix run
-  (3.10–3.13) behind it.
+  commented inline in `pyproject.toml`; a bump needs the full suite run on
+  every supported Python version (3.10–3.13) behind it.
 - Unpinning `neuralprophet` to clear the torch CVEs. This has been looked at:
   the available alternative is a pre-release with breaking API changes and no
   coverage against this code.
@@ -82,11 +82,12 @@ pytest --cov=horizon_forecaster
 If you have not done an editable install, `PYTHONPATH=. pytest tests/` works
 too.
 
-**CI will not run on your PR.** `.github/workflows/tests.yml` covers Python
-3.10 through 3.13 but is triggered manually (`on: workflow_dispatch`) by a
-maintainer, so run the suite locally before you open one and say in the PR
-which Python version you ran it on. A maintainer runs the matrix as part of
-review.
+**Only linting runs automatically on your PR.** `.github/workflows/lint.yml`
+runs `black --check`, `flake8` and `bandit` on every pull request and must
+pass before a merge. The test suite does not run in CI: it fits real models and takes
+25–60 minutes per Python version, so run it locally before you open a PR and
+say in the PR which Python version you ran it on. A maintainer runs it on the
+other supported versions as part of review.
 
 Expect the full suite to take roughly 25–30 minutes: it fits real models rather
 than mocking them. A few tests run the default grid search (6 candidates for
@@ -176,6 +177,11 @@ actually needed them.
   deliberate exceptions in `tests/`). The repository is formatted and lint-
   clean as it stands, so `black .` should leave your diff untouched apart
   from the lines you actually changed.
+- `bandit -c pyproject.toml -r horizon_forecaster` reports nothing. The
+  package's deliberate `pickle` and `torch.load` sites in model `save()`/
+  `load()` carry `# nosec BXXX` markers with the reason beside them; if you
+  add another, mark it the same way and say in the PR why the input is
+  trusted. Do not add a global skip.
 - `CHANGELOG.md` has an `Added`/`Fixed`/`Changed` entry if a user of the
   library would notice the change. Open a new `## [Unreleased]` section above
   the latest release if one is not there; do not file under
@@ -191,8 +197,8 @@ actually needed them.
   the wrong way and only real data settled it.
 
 Keep the PR focused on one thing, and describe what you verified rather than
-what you intended. Review may be slow; the maintainers run the CI matrix by
-hand.
+what you intended. Review may be slow; the lint check runs automatically, but
+the maintainers run the test suite by hand.
 
 ## Project status
 

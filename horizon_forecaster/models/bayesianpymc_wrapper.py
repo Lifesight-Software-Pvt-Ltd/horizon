@@ -490,7 +490,7 @@ class BayesianPyMCWrapper(BaseModel):
         reload works even if the sidecar is absent.
         """
         self._check_is_fitted()
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         trace = getattr(self, "trace", None)
         self.trace = None
@@ -499,7 +499,7 @@ class BayesianPyMCWrapper(BaseModel):
             if trace is not None:
                 try:
                     trace.to_netcdf(f"{path}.nc")
-                except Exception:  # noqa: BLE001 -- sidecar is best-effort
+                except Exception:  # noqa: BLE001  # nosec B110 -- sidecar is best-effort
                     pass
             with open(path, "wb") as f:
                 pickle.dump(self, f)
@@ -510,10 +510,10 @@ class BayesianPyMCWrapper(BaseModel):
     @classmethod
     def load(cls, path: str) -> "BayesianPyMCWrapper":
         import os
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         with open(path, "rb") as f:
-            model = pickle.load(f)
+            model = pickle.load(f)  # nosec B301 -- trusted: written by save()
         sidecar = f"{path}.nc"
         if os.path.exists(sidecar):
             try:
@@ -521,6 +521,6 @@ class BayesianPyMCWrapper(BaseModel):
 
                 model.trace = az.from_netcdf(sidecar)
                 model._fitted_model = model.trace
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # nosec B110 -- sidecar is optional
                 pass
         return model
