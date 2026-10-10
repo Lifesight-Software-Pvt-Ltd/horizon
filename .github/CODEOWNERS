@@ -1,0 +1,6 @@
+# Code owners are automatically requested for review on every pull request,
+# and the "Protect main" ruleset requires an approval from one of them.
+# Add narrower patterns below this line if some area gets its own owner;
+# the last matching pattern wins.
+
+*   @deepraj-ls @anil-ls @rajeevlifesight

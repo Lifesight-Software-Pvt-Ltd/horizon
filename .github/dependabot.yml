@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Keep the actions used by lint.yml current. These are the only
+  # third-party code that runs with repository access.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "github-actions"]
+
+  # Runtime pins are deliberate and several are load-bearing (see the
+  # comments in pyproject.toml), so these PRs are proposals to evaluate,
+  # not auto-merges. Security updates are the main reason to have this:
+  # SECURITY.md documents known CVEs in the torch tree that neuralprophet
+  # currently pins us to, and this is how a fix upstream becomes visible.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
