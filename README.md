@@ -236,7 +236,7 @@ described here is the one you can build on; anything that changes it will come
 with a version bump and a changelog entry.
 
 Install from a clone today (see [Installation](#installation)); a PyPI release
-is next, and the publishing workflow is already in place for it.
+is next.
 
 Known gaps, deliberately **not** in 1.0 and all candidates for future work:
 

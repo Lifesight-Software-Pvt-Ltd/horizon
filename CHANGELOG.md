@@ -79,7 +79,7 @@ None of these block a stable API — all are additive:
 - An error-diversity diagnostic — pairwise signed-error correlation across members, so users can check whether combination has anything to exploit on their own series.
 - Non-negativity is **not** enforced library-wide. Prophet can still emit negative point forecasts; SARIMAX is non-negative structurally via its `log1p` fit, and CatBoost, NeuralProphet and Bayesian PyMC clamp only when the training target was itself non-negative.
 - 24 CVEs in `torch`/`pytorch-lightning`, forced by `neuralprophet==0.8.0`'s own version constraints.
-- The PyPI release. The package installs from a clone today; publishing is the next step, and `.github/workflows/publish.yml` is already wired for it via Trusted Publishing.
+- The PyPI release. The package installs from a clone today; publishing is the next step.
 
 ## Prior development
 
