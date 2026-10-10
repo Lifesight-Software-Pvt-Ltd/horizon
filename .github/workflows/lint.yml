@@ -1,7 +1,7 @@
 name: Lint
 
-# Runs on every pull request and on pushes to main. This is the only
-# automated check that gates a PR: the model test suite fits real backends
+# Runs black, flake8 and bandit on every pull request and on pushes to
+# main. This is the only automated check that gates a PR: the model test suite fits real backends
 # and takes 25-60 minutes per Python version, so it is run locally by
 # contributors and maintainers rather than in CI (see CONTRIBUTING.md).
 on:
@@ -29,8 +29,10 @@ jobs:
           # older interpreters let through.
           python-version: "3.13"
       - name: Install linters
-        run: pip install black flake8
+        run: pip install black flake8 bandit
       - name: black --check
         run: black --check --diff .
       - name: flake8
         run: flake8 .
+      - name: bandit
+        run: bandit -c pyproject.toml -r horizon_forecaster

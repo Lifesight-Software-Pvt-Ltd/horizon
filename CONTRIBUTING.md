@@ -83,8 +83,8 @@ If you have not done an editable install, `PYTHONPATH=. pytest tests/` works
 too.
 
 **Only linting runs automatically on your PR.** `.github/workflows/lint.yml`
-runs `black --check` and `flake8` on every pull request and must pass before
-a merge. The test suite does not run in CI: it fits real models and takes
+runs `black --check`, `flake8` and `bandit` on every pull request and must
+pass before a merge. The test suite does not run in CI: it fits real models and takes
 25–60 minutes per Python version, so run it locally before you open a PR and
 say in the PR which Python version you ran it on. A maintainer runs it on the
 other supported versions as part of review.
@@ -177,6 +177,11 @@ actually needed them.
   deliberate exceptions in `tests/`). The repository is formatted and lint-
   clean as it stands, so `black .` should leave your diff untouched apart
   from the lines you actually changed.
+- `bandit -c pyproject.toml -r horizon_forecaster` reports nothing. The
+  package's deliberate `pickle` and `torch.load` sites in model `save()`/
+  `load()` carry `# nosec BXXX` markers with the reason beside them; if you
+  add another, mark it the same way and say in the PR why the input is
+  trusted. Do not add a global skip.
 - `CHANGELOG.md` has an `Added`/`Fixed`/`Changed` entry if a user of the
   library would notice the change. Open a new `## [Unreleased]` section above
   the latest release if one is not there; do not file under

@@ -184,7 +184,7 @@ class BaseModel(ABC):
         correctly in a different environment or library version.
         """
         self._check_is_fitted()
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         with open(path, "wb") as f:
             pickle.dump(self, f)
@@ -198,7 +198,7 @@ class BaseModel(ABC):
         save() — wrappers that override save() with library-native
         serialization must also override load() to match.
         """
-        import pickle
+        import pickle  # nosec B403 -- model save/load, trusted files only
 
         with open(path, "rb") as f:
-            return pickle.load(f)
+            return pickle.load(f)  # nosec B301 -- trusted: written by save()
