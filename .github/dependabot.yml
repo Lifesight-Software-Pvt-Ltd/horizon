@@ -34,3 +34,7 @@ updates:
       # unpinning NeuralProphet was evaluated and turned down.
       - dependency-name: "neuralprophet"
         versions: [">0.8.0"]
+      # pymc 5.26 requires pytensor>=2.35, which requires numpy>=2. Blocked
+      # by the same neuralprophet constraint as numpy above; lift together.
+      - dependency-name: "pymc"
+        versions: [">=5.26.0"]
