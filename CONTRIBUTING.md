@@ -43,8 +43,8 @@ rejections here are about scope, not quality.
   orchestrator to change, that is a gap in the `BaseAdapter`/`BaseModel`
   contract, and the contract is what gets fixed.
 - Dependency bumps without evidence. Several pins are load-bearing and
-  commented inline in `pyproject.toml`; a bump needs a manual CI matrix run
-  (3.10–3.13) behind it.
+  commented inline in `pyproject.toml`; a bump needs the full suite run on
+  every supported Python version (3.10–3.13) behind it.
 - Unpinning `neuralprophet` to clear the torch CVEs. This has been looked at:
   the available alternative is a pre-release with breaking API changes and no
   coverage against this code.
@@ -84,11 +84,10 @@ too.
 
 **Only linting runs automatically on your PR.** `.github/workflows/lint.yml`
 runs `black --check` and `flake8` on every pull request and must pass before
-a merge. The test suite in `.github/workflows/tests.yml` covers Python 3.10
-through 3.13 but is triggered manually (`on: workflow_dispatch`) by a
-maintainer, so run the suite locally before you open a PR and say in the PR
-which Python version you ran it on. A maintainer runs the matrix as part of
-review.
+a merge. The test suite does not run in CI: it fits real models and takes
+25–60 minutes per Python version, so run it locally before you open a PR and
+say in the PR which Python version you ran it on. A maintainer runs it on the
+other supported versions as part of review.
 
 Expect the full suite to take roughly 25–30 minutes: it fits real models rather
 than mocking them. A few tests run the default grid search (6 candidates for
@@ -194,7 +193,7 @@ actually needed them.
 
 Keep the PR focused on one thing, and describe what you verified rather than
 what you intended. Review may be slow; the lint check runs automatically, but
-the maintainers run the test matrix by hand.
+the maintainers run the test suite by hand.
 
 ## Project status
 

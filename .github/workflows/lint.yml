@@ -2,8 +2,8 @@ name: Lint
 
 # Runs on every pull request and on pushes to main. This is the only
 # automated check that gates a PR: the model test suite fits real backends
-# and takes 25-60 minutes per Python version, so it stays on manual
-# dispatch (see tests.yml and CONTRIBUTING.md).
+# and takes 25-60 minutes per Python version, so it is run locally by
+# contributors and maintainers rather than in CI (see CONTRIBUTING.md).
 on:
   pull_request:
   push:

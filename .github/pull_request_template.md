@@ -27,7 +27,7 @@ For a feature: what it makes possible that was not possible before.
 
 <!--
 Anything you are unsure about, decisions you went back and forth on, or
-anything you could not test. Only linting runs automatically; the test matrix
-is triggered manually by a maintainer, so say if there is a platform or Python
-version you could not cover.
+anything you could not test. Only linting runs automatically; the test suite
+is run by hand, so say if there is a platform or Python version you could not
+cover.
 -->
