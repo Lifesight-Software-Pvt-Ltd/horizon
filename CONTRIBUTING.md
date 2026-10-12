@@ -122,7 +122,9 @@ warning or leave too little to train on.
 place — where it is the only way to hit a path deterministically, such as
 `test_catboost.py` monkeypatching `_fitted_model.predict` to return a fixed
 array, or `test_neuralprophet_compat.py` stubbing `torch` to drive a fallback
-branch that never executes on an older version. A mock that stands in for a fit
+branch that never executes on an older version, or `test_pytensor_compat.py`
+stubbing the platform and compiler so the macOS linker workaround is exercised
+on any OS. A mock that stands in for a fit
 proves the code runs, not that the forecast is right.
 
 ## Architecture, in one paragraph

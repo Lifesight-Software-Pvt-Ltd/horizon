@@ -90,7 +90,7 @@ Uses the default pickle `save()`/`load()` (statsmodels serialises reliably).
 Decomposition model via NeuralProphet/PyTorch Lightning. Deliberate v1 choices:
 `n_lags=0` (no autoregression, so it stays comparable to the other models and
 fits the fit-once/predict-any-horizon contract); CPU pinned and logging
-silenced so local (MPS) and CI (CPU) runs agree; `epochs` and `learning_rate`
+silenced so Apple-silicon (MPS) and CPU-only runs agree; `epochs` and `learning_rate`
 pinned via the grid for reproducibility; `collect_metrics: false` (required —
 enabling metrics attaches a Lightning logger that crashes `fit()` via an
 OmegaConf serialisation of the loss-function type union). No uncertainty
@@ -134,6 +134,10 @@ Gaussian fit would chase). Design points worth knowing:
 
 Expect this model to be substantially slower than the other four — it runs a
 full MCMC per grid candidate.
+
+On macOS, PyTensor (PyMC's compiler) adds a linker flag that recent Apple
+toolchains reject; Horizon detects and works around this automatically. See
+[`installation.md`](installation.md#macos-bayesian-pymc-and-the--ld64-linker-flag).
 
 ## Uncertainty bounds
 
