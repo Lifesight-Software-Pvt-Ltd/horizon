@@ -70,6 +70,7 @@ from horizon_forecaster.exceptions import (
     ModelConvergenceError,
     ModelPredictionError,
 )
+from horizon_forecaster.models._pytensor_compat import ensure_macos_linker_compat
 from horizon_forecaster.models.base import BaseModel
 
 # Annual period in DAYS. The long Fourier cycle is built from absolute day
@@ -379,6 +380,9 @@ class BayesianPyMCWrapper(BaseModel):
     def _sample(
         self, y_sc, t, ff_long, ff_short, exog, *, slope_est, intercept_est, coef_prior_means
     ):
+        # Must run before PyMC builds anything: on some macOS toolchains PyTensor's
+        # '-ld64' flag breaks every compile. See _pytensor_compat for details.
+        ensure_macos_linker_compat()
         import pymc as pm  # lazy: keeps module import free of the heavy dependency
 
         n_fourier2 = 2 * self.n_fourier

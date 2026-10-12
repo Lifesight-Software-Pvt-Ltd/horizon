@@ -413,7 +413,8 @@ operation.
   means refitting per horizon. By the gate rule that is a contract discussion,
   not a wrapper special case.
 - **Seeded and CPU-pinned.** It is stochastic, and Lightning otherwise picks
-  MPS locally and CPU in CI, producing different numbers from identical code.
+  MPS on Apple silicon and CPU elsewhere, producing different numbers from
+  identical code.
   `epochs` and `learning_rate` are both pinned — leaving either `None` runs a
   learning-rate range test and auto-sizes epochs, which is slow and makes two
   runs on the same data non-comparable.
@@ -510,6 +511,17 @@ in the wrapper, mirroring that split.
   divergences, and the daily posterior was briefly judged untrustworthy. That
   figure was an artifact of an 80-step warmup in a throwaway test. With
   adequate warmup the posterior is clean (0 divergences, R-hat ≈ 1.0).
+- **A macOS linker workaround runs before the first model is built.**
+  PyTensor appends `-ld64` to compile commands on macOS 15+, and current
+  Apple toolchains no longer have that linker, so every compile failed with
+  `ld: library 'd64' not found` and Bayesian PyMC dropped out of every run on
+  those machines — silently, because failure isolation kept the other four
+  going. The PyTensor pin cannot move to pick up a fix (see §7), so
+  `models/_pytensor_compat.py` probes the configured compiler once per
+  process and drops that one flag only when the probe fails with exactly that
+  error. Probe-then-patch rather than patch-always because PyTensor added the
+  flag deliberately, to dodge bugs in Xcode 15's newer linker; a toolchain
+  that still accepts it keeps it.
 - It remains by far the slowest model — a full NUTS sample per grid
   candidate. That is inherent to the approach. `nutpie` was considered as a
   further speedup and not adopted in 1.0: it addresses speed only, and the
@@ -575,7 +587,7 @@ a first faceted-grid attempt made each panel too small to read.
 
 ## 7. Packaging
 
-Every runtime dependency is pinned to an exact tested version. Four pins and
+Every runtime dependency is pinned to an exact tested version. Five pins and
 declarations are load-bearing rather than tidy, and all are commented inline
 in `pyproject.toml`:
 
@@ -583,8 +595,12 @@ in `pyproject.toml`:
   constraint, not chosen. numpy ships no 3.13 wheel for its 1.x line, so on
   Python 3.13 pip compiles it from source. See
   [`installation.md`](installation.md).
-- **`matplotlib==3.10.6`** — later 3.11.x dropped Python 3.10 support and
-  broke the 3.10 job.
+- **`pymc==5.25.1`** — held back by the numpy pin, since later PyMC releases
+  require numpy 2. It also fixes PyTensor below 2.32, which is why the macOS
+  `-ld64` workaround (§5) is carried in this library rather than taken from
+  an upgrade.
+- **`matplotlib==3.10.9`** — held on the 3.10.x line: 3.11.x dropped Python
+  3.10 support and broke installs on 3.10.
 - **`setuptools>=68,<82`** — pytorch-lightning (via neuralprophet) imports
   `pkg_resources` at runtime, and setuptools 82 removed it entirely. A loose
   `>=68` was tried first and failed for exactly this reason: pip satisfied it
@@ -621,8 +637,10 @@ testing against this code; the pin stands until a vetted release is adopted.
 The suite fits real models rather than mocking them. Mocking is used only
 where it is the only way to hit a path deterministically — CatBoost's
 prediction-clipping tests monkeypatch `_fitted_model.predict` to return a
-fixed array, and the NeuralProphet torch-compat tests stub `torch` because
-the fallback branch never runs on an older version.
+fixed array, the NeuralProphet torch-compat tests stub `torch` because
+the fallback branch never runs on an older version, and the PyTensor
+linker-workaround tests stub the platform and compiler because the patch
+branch only runs on an affected Mac.
 
 Beyond unit tests, three things repeatedly found what unit tests did not:
 

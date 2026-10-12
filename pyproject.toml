@@ -64,11 +64,11 @@ dependencies = [
     "pymc==5.25.1",
     # Pinned to the 3.10.x line specifically: matplotlib 3.11.0 (the
     # version that resolved naturally on a Python 3.12 machine) already
-    # dropped Python 3.10 support, which broke CI's 3.10 matrix job.
-    # 3.10.6 is confirmed available for Python 3.10 (from the actual pip
-    # resolver error log) and matplotlib's own version-support policy
-    # covers multiple consecutive Python minor versions per release, so
-    # this also installs cleanly on 3.11/3.12.
+    # dropped Python 3.10 support, which broke installs on Python 3.10.
+    # Every 3.10.x release still supports Python 3.10, and the line covers
+    # 3.10-3.13, so patch bumps within it are safe (3.10.6 -> 3.10.9 was
+    # verified against the full suite). Do not move to 3.11+ while Python
+    # 3.10 is supported.
     "matplotlib==3.10.9",
     "pyyaml==6.0.3",
     # Explicit dependency, not just a build-system requirement: some

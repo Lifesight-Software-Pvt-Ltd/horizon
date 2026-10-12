@@ -98,7 +98,7 @@ now, install from a clone:
 git clone https://github.com/Lifesight-Software-Pvt-Ltd/horizon.git
 cd horizon
 pip install -e .            # editable install; runtime deps are pinned in pyproject.toml
-pip install -e ".[dev]"     # add pytest, pytest-cov, black, flake8
+pip install -e ".[dev]"     # add pytest, pytest-cov, black, flake8, bandit
 ```
 
 See [`docs/installation.md`](docs/installation.md) for platform notes and the

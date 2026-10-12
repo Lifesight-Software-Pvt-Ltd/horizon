@@ -28,7 +28,7 @@ reference implementation this was ported from:
 
 - **CPU is pinned and logging is silenced.** NeuralProphet runs on
   PyTorch Lightning and will otherwise pick up an accelerator (MPS on a
-  Mac, CPU in CI), producing different numbers for identical code. It is
+  Mac, CPU elsewhere), producing different numbers for identical code. It is
   also extremely chatty; progress=False alone does not quiet it.
 
 - **Both epochs and learning_rate are pinned** via the config grid. If
@@ -342,8 +342,7 @@ class NeuralProphetWrapper(BaseModel):
             neuralprophet.forecaster.NeuralProphet was not an allowed global
 
         This is genuinely version-dependent -- it passed local testing on an
-        older torch and only surfaced in CI on torch >= 2.6, which is exactly
-        why the matrix exists.
+        older torch and only surfaced in CI on torch >= 2.6.
 
         We try NeuralProphet's own loader first (correct on older torch), then
         fall back to torch.load with weights_only=False. Allowlisting classes
@@ -365,8 +364,9 @@ class NeuralProphetWrapper(BaseModel):
 
         This is the second CI-only failure on this same method, from the same
         cause: the fallback path silently diverged from what NeuralProphet's
-        own loader does. Local runs (torch < 2.6) never reach the fallback,
-        so only the CI matrix exercises it.
+        own loader does. Runs on torch < 2.6 never reach the fallback, which
+        is why tests/test_neuralprophet_compat.py stubs torch to exercise it
+        on any version.
         """
         from neuralprophet import load as np_load
 

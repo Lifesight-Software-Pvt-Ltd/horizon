@@ -475,7 +475,7 @@ neuralprophet:
                                  # badly on smooth-trend series (a regression seen
                                  # on negative_effect_driver); a mid-series shift
                                  # at ~60% is still well inside 0.8.
-      accelerator: cpu          # pinned so local (MPS) and CI (CPU) agree
+      accelerator: cpu          # pinned so MPS and CPU-only machines agree
       # REQUIRED, not an optimisation. With metrics enabled, NeuralProphet
       # attaches a Lightning logger, which makes trainer.fit() run
       # _log_hyperparams() -> save_hparams_to_yaml() -> OmegaConf.save().
