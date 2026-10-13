@@ -3,6 +3,22 @@
 All notable changes to `horizon_forecaster` are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Text dates were sorted alphabetically, not by time.** The constructor sorted the raw date column before parsing it, so text such as `01/15/2023` sorted ahead of `12/20/2022`. The train/validation/test windows then mixed up the calendar and the forecast started from the wrong date, with no error. The date column is now parsed first (`utils.parse_date_column()`), on a copy — the caller's DataFrame is never modified — and everything downstream sorts and splits on real dates.
+- **Duplicate dates were accepted silently.** Prophet and NeuralProphet then failed and dropped out of the run, SARIMAX and CatBoost counted the repeat as an extra period, and duplicates inside the test window made `evaluate()` fail late with an unrelated ensemble-alignment error. Duplicates now raise `InvalidConfigError` at construction, naming the dates.
+
+### Added
+
+- **`date_format` parameter on `HorizonForecaster`.** Without it, the date column is detected: datetimes pass through, and text must be one of `YYYY-MM-DD`, `YYYY/MM/DD`, `DD-MM-YYYY`, `DD/MM/YYYY`, `MM-DD-YYYY`, `MM/DD/YYYY` or a full ISO timestamp, the same format on every row. A column that is valid both day-first and month-first (every day and month 12 or less) raises instead of being guessed — real exports have been silently read month-first. Mixed formats, two-digit years and numeric date columns also raise, each with a specific message. `date_format` settles the ambiguous case and accepts any other strftime pattern.
+- **A warning when dates are missing.** Data that passes the acceptance contract below can still have scattered gaps (weekday-only sales, an occasional missing day). These are reported with the share of periods present, the number of gaps and the longest one, and the run continues. The warning says what gaps affect: windows are counted in rows, and SARIMAX treats consecutive rows as consecutive periods. Horizon still never fills gaps itself.
+
+### Changed
+
+- **The date column now has to meet an explicit acceptance contract, and anything else raises.** Beyond parsing and duplicates: every step between dates must be a whole number of periods (weekly dates on one weekday, daily dates whole days apart); more than half of the steps must be exactly one period; and no more than 4 weeks (`MAX_CONTINUOUS_GAP_DAYS = 28`) of dates may be missing in a row. Previously a declared frequency the data contradicted (weekly data declared daily, or the reverse), and spacing Horizon does not support (every 2 days, fortnightly, monthly), only warned — and the run went on to produce forecast dates, window sizes and model settings for the wrong frequency. In testing, monthly data declared daily finished with a 0.67% MAPE and a daily-dated forecast. A mis-declared frequency now raises `InvalidConfigError` naming the right one; unsupported spacing raises `UnsupportedFrequencyError`. The gap limit is absolute rather than a share of the history, because a long hole does the same damage in four years of data as in two, and it is enforced separately from scattered gaps, which hurt far less. Two existing tests that asserted "warn, don't block" for irregular spacing and a frequency mismatch now expect these errors.
+
 ## [1.0.0] - 2026-09-03
 
 The first public release, and the first stable API.

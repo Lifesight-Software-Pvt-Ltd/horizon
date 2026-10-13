@@ -5,6 +5,10 @@ import numpy as np
 
 from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
 from horizon_forecaster.utils import (
+    ACCEPTED_DATE_FORMATS,
+    describe_date_spacing,
+    find_duplicate_dates,
+    parse_date_column,
     resolve_split,
     clean_zero_variance,
     infer_frequency,
@@ -259,3 +263,144 @@ def test_resolve_split_scaling_applies_only_when_both_windows_defaulted():
     # validation window of 56 is used as-is and there is no room left.
     with pytest.raises(InvalidConfigError):
         resolve_split(60, "daily", test_size=5)
+
+
+# ---------- parse_date_column ----------
+
+_JAN = pd.date_range("2024-01-10", periods=10, freq="D")
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%m-%d-%Y", "%m/%d/%Y"],
+)
+def test_parse_date_column_reads_each_accepted_format(fmt):
+    # Days 10-19 include values above 12, so day-first and month-first are
+    # each unambiguous.
+    text = pd.Series(_JAN.strftime(fmt))
+    parsed = parse_date_column(text, "date")
+    assert list(parsed) == list(_JAN)
+
+
+def test_accepted_formats_list_matches_the_six_documented_formats():
+    assert len(ACCEPTED_DATE_FORMATS) == 6
+
+
+def test_parse_date_column_passes_datetimes_through_unchanged():
+    dates = pd.Series(_JAN)
+    assert parse_date_column(dates, "date").equals(dates)
+
+
+def test_parse_date_column_drops_timezone_keeping_local_time():
+    dates = pd.Series(_JAN.tz_localize("Asia/Kolkata"))
+    parsed = parse_date_column(dates, "date")
+    assert parsed.dt.tz is None
+    assert list(parsed) == list(_JAN)
+
+
+def test_parse_date_column_reads_full_iso_timestamps():
+    text = pd.Series(["2024-01-15 00:00:00", "2024-01-16 00:00:00"])
+    parsed = parse_date_column(text, "date")
+    assert list(parsed) == list(pd.to_datetime(["2024-01-15", "2024-01-16"]))
+
+
+def test_parse_date_column_reads_date_objects():
+    import datetime
+
+    values = pd.Series([datetime.date(2024, 1, 15), datetime.date(2024, 1, 16)])
+    parsed = parse_date_column(values, "date")
+    assert list(parsed) == list(pd.to_datetime(["2024-01-15", "2024-01-16"]))
+
+
+def test_parse_date_column_refuses_to_guess_an_ambiguous_column():
+    # Every day and month is 12 or less: 03/04/2024 is 3 April or 4 March.
+    text = pd.Series(["03/04/2024", "04/04/2024", "05/04/2024"])
+    with pytest.raises(InvalidConfigError, match="day-first or month-first"):
+        parse_date_column(text, "date")
+
+
+@pytest.mark.parametrize(
+    "date_format, expected",
+    [("%d/%m/%Y", "2024-04-03"), ("%m/%d/%Y", "2024-03-04")],
+)
+def test_date_format_settles_an_ambiguous_column(date_format, expected):
+    text = pd.Series(["03/04/2024", "04/04/2024"])
+    parsed = parse_date_column(text, "date", date_format=date_format)
+    assert parsed.iloc[0] == pd.Timestamp(expected)
+
+
+def test_date_format_supports_formats_outside_the_accepted_list():
+    parsed = parse_date_column(pd.Series(["15.01.2024"]), "date", date_format="%d.%m.%Y")
+    assert parsed.iloc[0] == pd.Timestamp("2024-01-15")
+
+
+def test_date_format_reports_values_that_do_not_match():
+    with pytest.raises(InvalidConfigError, match="do not match date_format"):
+        parse_date_column(pd.Series(["15/01/2024", "2024-01-16"]), "date", date_format="%d/%m/%Y")
+
+
+def test_parse_date_column_rejects_mixed_formats():
+    text = pd.Series(["15/01/2024", "2024-01-16"])
+    with pytest.raises(InvalidConfigError, match="mixes date formats"):
+        parse_date_column(text, "date")
+
+
+@pytest.mark.parametrize("bad", [["15.01.2024"], ["15/01/24", "16/01/24"], ["not a date"]])
+def test_parse_date_column_rejects_unrecognised_text(bad):
+    with pytest.raises(InvalidConfigError, match="Accepted formats"):
+        parse_date_column(pd.Series(bad), "date")
+
+
+def test_parse_date_column_rejects_a_numeric_date_column():
+    with pytest.raises(InvalidConfigError, match="is numeric"):
+        parse_date_column(pd.Series([20240115, 20240116]), "date")
+
+
+def test_parse_date_column_leaves_missing_cells_for_the_missing_value_check():
+    parsed = parse_date_column(pd.Series(["2024-01-15", None, ""]), "date")
+    assert parsed.iloc[0] == pd.Timestamp("2024-01-15")
+    assert parsed.iloc[1:].isna().all()
+
+
+# ---------- find_duplicate_dates / find_date_gaps ----------
+
+
+def test_find_duplicate_dates_lists_each_repeated_date_once():
+    dates = pd.Series(pd.to_datetime(["2024-01-02", "2024-01-01", "2024-01-02", "2024-01-03"]))
+    assert find_duplicate_dates(dates) == [pd.Timestamp("2024-01-02")]
+
+
+def test_find_duplicate_dates_is_empty_for_unique_dates():
+    assert find_duplicate_dates(pd.Series(_JAN)) == []
+
+
+def test_describe_date_spacing_is_clean_for_a_regular_series():
+    spacing = describe_date_spacing(pd.Series(_JAN), "daily")
+    assert spacing.one_period_share == 1.0
+    assert spacing.missing_periods == 0 and spacing.irregular_steps == 0
+    assert spacing.coverage == 1.0
+
+
+def test_describe_date_spacing_counts_gaps_and_the_longest_run():
+    dates = pd.Series(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-05", "2024-01-15"]))
+    spacing = describe_date_spacing(dates, "daily")
+    assert spacing.missing_periods == 2 + 9
+    assert spacing.gap_count == 2
+    assert spacing.longest_gap == (pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-15"))
+    assert spacing.longest_gap_periods == 9
+    assert spacing.coverage == pytest.approx(4 / 15)
+
+
+def test_describe_date_spacing_reports_the_typical_step_and_its_share():
+    dates = pd.Series(pd.date_range("2024-01-01", periods=10, freq="2D"))
+    spacing = describe_date_spacing(dates, "daily")
+    assert spacing.typical_step == pd.Timedelta(days=2)
+    assert spacing.one_period_share == 0.0
+
+
+def test_describe_date_spacing_flags_weekly_dates_on_different_weekdays():
+    # Sunday, Sunday, then a Monday: 8 days is not a whole number of weeks.
+    dates = pd.Series(pd.to_datetime(["2024-01-07", "2024-01-14", "2024-01-22"]))
+    spacing = describe_date_spacing(dates, "weekly")
+    assert spacing.irregular_steps == 1
+    assert spacing.missing_periods == 0

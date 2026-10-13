@@ -5,9 +5,11 @@ These functions are intentionally free of any model-specific logic —
 they operate purely on pandas DataFrames/Series and raw config values.
 """
 
+import datetime
 import warnings
 from typing import List, NamedTuple, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
 from horizon_forecaster.exceptions import (
@@ -71,6 +73,264 @@ class SplitSizes(NamedTuple):
     n_train: int
     n_validation: int
     n_test: int
+
+
+# Text date formats the date column is parsed with when no `date_format` is
+# given. Each is tried strictly against the WHOLE column; a format is only
+# used if every value matches it. Grouped by which field comes first, because
+# that is what decides whether a column is ambiguous: "03/04/2024" fits both
+# the day-first and the month-first pattern, and no rule can say which was
+# meant. Year-first dates have no such problem.
+_YEAR_FIRST_FORMATS = ("%Y-%m-%d", "%Y/%m/%d")
+_DAY_FIRST_FORMATS = ("%d-%m-%Y", "%d/%m/%Y")
+_MONTH_FIRST_FORMATS = ("%m-%d-%Y", "%m/%d/%Y")
+
+# Full ISO 8601 timestamps ("2024-01-15 00:00:00", "2024-01-15T00:00:00"),
+# which is how many exports -- BigQuery among them -- write a date. Tried
+# after the plain year-first formats, so "2024-01-15" uses those.
+_ISO_TIMESTAMP = "ISO8601"
+
+ACCEPTED_DATE_FORMATS = (
+    "YYYY-MM-DD",
+    "YYYY/MM/DD",
+    "DD-MM-YYYY",
+    "DD/MM/YYYY",
+    "MM-DD-YYYY",
+    "MM/DD/YYYY",
+)
+
+_FORMAT_LABELS = {
+    "%Y-%m-%d": "YYYY-MM-DD",
+    "%Y/%m/%d": "YYYY/MM/DD",
+    "%d-%m-%Y": "DD-MM-YYYY",
+    "%d/%m/%Y": "DD/MM/YYYY",
+    "%m-%d-%Y": "MM-DD-YYYY",
+    "%m/%d/%Y": "MM/DD/YYYY",
+}
+
+_PERIOD_DAYS = {"daily": 1, "weekly": 7}
+
+
+def _try_format(text: pd.Series, fmt: str) -> pd.Series:
+    """Parse `text` with one format; values that do not match become NaT."""
+    try:
+        parsed = pd.to_datetime(text, format=fmt, errors="coerce")
+    except (ValueError, TypeError):
+        # e.g. ISO timestamps carrying different UTC offsets in one column.
+        return pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
+    if getattr(parsed.dt, "tz", None) is not None:
+        parsed = parsed.dt.tz_localize(None)
+    return parsed
+
+
+def _ambiguous_example(text: pd.Series) -> str:
+    """A value whose day and month differ, to show why the column is ambiguous."""
+    for value in text:
+        parts = value.replace("-", "/").split("/")
+        if len(parts) == 3 and parts[0].lstrip("0") != parts[1].lstrip("0"):
+            return value
+    return text.iloc[0]
+
+
+def parse_date_column(
+    values: pd.Series, column_name: str, date_format: Optional[str] = None
+) -> pd.Series:
+    """
+    Turn the user's date column into real datetimes, BEFORE anything sorts
+    or splits on it.
+
+    Sorting a column of text dates sorts it alphabetically, so "01/15/2023"
+    lands before "02/01/2022" -- the training, validation and test windows
+    then mix years, and the forecast starts from the wrong date, with no
+    error anywhere. Parsing first is what makes every later step see time.
+
+    Accepted input:
+      - a datetime column (passed through unchanged; timezones are dropped,
+        keeping the local time);
+      - a column of date/datetime objects;
+      - text in one of ACCEPTED_DATE_FORMATS, the same format on every row;
+      - full ISO 8601 timestamps such as "2024-01-15 00:00:00".
+
+    With `date_format` (a strftime pattern such as "%d/%m/%Y"), that format
+    alone is used -- this is how a caller settles an ambiguous column or
+    supplies any format outside the accepted list.
+
+    Missing cells (NaN, None, blank text) come back as NaT and are left for
+    validate_no_missing_values() to report alongside the other columns.
+
+    Raises:
+        InvalidConfigError: for a numeric date column, text that matches no
+            accepted format, a column mixing formats, a column that is
+            equally valid day-first and month-first, or values that do not
+            match an explicit `date_format`.
+    """
+    if pd.api.types.is_datetime64_any_dtype(values):
+        if getattr(values.dt, "tz", None) is not None:
+            return values.dt.tz_localize(None)
+        return values
+
+    if pd.api.types.is_bool_dtype(values) or pd.api.types.is_numeric_dtype(values):
+        raise InvalidConfigError(
+            f"The date column '{column_name}' is numeric ({values.dtype}), so it cannot be "
+            f"read as dates unambiguously -- a number such as 20240115 could be a date, an "
+            f"Excel serial or a timestamp. Convert it to datetimes (pd.to_datetime) or to "
+            f"text in one of {list(ACCEPTED_DATE_FORMATS)} first.",
+            param_name="date_column",
+            provided_value=str(values.dtype),
+        )
+
+    result = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    present = values.notna() & (values.astype(str).str.strip() != "")
+    if not present.any():
+        return result
+
+    present_values = values[present]
+    if all(isinstance(v, (datetime.date, np.datetime64)) for v in present_values):
+        parsed = pd.to_datetime(present_values)
+        if getattr(parsed.dt, "tz", None) is not None:
+            parsed = parsed.dt.tz_localize(None)
+        result[present] = parsed.to_numpy()
+        return result
+
+    text = present_values.astype(str).str.strip()
+
+    if date_format is not None:
+        parsed = _try_format(text, date_format)
+        failed = text[parsed.isna()]
+        if not failed.empty:
+            raise InvalidConfigError(
+                f"{len(failed)} value(s) in the date column '{column_name}' do not match "
+                f"date_format='{date_format}', e.g. {list(failed.unique()[:3])}.",
+                param_name="date_format",
+                provided_value=date_format,
+            )
+        result[present] = parsed.to_numpy()
+        return result
+
+    attempts = {
+        fmt: _try_format(text, fmt)
+        for fmt in (
+            *_YEAR_FIRST_FORMATS,
+            _ISO_TIMESTAMP,
+            *_DAY_FIRST_FORMATS,
+            *_MONTH_FIRST_FORMATS,
+        )
+    }
+    fits_all = [fmt for fmt, parsed in attempts.items() if parsed.notna().all()]
+
+    year_first = [f for f in fits_all if f in _YEAR_FIRST_FORMATS or f == _ISO_TIMESTAMP]
+    day_first = [f for f in fits_all if f in _DAY_FIRST_FORMATS]
+    month_first = [f for f in fits_all if f in _MONTH_FIRST_FORMATS]
+
+    if year_first:
+        chosen = year_first[0]
+    elif day_first and month_first:
+        example = _ambiguous_example(text)
+        raise InvalidConfigError(
+            f"The dates in '{column_name}' could be read either day-first or month-first: "
+            f"every value has a day and a month of 12 or less, so '{example}' could mean "
+            f"either. Pass date_format='{day_first[0]}' (day first) or "
+            f"date_format='{month_first[0]}' (month first) to say which.",
+            param_name="date_format",
+            provided_value=example,
+        )
+    elif day_first:
+        chosen = day_first[0]
+    elif month_first:
+        chosen = month_first[0]
+    else:
+        matches_some = pd.concat([p.notna() for p in attempts.values()], axis=1).any(axis=1)
+        if matches_some.all():
+            raise InvalidConfigError(
+                f"The date column '{column_name}' mixes date formats -- every value is a "
+                f"valid date, but no single format fits them all (e.g. "
+                f"{list(text.drop_duplicates().iloc[[0, -1]])}). Use one format throughout, "
+                f"or convert the column with pd.to_datetime first.",
+                param_name="date_column",
+                provided_value=list(text.unique()[:3]),
+            )
+        unreadable = list(text[~matches_some].unique()[:3])
+        raise InvalidConfigError(
+            f"Could not read the date column '{column_name}' as dates, e.g. {unreadable}. "
+            f"Accepted formats: {', '.join(ACCEPTED_DATE_FORMATS)} (with a 4-digit year), or "
+            f"a full ISO 8601 timestamp. For any other format pass date_format, e.g. "
+            f"date_format='%d.%m.%Y'.",
+            param_name="date_column",
+            provided_value=unreadable,
+        )
+
+    result[present] = attempts[chosen].to_numpy()
+    return result
+
+
+def find_duplicate_dates(dates: pd.Series) -> List[pd.Timestamp]:
+    """The distinct dates that appear more than once, in date order."""
+    duplicated = dates[dates.duplicated(keep=False)]
+    return sorted(duplicated.unique())
+
+
+# The longest run of consecutive missing dates accepted, in days: 28 daily
+# periods or 4 weekly ones. Scattered gaps and one long hole hurt the models
+# in different ways. A hole of more than four weeks removes a whole stretch
+# of trend and seasonality in one piece, and SARIMAX -- which treats
+# consecutive rows as consecutive periods -- sees the dates either side of it
+# as neighbours. Absolute rather than relative to the history: a two-month
+# hole does the same damage in four years of data as in two. 28 days is also
+# the default daily test window.
+MAX_CONTINUOUS_GAP_DAYS = 28
+
+
+class DateSpacing(NamedTuple):
+    """How a sorted, de-duplicated date column departs from one row per period."""
+
+    one_period_share: float  # share of steps that are exactly one period
+    typical_step: pd.Timedelta  # the most common step
+    irregular_steps: int  # steps that are not a whole number of periods
+    irregular_example: Optional[Tuple[pd.Timestamp, pd.Timestamp]]
+    missing_periods: int  # whole periods absent, across all gaps
+    gap_count: int  # places where one or more periods are missing
+    longest_gap: Optional[Tuple[pd.Timestamp, pd.Timestamp]]  # dates either side
+    longest_gap_periods: int  # periods missing in a row in the longest gap
+    coverage: float  # rows present / periods spanned
+
+
+def describe_date_spacing(sorted_dates: pd.Series, frequency: str) -> DateSpacing:
+    """
+    Measure the spacing of a sorted, unique date column with at least two
+    dates. A step of exactly one period is regular; several whole periods
+    means periods are missing; a step that is not a whole number of periods
+    (6 or 8 days on weekly data) is irregular.
+    """
+    period = pd.Timedelta(days=_PERIOD_DAYS[frequency])
+    dates = pd.Series(sorted_dates).reset_index(drop=True)
+    steps = dates.diff().iloc[1:]
+
+    whole = (steps % period) == pd.Timedelta(0)
+    gaps = steps[whole & (steps > period)]
+    irregular = steps[~whole]
+
+    longest_gap, longest_gap_periods = None, 0
+    if not gaps.empty:
+        i = gaps.idxmax()
+        longest_gap = (dates[i - 1], dates[i])
+        longest_gap_periods = int(gaps[i] / period) - 1
+    irregular_example = None
+    if not irregular.empty:
+        i = irregular.index[0]
+        irregular_example = (dates[i - 1], dates[i])
+
+    spanned = (dates.iloc[-1] - dates.iloc[0]) / period + 1
+    return DateSpacing(
+        one_period_share=float((steps == period).mean()),
+        typical_step=steps.mode().iloc[0],
+        irregular_steps=len(irregular),
+        irregular_example=irregular_example,
+        missing_periods=int(sum(int(g / period) - 1 for g in gaps)),
+        gap_count=len(gaps),
+        longest_gap=longest_gap,
+        longest_gap_periods=longest_gap_periods,
+        coverage=float(len(dates) / spanned),
+    )
 
 
 def validate_no_missing_values(

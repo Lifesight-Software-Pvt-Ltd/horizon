@@ -163,67 +163,175 @@ def test_constructor_sorts_data_chronologically():
     assert forecaster.raw_df["orders"].tolist() == [10, 20, 30]
 
 
-def test_constructor_warns_when_declared_frequency_mismatches_actual_data():
+def test_constructor_sorts_text_dates_by_time_not_alphabetically():
     """
-    The likely real-world bug this check exists for: a user declares
-    frequency="weekly" but their actual date column is daily-spaced (or
-    vice versa). infer_frequency() is used here to catch this, rather
-    than silently proceeding with a mismatch.
+    MM/DD/YYYY text spanning a year end sorts wrongly as text: "01/05/2023"
+    comes before "12/20/2022". The dates must be parsed before sorting, or
+    the train/validation/test windows mix up the calendar.
     """
-    daily_df = pd.DataFrame(
-        {
-            "date": pd.date_range("2026-01-01", periods=60, freq="D"),
-            "orders": [100 + i * 2 for i in range(60)],
-        }
+    dates = pd.date_range("2022-12-20", periods=40, freq="D")
+    df = pd.DataFrame({"date": dates.strftime("%m/%d/%Y"), "orders": range(40)})
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["prophet"],
+        validation_size=10,
+        test_size=5,
     )
-    with pytest.warns(UserWarning, match="most common date spacing looks like 'daily'"):
-        HorizonForecaster(
-            daily_df,
-            date_column="date",
-            target_column="orders",
-            frequency="weekly",
-            models=["prophet"],
-        )
+    assert list(forecaster.raw_df["date"]) == list(dates)
+    assert forecaster.raw_df["orders"].tolist() == list(range(40))
 
 
-def test_constructor_does_not_warn_when_frequency_matches_data():
-    # Explicit window sizes, so the short-series scaling warning (which is
-    # about the split, not the frequency) can't mask what this asserts.
-    daily_df = make_raw_df(n=60, freq="D")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        HorizonForecaster(
-            daily_df,
-            date_column="date",
-            target_column="orders",
-            frequency="daily",
-            models=["prophet"],
-            validation_size=10,
-            test_size=5,
-        )
+def test_constructor_does_not_modify_the_callers_dataframe():
+    dates = pd.date_range("2022-12-20", periods=40, freq="D")
+    df = pd.DataFrame({"date": dates.strftime("%d/%m/%Y"), "orders": range(40)})
+    before = df.copy()
+    HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["prophet"],
+        validation_size=10,
+        test_size=5,
+    )
+    pd.testing.assert_frame_equal(df, before)
 
 
-def test_constructor_warns_but_does_not_block_on_irregular_data():
-    """
-    Real-world data is rarely perfectly regular - irregular spacing that
-    doesn't cleanly match daily or weekly should warn, not raise, so
-    legitimate (if slightly messy) data isn't rejected outright.
-    """
-    irregular_df = pd.DataFrame(
+def test_constructor_refuses_ambiguous_text_dates_until_date_format_is_given():
+    # Weekly dates on the 1st-12th of each month only: every value fits
+    # both DD/MM/YYYY and MM/DD/YYYY.
+    df = pd.DataFrame(
         {
-            "date": pd.to_datetime(["2026-01-01", "2026-01-03", "2026-01-10", "2026-01-25"]),
+            "date": ["01/02/2026", "08/02/2026", "01/03/2026", "08/03/2026"],
             "orders": [10, 20, 30, 40],
         }
     )
-    with pytest.warns(UserWarning):
-        forecaster = HorizonForecaster(
-            irregular_df,
-            date_column="date",
-            target_column="orders",
-            frequency="weekly",
-            models=["prophet"],
+    kwargs = dict(date_column="date", target_column="orders", frequency="weekly")
+    with pytest.raises(InvalidConfigError, match="day-first or month-first"):
+        HorizonForecaster(df, models=["prophet"], **kwargs)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # tiny series: scaling/gap warnings are not the point
+        forecaster = HorizonForecaster(df, models=["prophet"], date_format="%d/%m/%Y", **kwargs)
+    assert forecaster.raw_df["date"].iloc[0] == pd.Timestamp("2026-02-01")
+
+
+def test_constructor_rejects_duplicate_dates():
+    df = make_raw_df(n=60)
+    df = pd.concat([df, df.iloc[[5, 6]]], ignore_index=True)
+    with pytest.raises(InvalidConfigError, match="appear more than once"):
+        HorizonForecaster(
+            df, date_column="date", target_column="orders", frequency="daily", models=["prophet"]
         )
-    assert forecaster is not None  # confirms it did NOT raise, just warned
+
+
+def _spacing_df(dates):
+    return pd.DataFrame({"date": list(dates), "orders": range(len(dates))})
+
+
+def _build(df, frequency, **kwargs):
+    return HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency=frequency,
+        models=["prophet"],
+        **kwargs,
+    )
+
+
+_DAILY = pd.date_range("2024-01-01", periods=400, freq="D")
+_WEEKLY = pd.date_range("2022-01-02", periods=120, freq="7D")
+
+
+def test_constructor_accepts_clean_daily_and_weekly_dates_without_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _build(_spacing_df(_DAILY), "daily")
+        _build(_spacing_df(_WEEKLY), "weekly")
+
+
+@pytest.mark.parametrize(
+    "dates, frequency, use",
+    [(_WEEKLY, "daily", "weekly"), (_DAILY, "weekly", "daily")],
+)
+def test_constructor_rejects_a_frequency_the_dates_contradict(dates, frequency, use):
+    with pytest.raises(InvalidConfigError, match=f"Use frequency='{use}'"):
+        _build(_spacing_df(dates), frequency)
+
+
+@pytest.mark.parametrize(
+    "dates, frequency, typical",
+    [
+        (_DAILY[::2], "daily", "2 day"),  # every other day
+        (_WEEKLY[::2], "weekly", "14 day"),  # fortnightly
+        (pd.date_range("2018-01-01", periods=60, freq="MS"), "weekly", "31 day"),  # monthly
+        (pd.date_range("2018-01-01", periods=60, freq="MS"), "daily", "31 day"),
+    ],
+)
+def test_constructor_rejects_spacing_it_does_not_support(dates, frequency, typical):
+    with pytest.raises(UnsupportedFrequencyError, match=f"mostly {typical}"):
+        _build(_spacing_df(dates), frequency)
+
+
+def test_constructor_rejects_dates_with_no_regular_spacing():
+    """
+    Previously this only warned ("irregular spacing should warn, not
+    raise"). Four dates with gaps of 2, 7 and 15 days have no frequency at
+    all, and the run went on to produce settings and forecast dates for one
+    anyway.
+    """
+    dates = pd.to_datetime(["2026-01-01", "2026-01-03", "2026-01-10", "2026-01-25"])
+    with pytest.raises(UnsupportedFrequencyError, match="resample"):
+        _build(_spacing_df(dates), "weekly")
+
+
+def test_constructor_rejects_weekly_dates_on_different_weekdays():
+    dates = _WEEKLY[:60].append(_WEEKLY[60:] + pd.Timedelta(days=1))  # Sundays, then Mondays
+    with pytest.raises(InvalidConfigError, match="same weekday"):
+        _build(_spacing_df(dates), "weekly")
+
+
+def test_constructor_rejects_daily_dates_with_inconsistent_times():
+    dates = _DAILY[:200].append(_DAILY[200:] + pd.Timedelta(hours=3))
+    with pytest.raises(InvalidConfigError, match="whole days apart"):
+        _build(_spacing_df(dates), "daily")
+
+
+def test_constructor_accepts_a_continuous_gap_of_exactly_four_weeks_with_a_warning():
+    with pytest.warns(UserWarning, match=r"longest: 28 day\(s\)"):
+        _build(_spacing_df(_DAILY.delete(range(100, 128))), "daily")
+    with pytest.warns(UserWarning, match=r"longest: 4 week\(s\)"):
+        _build(_spacing_df(_WEEKLY.delete(range(50, 54))), "weekly")
+
+
+@pytest.mark.parametrize(
+    "dates, frequency, run",
+    [
+        (_DAILY.delete(range(100, 129)), "daily", "29 day"),
+        (_WEEKLY.delete(range(50, 55)), "weekly", "5 week"),
+    ],
+)
+def test_constructor_rejects_a_continuous_gap_longer_than_four_weeks(dates, frequency, run):
+    with pytest.raises(InvalidConfigError, match=rf"{run}\(s\) missing in a row"):
+        _build(_spacing_df(dates), frequency)
+
+
+def test_constructor_warns_on_scattered_missing_dates_with_the_share_present():
+    # Every 4th day removed: 25% missing, but never more than one in a row.
+    dates = _DAILY.delete(range(3, 400, 4))
+    with pytest.warns(UserWarning, match=r"75% of days are present"):
+        forecaster = _build(_spacing_df(dates), "daily")
+    assert len(forecaster.raw_df) == 300
+
+
+def test_constructor_accepts_weekday_only_daily_data_with_a_warning():
+    weekdays = _DAILY[_DAILY.dayofweek < 5]
+    with pytest.warns(UserWarning, match="has gaps"):
+        _build(_spacing_df(weekdays), "daily")
 
 
 def test_constructor_raises_immediately_when_training_size_leaves_no_test_rows():

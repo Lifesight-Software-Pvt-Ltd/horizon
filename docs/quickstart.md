@@ -19,6 +19,33 @@ silently dropped or imputed: clean or impute your data first. (Columns in the
 DataFrame that you do not use are ignored, and a fully-constant column is
 dropped automatically with a report in `dropped_zero_variance_columns`.)
 
+**What data is accepted.** The constructor checks the date column against the
+rules below. Anything outside them raises an error naming the rule and the fix,
+rather than running on data that would give a confident but wrong result.
+
+| # | Rule | Otherwise |
+|---|---|---|
+| 1 | `frequency` is `"daily"` or `"weekly"` | `UnsupportedFrequencyError` |
+| 2 | Dates are datetimes, or text in one format throughout: `YYYY-MM-DD`, `YYYY/MM/DD`, `DD-MM-YYYY`, `DD/MM/YYYY`, `MM-DD-YYYY`, `MM/DD/YYYY` (four-digit year), or a full ISO timestamp such as `2024-01-15 00:00:00` | `InvalidConfigError` |
+| 3 | No empty date cells | `InvalidConfigError` |
+| 4 | Each date appears once | `InvalidConfigError` naming the dates |
+| 5 | Every step between dates is a whole number of periods — weekly dates all on the same weekday | `InvalidConfigError` |
+| 6 | More than half of the steps are exactly one period — the data really is daily or weekly | `InvalidConfigError` if it looks like the other frequency (e.g. weekly data declared daily); `UnsupportedFrequencyError` for any other spacing (every 2 days, fortnightly, monthly) |
+| 7 | No more than 4 weeks (28 days) of dates missing in a row | `InvalidConfigError` naming the gap |
+
+Dates are parsed before anything is sorted or split, and your DataFrame is
+never modified. If every value could be read either way — `03/04/2024` is
+3 April or 4 March — the constructor raises rather than guess; pass
+`date_format="%d/%m/%Y"` (or `"%m/%d/%Y"`) to say which. `date_format` also
+accepts any other strftime pattern, e.g. `"%d.%m.%Y"`.
+
+**Shorter gaps warn.** Data that meets all seven rules can still have missing
+periods — weekday-only sales, an occasional missing day. You get a warning with
+the share of periods present and the longest gap, and the run continues.
+Horizon never fills gaps, and accuracy suffers — SARIMAX most, since it treats
+consecutive rows as consecutive periods — so fill them if you can. If the
+business was closed on those dates, add them with a value of 0.
+
 ```python
 import pandas as pd
 
