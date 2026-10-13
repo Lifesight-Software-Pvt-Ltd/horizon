@@ -5,3 +5,13 @@ This product includes software developed by Lifesight Software Pvt. Ltd.
 (https://github.com/Lifesight-Software-Pvt-Ltd/horizon).
 
 Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+The example datasets in examples/data/ are third-party works, redistributed
+unmodified under the Apache License, Version 2.0:
+
+- examples/data/final_website_stats.csv: "Personal Ecommerce Website Ad cost &
+  viewer count" by Kaggle user michealknight
+  (https://www.kaggle.com/datasets/michealknight/personal-ecommerce-website-ad-cost-and-viewer-count)
+- examples/data/synthetic_mmm_weekly_india.csv: "MMM Weekly Data - Geo:India" by
+  Kaggle user subhagatoadak
+  (https://www.kaggle.com/datasets/subhagatoadak/mmm-weekly-data-geoindia)
