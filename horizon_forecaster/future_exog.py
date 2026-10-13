@@ -39,13 +39,20 @@ projected trend can't go negative); out-of-range *clamping* is left to the
 model adapters, which already do it.
 """
 
+import difflib
+import warnings
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from horizon_forecaster.exceptions import InvalidConfigError
+from horizon_forecaster.utils import (
+    _DAY_FIRST_FORMATS,
+    _MONTH_FIRST_FORMATS,
+    parse_date_column,
+)
 
 _SEASONAL_PERIOD = {"daily": 7, "weekly": 52}
 AGGREGATORS: Dict[str, Callable] = {"mean": np.nanmean, "median": np.nanmedian}
@@ -274,3 +281,304 @@ def resolve_future_exog(
 
     future_df = pd.DataFrame({c: out[c] for c in independent_columns})
     return future_df, generated
+
+
+# --------------------------------------------------------------------------
+# checking a caller-supplied future table
+# --------------------------------------------------------------------------
+
+# What each model does with a future driver value outside the range it was
+# trained on. They genuinely disagree, which is why an out-of-range scenario
+# warns: the ensemble then blends very different answers.
+_OUT_OF_RANGE_BEHAVIOUR = {
+    "prophet": "Prophet extends the driver's effect in a straight line",
+    "neuralprophet": "NeuralProphet extends the driver's effect in a straight line",
+    "catboost": "CatBoost treats it like the most extreme value it has seen",
+    "sarimax": "SARIMAX caps it at the historical range",
+    "bayesianpymc": "Bayesian PyMC caps it at the historical range",
+}
+
+_PARAM = "future_independent_data"
+_MAX_EXAMPLES = 3
+
+
+def _fmt_dates(dates: pd.Series, mask: np.ndarray) -> str:
+    picked = pd.Series(dates).reset_index(drop=True)[mask]
+    shown = ", ".join(f"{d:%Y-%m-%d}" for d in picked.iloc[:_MAX_EXAMPLES])
+    more = len(picked) - _MAX_EXAMPLES
+    return shown + (f" and {more} more" if more > 0 else "")
+
+
+def _same_dates(a: pd.Series, b: pd.Series) -> bool:
+    a = pd.Series(a).reset_index(drop=True)
+    b = pd.Series(b).reset_index(drop=True)
+    return len(a) == len(b) and bool(
+        np.array_equal(a.to_numpy("datetime64[ns]"), b.to_numpy("datetime64[ns]"))
+    )
+
+
+def _read_table_dates(
+    values: pd.Series, label: str, expected: pd.Series, date_format: Optional[str]
+) -> pd.Series:
+    """
+    Parse the future table's dates with the same rules as the history's.
+    One extra allowance: a short future table can be ambiguous on its own
+    (14 days that all fall on days 1-12 read equally well day-first or
+    month-first), so when the normal parse fails, a day-first or
+    month-first reading that reproduces the forecast dates exactly is
+    accepted -- the expected dates settle the ambiguity.
+    """
+    try:
+        return parse_date_column(values.reset_index(drop=True), label, date_format=date_format)
+    except InvalidConfigError:
+        if date_format is None and values.dtype == object:
+            text = values.reset_index(drop=True).astype(str).str.strip()
+            for fmt in _DAY_FIRST_FORMATS + _MONTH_FIRST_FORMATS:
+                parsed = pd.to_datetime(text, format=fmt, errors="coerce")
+                if parsed.notna().all() and _same_dates(parsed, expected):
+                    return parsed
+        raise
+
+
+def _unknown_column_hint(col, declared: Sequence[str], history_columns) -> str:
+    name = str(col)
+    same_ignoring_case = [d for d in declared if str(d).lower() == name.lower()]
+    close = same_ignoring_case or difflib.get_close_matches(
+        name, [str(d) for d in declared], n=1, cutoff=0.8
+    )
+    if close:
+        return f"'{name}' (did you mean '{close[0]}'?)"
+    if col in history_columns:
+        return (
+            f"'{name}' (it is in your data, but not in independent_columns, so no model "
+            f"uses it -- add it there if it should be a driver)"
+        )
+    return f"'{name}'"
+
+
+def check_future_table(
+    table,
+    *,
+    history_df: pd.DataFrame,
+    date_column: str,
+    target_column: str,
+    independent_columns: List[str],
+    declared_columns: List[str],
+    event_columns: Optional[List[str]],
+    future_dates: pd.Series,
+    frequency: str,
+    date_format: Optional[str] = None,
+    models: Sequence[str] = (),
+) -> pd.DataFrame:
+    """
+    Check a caller-supplied future driver table before any model sees it.
+
+    Every model reads this table by POSITION -- row i is forecast period i --
+    and each model used to react to a bad table differently: too few rows
+    made Prophet and SARIMAX fail while CatBoost carried on alone; a
+    misspelled column was ignored and the real driver silently
+    auto-generated; a blank made two models drop out; an infinite value gave
+    Prophet a NaN forecast; a date column, if present, was never looked at.
+    The run still finished, so the damage looked like a forecast. Here a
+    table either matches the forecast exactly or is rejected with the reason.
+
+    Errors (InvalidConfigError):
+      - not a DataFrame;
+      - a table supplied when no independent_columns were declared;
+      - duplicate column names;
+      - a column that is not a declared driver (the date and target columns
+        are allowed and ignored);
+      - a row count different from the horizon;
+      - dates (a date column, or a DatetimeIndex) that are blank, out of
+        order, or not exactly the forecast dates. Without dates the rows
+        are taken in order;
+      - a blank, non-numeric or infinite value in a driver column;
+      - a negative value in a driver that is never negative in the history;
+      - an event flag with a value it never takes in the history (a 0/1
+        flag must stay 0/1). Booleans are read as 0/1.
+
+    Warnings:
+      - a supplied column for a declared driver that was dropped for never
+        changing in the history (its future values cannot be used);
+      - a driver value outside its historical range, naming what each
+        requested model does with it.
+
+    Returns the supplied, still-active driver columns as floats on a
+    0..horizon-1 index, ready for resolve_future_exog(supplied=...).
+    """
+    if not isinstance(table, pd.DataFrame):
+        raise InvalidConfigError(
+            f"{_PARAM} must be a pandas DataFrame, got {type(table).__name__}. "
+            f"Wrap it first, e.g. pd.DataFrame(...).",
+            param_name=_PARAM,
+            provided_value=type(table).__name__,
+        )
+
+    if not declared_columns:
+        raise InvalidConfigError(
+            f"{_PARAM} was supplied, but no independent_columns were declared when the "
+            f"forecaster was created, so no model would use it. Declare the drivers in "
+            f"independent_columns, or leave {_PARAM} out.",
+            param_name=_PARAM,
+            provided_value=list(table.columns),
+        )
+
+    columns = list(table.columns)
+    duplicated = list(dict.fromkeys(c for c in columns if columns.count(c) > 1))
+    if duplicated:
+        raise InvalidConfigError(
+            f"{_PARAM} has more than one column named {duplicated}. Each driver must "
+            f"appear once.",
+            param_name=_PARAM,
+            provided_value=duplicated,
+        )
+
+    allowed = set(declared_columns) | {date_column, target_column}
+    unknown = [c for c in columns if c not in allowed]
+    if unknown:
+        hints = [_unknown_column_hint(c, declared_columns, history_df.columns) for c in unknown]
+        raise InvalidConfigError(
+            f"{_PARAM} has column(s) that are not drivers of this forecaster: "
+            f"{'; '.join(hints)}. The drivers are {list(declared_columns)}; the table may "
+            f"also contain the date column '{date_column}'.",
+            param_name=_PARAM,
+            provided_value=[str(c) for c in unknown],
+        )
+
+    future_dates = pd.Series(future_dates).reset_index(drop=True)
+    horizon = len(future_dates)
+    span = f"{future_dates.iloc[0]:%Y-%m-%d} to {future_dates.iloc[-1]:%Y-%m-%d}"
+    if len(table) != horizon:
+        raise InvalidConfigError(
+            f"{_PARAM} has {len(table)} row(s), but horizon={horizon}. It needs exactly one "
+            f"row per forecast period, in order: {span}.",
+            param_name=_PARAM,
+            provided_value=len(table),
+        )
+
+    if date_column in table.columns:
+        given_dates, label = table[date_column], date_column
+        where = f"the date column '{date_column}'"
+    elif isinstance(table.index, pd.DatetimeIndex):
+        given_dates, label = pd.Series(table.index), f"index of {_PARAM}"
+        where = f"the index of {_PARAM}"
+    else:
+        given_dates = None
+    if given_dates is not None:
+        given = _read_table_dates(given_dates, label, future_dates, date_format)
+        if given.isna().any():
+            raise InvalidConfigError(
+                f"Some dates in {where} are blank (row(s) "
+                f"{[int(i) + 1 for i in np.flatnonzero(given.isna())][:_MAX_EXAMPLES]}). "
+                f"Every row needs its date: {span}.",
+                param_name=_PARAM,
+            )
+        if not _same_dates(given, future_dates):
+            if _same_dates(given.sort_values(), future_dates):
+                raise InvalidConfigError(
+                    f"The dates in {where} are the right dates but not in order. Sort the "
+                    f"table by date first: the rows are matched to forecast periods by "
+                    f"position.",
+                    param_name=_PARAM,
+                )
+            last = history_df[date_column].max()
+            unit = "day" if frequency == "daily" else "week"
+            row = int(
+                np.flatnonzero(
+                    given.to_numpy("datetime64[ns]") != future_dates.to_numpy("datetime64[ns]")
+                )[0]
+            )
+            raise InvalidConfigError(
+                f"Row {row + 1} of {_PARAM} is dated {given.iloc[row]:%Y-%m-%d}, but forecast "
+                f"period {row + 1} is {future_dates.iloc[row]:%Y-%m-%d}. The forecast starts "
+                f"one {unit} after the last date in your data ({last:%Y-%m-%d}) and runs "
+                f"{span}.",
+                param_name=_PARAM,
+                provided_value=str(given.iloc[row]),
+            )
+
+    supplied = [c for c in columns if c in independent_columns]
+    ignored = [c for c in columns if c in declared_columns and c not in independent_columns]
+
+    cleaned: Dict[str, pd.Series] = {}
+    problems: List[str] = []
+    out_of_range: List[str] = []
+    for col in supplied:
+        raw = table[col].reset_index(drop=True)
+        if pd.api.types.is_bool_dtype(raw):
+            raw = raw.astype(int)
+        blank = raw.isna().to_numpy()
+        values = pd.to_numeric(raw, errors="coerce")
+        text = values.isna().to_numpy() & ~blank
+        infinite = np.isinf(values.to_numpy(dtype=float))
+        if blank.any():
+            problems.append(f"'{col}' is blank for {_fmt_dates(future_dates, blank)}")
+        if text.any():
+            examples = list(dict.fromkeys(raw[text].astype(str)))[:_MAX_EXAMPLES]
+            problems.append(
+                f"'{col}' is not a number for {_fmt_dates(future_dates, text)} (e.g. "
+                f"{examples})"
+            )
+        if infinite.any():
+            problems.append(f"'{col}' is infinite for {_fmt_dates(future_dates, infinite)}")
+        if blank.any() or text.any() or infinite.any():
+            continue
+
+        hist = pd.to_numeric(history_df[col], errors="coerce").to_numpy(dtype=float)
+        hist = hist[np.isfinite(hist)]
+        vals = values.to_numpy(dtype=float)
+        negative = vals < 0
+        if hist.size and hist.min() >= 0 and negative.any():
+            problems.append(
+                f"'{col}' is negative for {_fmt_dates(future_dates, negative)}, but it is "
+                f"never negative in your data"
+            )
+            continue
+
+        declared_flag = event_columns is not None and col in event_columns
+        detected_flag = event_columns is None and hist.size and set(np.unique(hist)) <= {0, 1}
+        if declared_flag or detected_flag:
+            seen = np.unique(hist)
+            unseen = ~np.isin(vals, seen)
+            if unseen.any():
+                shown = " and ".join(f"{v:g}" for v in seen)
+                problems.append(
+                    f"'{col}' is an on/off flag that is only ever {shown} in your data, but "
+                    f"it is {list(dict.fromkeys(f'{v:g}' for v in vals[unseen]))} for "
+                    f"{_fmt_dates(future_dates, unseen)}"
+                )
+                continue
+        elif hist.size and (vals.max() > hist.max() or vals.min() < hist.min()):
+            out_of_range.append(
+                f"'{col}' goes from {vals.min():g} to {vals.max():g}; your data has "
+                f"{hist.min():g} to {hist.max():g}"
+            )
+        cleaned[col] = pd.Series(vals)
+
+    if problems:
+        raise InvalidConfigError(
+            f"{_PARAM} has values the models cannot use: " + "; ".join(problems) + ".",
+            param_name=_PARAM,
+        )
+
+    if ignored:
+        warnings.warn(
+            f"{_PARAM} includes {ignored}, but these drivers never change in your data, so "
+            f"they were dropped when the forecaster was created and their future values "
+            f"are ignored. A driver that is constant in the past cannot be learned, "
+            f"whatever its future values.",
+            stacklevel=3,
+        )
+
+    if out_of_range:
+        behaviour = [_OUT_OF_RANGE_BEHAVIOUR[m] for m in models if m in _OUT_OF_RANGE_BEHAVIOUR]
+        how = f" ({'; '.join(behaviour)})" if behaviour else ""
+        warnings.warn(
+            f"Some future driver values are outside anything in your data: "
+            f"{'; '.join(out_of_range)}. The models disagree about values they have never "
+            f"seen{how}, so treat this forecast as a scenario and compare the models "
+            f"before relying on the ensemble.",
+            stacklevel=3,
+        )
+
+    return pd.DataFrame(cleaned, index=pd.RangeIndex(horizon))

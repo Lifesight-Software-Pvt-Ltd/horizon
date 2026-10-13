@@ -3,6 +3,8 @@ Unit tests for the future-exogenous-data strategies
 (horizon_forecaster/future_exog.py). Pure pandas/numpy -- no models.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from horizon_forecaster.exceptions import InvalidConfigError
 from horizon_forecaster.future_exog import (
     FUTURE_EXOG_STRATEGIES,
+    check_future_table,
     resolve_future_exog,
 )
 
@@ -253,3 +256,194 @@ def test_unknown_aggregator_raises():
     df = _hist({"spend": np.arange(30.0)})
     with pytest.raises(InvalidConfigError):
         _resolve(df, ["spend"], 5, strategy="recent_average", aggregator="mode")
+
+
+# --------------------------------------------------------------------------
+# check_future_table: the contract for a caller-supplied future table
+# --------------------------------------------------------------------------
+
+# 60 daily rows, 2024-01-01 .. 2024-02-29, so the 5-period forecast runs
+# 2024-03-01 .. 2024-03-05 -- every day and month is <= 12, which makes
+# DD/MM and MM/DD text dates ambiguous on their own.
+_CHECK_HIST = pd.DataFrame(
+    {
+        "date": pd.date_range("2024-01-01", periods=60, freq="D"),
+        "sales": np.arange(60) + 100.0,
+        "spend": np.linspace(100.0, 200.0, 60),
+        "promo": [0, 1] * 30,
+        "tv": np.linspace(5.0, 10.0, 60),  # in the data, not declared as a driver
+    }
+)
+_CHECK_FUTURE = pd.Series(pd.date_range("2024-03-01", periods=5, freq="D"))
+
+
+def _check(table, hist=None, declared=("spend", "promo"), active=None, events=("promo",), **kw):
+    hist = _CHECK_HIST if hist is None else hist
+    return check_future_table(
+        table,
+        history_df=hist,
+        date_column="date",
+        target_column="sales",
+        independent_columns=list(declared if active is None else active),
+        declared_columns=list(declared),
+        event_columns=None if events is None else list(events),
+        future_dates=kw.pop("future_dates", _CHECK_FUTURE),
+        frequency="daily",
+        **kw,
+    )
+
+
+def _table(rows=5, **columns):
+    data = {"spend": [150.0] * rows, "promo": [0] * rows}
+    data.update(columns)
+    return pd.DataFrame(data)
+
+
+def test_check_accepts_a_valid_table_and_returns_floats_on_a_positional_index():
+    out = _check(_table().set_index(pd.RangeIndex(500, 505)))
+    assert list(out.columns) == ["spend", "promo"]
+    assert list(out.index) == [0, 1, 2, 3, 4]
+    assert out["promo"].dtype == float
+
+
+def test_check_accepts_a_partial_table():
+    out = _check(_table()[["spend"]])
+    assert list(out.columns) == ["spend"]
+
+
+@pytest.mark.parametrize("bad", [{"spend": [150.0] * 5}, pd.Series([150.0] * 5, name="spend")])
+def test_check_rejects_anything_but_a_dataframe(bad):
+    with pytest.raises(InvalidConfigError, match="must be a pandas DataFrame"):
+        _check(bad)
+
+
+def test_check_rejects_a_table_when_no_drivers_were_declared():
+    with pytest.raises(InvalidConfigError, match="no independent_columns were declared"):
+        _check(_table(), declared=())
+
+
+def test_check_rejects_duplicate_column_names():
+    table = _table()
+    table.columns = ["spend", "spend"]
+    with pytest.raises(InvalidConfigError, match="more than one column named"):
+        _check(table)
+
+
+def test_check_rejects_a_misspelled_driver_and_suggests_the_real_one():
+    with pytest.raises(InvalidConfigError, match="did you mean 'spend'"):
+        _check(_table().rename(columns={"spend": "Spend"}))
+
+
+def test_check_rejects_a_column_that_is_in_the_data_but_not_a_driver():
+    with pytest.raises(InvalidConfigError, match="in your data, but not in independent_columns"):
+        _check(_table(tv=[7.0] * 5))
+
+
+def test_check_allows_and_ignores_the_date_and_target_columns():
+    out = _check(_table(date=_CHECK_FUTURE, sales=[1.0] * 5))
+    assert list(out.columns) == ["spend", "promo"]
+
+
+@pytest.mark.parametrize("rows", [0, 3, 7])
+def test_check_rejects_a_row_count_different_from_the_horizon(rows):
+    with pytest.raises(InvalidConfigError, match=rf"has {rows} row\(s\), but horizon=5"):
+        _check(_table(rows))
+
+
+def test_check_accepts_matching_dates_as_a_column_or_an_index():
+    _check(_table(date=_CHECK_FUTURE))
+    _check(_table().set_index(pd.DatetimeIndex(_CHECK_FUTURE)))
+    _check(_table(date=_CHECK_FUTURE.dt.strftime("%Y-%m-%d")))
+
+
+@pytest.mark.parametrize("fmt", ["%d/%m/%Y", "%m/%d/%Y"])
+def test_check_settles_ambiguous_text_dates_against_the_forecast_dates(fmt):
+    # On their own these could be day-first or month-first; only one reading
+    # gives the forecast dates, so that one is used.
+    _check(_table(date=_CHECK_FUTURE.dt.strftime(fmt)))
+
+
+def test_check_rejects_dates_that_do_not_match_the_forecast():
+    shifted = _CHECK_FUTURE + pd.Timedelta(days=7)
+    with pytest.raises(InvalidConfigError, match="Row 1 .* is dated 2024-03-08, .* 2024-03-01"):
+        _check(_table(date=shifted))
+
+
+def test_check_rejects_dates_out_of_order():
+    with pytest.raises(InvalidConfigError, match="not in order"):
+        _check(_table(date=_CHECK_FUTURE[::-1].reset_index(drop=True)))
+
+
+def test_check_rejects_a_blank_date():
+    dates = list(_CHECK_FUTURE[:-1]) + [None]
+    with pytest.raises(InvalidConfigError, match="blank"):
+        _check(_table(date=dates))
+
+
+def test_check_reports_every_bad_value_in_one_error():
+    table = _table().astype({"spend": object})
+    table.loc[1, "spend"] = None
+    table.loc[2, "spend"] = "1,200"
+    with pytest.raises(InvalidConfigError) as caught:
+        _check(table)
+    message = str(caught.value)
+    assert "'spend' is blank for 2024-03-02" in message
+    assert "'spend' is not a number for 2024-03-03" in message
+
+
+def test_check_rejects_infinite_values():
+    with pytest.raises(InvalidConfigError, match="'spend' is infinite"):
+        _check(_table(spend=[150.0, np.inf, 150.0, 150.0, 150.0]))
+
+
+def test_check_rejects_negative_values_for_a_driver_that_is_never_negative():
+    with pytest.raises(InvalidConfigError, match="never negative in your data"):
+        _check(_table(spend=[150.0, -5.0, 150.0, 150.0, 150.0]))
+
+
+def test_check_allows_negative_values_when_the_history_has_them():
+    hist = _CHECK_HIST.assign(spend=np.linspace(-50.0, 50.0, 60))
+    _check(_table(spend=[-10.0] * 5), hist=hist)
+
+
+def test_check_rejects_a_flag_value_never_seen_in_the_history():
+    with pytest.raises(InvalidConfigError, match="'promo' is an on/off flag"):
+        _check(_table(promo=[0, 2, 0, 0, 0]))
+
+
+def test_check_rejects_an_unseen_value_for_an_auto_detected_flag():
+    with pytest.raises(InvalidConfigError, match="'promo' is an on/off flag"):
+        _check(_table(promo=[0, 2, 0, 0, 0]), events=None)
+
+
+def test_check_reads_booleans_as_zero_and_one():
+    out = _check(_table(promo=[False, True, False, False, False]))
+    assert list(out["promo"]) == [0.0, 1.0, 0.0, 0.0, 0.0]
+
+
+def test_check_does_not_treat_a_two_level_continuous_driver_as_a_flag():
+    # Two price points in the history, auto-detection on: a new price is a
+    # scenario, not an error.
+    hist = _CHECK_HIST.assign(spend=[9.99, 12.99] * 30)
+    with pytest.warns(UserWarning, match="outside anything in your data"):
+        _check(_table(spend=[14.99] * 5), hist=hist, events=None)
+
+
+def test_check_warns_and_drops_a_supplied_driver_that_was_dropped_as_constant():
+    with pytest.warns(UserWarning, match="dropped when the forecaster was created"):
+        out = _check(_table(), active=["promo"])
+    assert list(out.columns) == ["promo"]
+
+
+def test_check_warns_on_out_of_range_values_naming_each_models_behaviour():
+    with pytest.warns(UserWarning, match="outside anything in your data") as caught:
+        _check(_table(spend=[1000.0] * 5), models=["prophet", "sarimax"])
+    message = str(caught[0].message)
+    assert "'spend' goes from 1000 to 1000; your data has 100 to 200" in message
+    assert "Prophet extends" in message and "SARIMAX caps" in message
+
+
+def test_check_does_not_warn_for_in_range_values():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _check(_table())

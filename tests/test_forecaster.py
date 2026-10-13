@@ -912,6 +912,39 @@ def test_forecast_uses_supplied_future_independent_data_when_provided():
     assert len(result.forecast) == 5
 
 
+def test_forecast_rejects_a_future_table_with_the_wrong_number_of_rows():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+        models=["catboost"],
+    )
+    with pytest.raises(InvalidConfigError, match=r"has 3 row\(s\), but horizon=5"):
+        forecaster.forecast(horizon=5, future_independent_data=pd.DataFrame({"spend": [60] * 3}))
+
+
+def test_a_failed_forecast_clears_the_previous_forecasts_results():
+    df = make_raw_df(n=60, with_spend=True)
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+        models=["catboost"],
+    )
+    forecaster.forecast(horizon=5, future_independent_data=pd.DataFrame({"spend": [60] * 5}))
+    assert forecaster.forecast_ensemble is not None
+    with pytest.raises(InvalidConfigError):
+        forecaster.forecast(horizon=8, future_independent_data=pd.DataFrame({"spend": [60] * 5}))
+    assert forecaster.forecast_ensemble is None
+    assert forecaster.future_exog_used is None
+    assert forecaster.forecast_errors == {}
+
+
 # ---------- future-exogenous-data strategies ----------
 # The strategy internals are unit-tested in tests/test_future_exog.py; these
 # check the forecaster-level wiring (resolution, partial fill, exposure,
