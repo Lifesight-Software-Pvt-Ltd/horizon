@@ -62,8 +62,11 @@ from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
 from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
 from horizon_forecaster.utils import (
+    MAX_CONTINUOUS_GAP_DAYS,
     clean_zero_variance,
-    infer_frequency,
+    describe_date_spacing,
+    find_duplicate_dates,
+    parse_date_column,
     resolve_split,
     validate_frequency,
     validate_mape_threshold,
@@ -307,6 +310,22 @@ class HorizonForecaster:
             (median is robust to spikes in the driver history).
         recent_average_window: N for the recent_average strategy -- how many
             trailing periods to average. Default 28.
+        date_format: optional strftime pattern for the date column, e.g.
+            "%d/%m/%Y". None (the default) detects the format: a datetime
+            column is used as-is, and text must be in one of
+            utils.ACCEPTED_DATE_FORMATS (YYYY-MM-DD, YYYY/MM/DD, DD-MM-YYYY,
+            DD/MM/YYYY, MM-DD-YYYY, MM/DD/YYYY) or a full ISO 8601
+            timestamp, the same on every row. Text that could be read
+            either day-first or month-first raises InvalidConfigError
+            rather than being guessed; pass date_format to settle it, or
+            for any format outside that list.
+
+    Dates are parsed BEFORE the data is sorted or split, so text dates sort
+    by time rather than alphabetically. The date column must then meet the
+    acceptance contract checked in _validate_date_spacing(): each date once,
+    every step a whole number of periods, more than half of the steps
+    exactly one period, and no run of missing dates longer than
+    MAX_CONTINUOUS_GAP_DAYS. Anything else raises; shorter gaps only warn.
 
     evaluate()/forecast() ALWAYS return a dict keyed by model name, even
     when only one model is requested -- deliberate, so the return shape
@@ -365,6 +384,7 @@ class HorizonForecaster:
         event_columns: Optional[List[str]] = None,
         future_exog_aggregator: str = "mean",
         recent_average_window: int = 28,
+        date_format: Optional[str] = None,
     ):
         self.frequency = validate_frequency(frequency)
         self.date_column = date_column
@@ -404,6 +424,19 @@ class HorizonForecaster:
 
         self.models = self._validate_models(models)
 
+        # Parse dates first, on a copy, so the caller's DataFrame is never
+        # modified. Everything below -- sorting, the window split, frequency
+        # inference, every model -- must see real dates: sorting text dates
+        # orders them alphabetically, which silently scrambles the windows.
+        # A missing date column is left for validate_no_missing_values() to
+        # report with the other missing columns.
+        self.date_format = date_format
+        if date_column in raw_df.columns:
+            raw_df = raw_df.copy()
+            raw_df[date_column] = parse_date_column(
+                raw_df[date_column], date_column, date_format=date_format
+            )
+
         requested_independent_columns = independent_columns or []
         cleaned_df, dropped_columns = clean_zero_variance(
             raw_df, exclude_columns=[date_column, target_column]
@@ -420,6 +453,7 @@ class HorizonForecaster:
         # silently dropped or imputed. Done here, at construction, alongside
         # the other dataset-level validation.
         validate_no_missing_values(cleaned_df, date_column, target_column, self.independent_columns)
+        self._reject_duplicate_dates(cleaned_df)
 
         # event_columns (explicit 0/1 flags for the future-exog strategy). None
         # means "auto-detect flags"; a list means "these exact columns are the
@@ -442,8 +476,8 @@ class HorizonForecaster:
                 )
             self.event_columns = [c for c in event_columns if c in self.independent_columns]
 
-        self.raw_df = cleaned_df.sort_values(date_column).reset_index(drop=True)
-        self._warn_if_declared_frequency_mismatches_data()
+        self.raw_df = cleaned_df.sort_values(date_column, kind="stable").reset_index(drop=True)
+        self._validate_date_spacing()
 
         # Computed once here, not per-model: which rows go to train /
         # validation / test depends only on the requested sizes and the row
@@ -648,28 +682,125 @@ class HorizonForecaster:
             stacklevel=3,
         )
 
-    def _warn_if_declared_frequency_mismatches_data(self) -> None:
-        try:
-            inferred = infer_frequency(self.raw_df[self.date_column])
-        except (UnsupportedFrequencyError, InvalidConfigError):
-            warnings.warn(
-                f"Could not confirm that '{self.date_column}' has a clean, "
-                f"regular daily or weekly spacing. Proceeding with the "
-                f"declared frequency ('{self.frequency}') as-is, but verify "
-                f"this matches your data's actual granularity.",
-                stacklevel=2,
-            )
-            return
+    def _reject_duplicate_dates(self, df: pd.DataFrame) -> None:
+        """
+        Raise if any date appears more than once.
 
-        if inferred != self.frequency:
+        Every model treats a row as one period. A repeated date is two
+        periods claiming the same day: Prophet and NeuralProphet refuse it
+        outright (so they silently drop out of the run), SARIMAX and CatBoost
+        count it as an extra period, and inside the test window it misaligns
+        the models' predictions so evaluate() fails late with an unrelated
+        error. There is no safe default -- summing, averaging or keeping one
+        row are all plausible -- so the caller has to choose.
+        """
+        duplicates = find_duplicate_dates(df[self.date_column])
+        if not duplicates:
+            return
+        shown = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in duplicates[:5]]
+        more = f" and {len(duplicates) - 5} more" if len(duplicates) > 5 else ""
+        raise InvalidConfigError(
+            f"The date column '{self.date_column}' has {len(duplicates)} date(s) that appear "
+            f"more than once: {shown}{more}. Each period must appear exactly once -- "
+            f"aggregate the rows for each date (sum or mean) or remove the duplicates "
+            f"before fitting.",
+            param_name="date_column",
+            provided_value=shown,
+        )
+
+    def _validate_date_spacing(self) -> None:
+        """
+        Enforce the date acceptance contract on the sorted, de-duplicated
+        dates. Checked in this order, because each answers a narrower
+        question than the one before:
+
+          1. More than half of the steps are exactly one period. If not, the
+             data is not at the declared frequency at all: either it is
+             clearly the OTHER supported frequency (a mis-declared
+             `frequency`), or a cadence Horizon does not support (every 2
+             days, fortnightly, monthly). Previously both only warned, and
+             the run went on to produce forecast dates, window sizes and
+             model settings for the wrong frequency -- monthly data declared
+             daily finished with a confident 0.67% MAPE and a daily-dated
+             forecast.
+          2. Every step is a whole number of periods -- weekly dates all on
+             the same weekday. Otherwise the weekly cycle and the forecast
+             dates are misaligned.
+          3. No run of missing dates longer than MAX_CONTINUOUS_GAP_DAYS.
+
+        What passes may still have scattered gaps. Those only warn: they are
+        common in real data, and the models still run, but the warning says
+        what they affect. Horizon never fills gaps itself.
+        """
+        dates = self.raw_df[self.date_column]
+        if len(dates) < 2:
+            return  # resolve_split() reports a series this short
+
+        spacing = describe_date_spacing(dates, self.frequency)
+        unit = "day" if self.frequency == "daily" else "week"
+
+        if spacing.one_period_share <= 0.5:
+            typical_days = spacing.typical_step / pd.Timedelta(days=1)
+            looks_like = {1: "daily", 7: "weekly"}.get(typical_days)
+            if looks_like is not None and looks_like != self.frequency:
+                raise InvalidConfigError(
+                    f"The dates in '{self.date_column}' are mostly {typical_days:g} day(s) "
+                    f"apart, which is {looks_like} data, but frequency='{self.frequency}' was "
+                    f"given. Use frequency='{looks_like}'.",
+                    param_name="frequency",
+                    provided_value=self.frequency,
+                )
+            raise UnsupportedFrequencyError(
+                f"The dates in '{self.date_column}' are mostly {typical_days:g} day(s) apart, "
+                f"and only {spacing.one_period_share:.0%} of them are one {unit} apart, so "
+                f"this is not {self.frequency} data. Horizon supports daily or weekly data "
+                f"only: resample yours to one of those first.",
+                provided_frequency=f"{typical_days:g} days",
+            )
+
+        if spacing.irregular_steps:
+            start, end = spacing.irregular_example
+            hint = (
+                " Weekly dates must all fall on the same weekday."
+                if self.frequency == "weekly"
+                else " Daily dates must be whole days apart (check for times of day)."
+            )
+            raise InvalidConfigError(
+                f"{spacing.irregular_steps} step(s) in '{self.date_column}' are not a whole "
+                f"number of {unit}s, e.g. {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} "
+                f"({(end - start) / pd.Timedelta(days=1):g} days).{hint}",
+                param_name="date_column",
+                provided_value=[str(start), str(end)],
+            )
+
+        period_days = 1 if self.frequency == "daily" else 7
+        longest_days = spacing.longest_gap_periods * period_days
+        if longest_days > MAX_CONTINUOUS_GAP_DAYS:
+            start, end = spacing.longest_gap
+            raise InvalidConfigError(
+                f"No data in '{self.date_column}' between {start:%Y-%m-%d} and "
+                f"{end:%Y-%m-%d}: {spacing.longest_gap_periods} {unit}(s) missing in a row. "
+                f"The limit is 4 weeks ({MAX_CONTINUOUS_GAP_DAYS} days) -- a longer hole "
+                f"removes a whole stretch of trend and seasonality, and SARIMAX treats the "
+                f"dates either side of it as neighbours. If the business was closed then, "
+                f"add those dates with a value of 0; otherwise fill the gap, or start the "
+                f"data after it.",
+                param_name="date_column",
+                provided_value=[str(start), str(end)],
+            )
+
+        if spacing.missing_periods:
+            start, end = spacing.longest_gap
             warnings.warn(
-                f"Declared frequency is '{self.frequency}', but the data's "
-                f"most common date spacing looks like '{inferred}' data. "
-                f"This can cause the model's seasonality assumptions and "
-                f"future forecast date spacing to be inconsistent with the "
-                f"data it was actually trained on. If this is intentional, "
-                f"this warning can be ignored.",
-                stacklevel=2,
+                f"The date column '{self.date_column}' has gaps: {spacing.coverage:.0%} of "
+                f"{unit}s are present, with {spacing.missing_periods} {unit}(s) missing across "
+                f"{spacing.gap_count} gap(s) (longest: {spacing.longest_gap_periods} {unit}(s) "
+                f"between {start:%Y-%m-%d} and {end:%Y-%m-%d}). The run continues, but expect "
+                f"lower accuracy: the train/validation/test windows are counted in rows, so "
+                f"they cover more time than their size suggests, and SARIMAX treats "
+                f"consecutive rows as consecutive periods, so it is affected most. Horizon "
+                f"does not fill gaps -- add the missing periods to your data if you can.",
+                stacklevel=3,
             )
 
     def _adapt_window(self, model_name: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame):
