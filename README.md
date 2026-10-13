@@ -18,6 +18,16 @@ combines the survivors — while telling you the per-model MAPE, which models
 were excluded and why, and whether the combined forecast actually beats the
 best individual model (it is not guaranteed to).
 
+**Research paper:** *Robust Ensemble Forecasting in Practice: Model Selection
+and Combination Across Heterogeneous Time Series* (Singh, Bhardwaj, Nair;
+Lifesight), on [lifesight.io](https://lifesight.io/resources/ensemble-forecasting/).
+It tests the approach this library is built on across 99 daily commercial series
+from 65 organisations, and finds that a per-period trimmed mean matched the best
+single model without having to identify it. A copy is in [`examples/paper/`](examples/paper/Robust-Ensemble-Forecasting.pdf).
+
+**Examples:** two runnable notebooks, daily and weekly, with their results saved
+so they read on GitHub — see [`examples/`](examples/).
+
 ---
 
 ## Supported models
@@ -251,8 +261,6 @@ Known gaps, deliberately **not** in 1.0 and all candidates for future work:
   nothing currently accounts for that.
 - **An error-diversity diagnostic.** The value of combining depends on members
   making *different* errors, which the library does not yet measure or report.
-- **Runnable example notebooks.** A clean `pip install` plus an Open-in-Colab
-  badge is the form these should take, so they follow the PyPI release.
 
 The reasoning behind the design — the contracts, the per-model decisions, and
 the failure modes that produced them — is in
@@ -263,6 +271,9 @@ the failure modes that produced them — is in
 
 ## Documentation
 
+- [`examples/`](examples/) — runnable daily and weekly notebooks, with Open-in-Colab badges
+- *Robust Ensemble Forecasting in Practice* — the research paper, on [lifesight.io](https://lifesight.io/resources/ensemble-forecasting/)
+  and as a [PDF in this repo](examples/paper/Robust-Ensemble-Forecasting.pdf)
 - [`docs/installation.md`](docs/installation.md) — install & dependencies
 - [`docs/quickstart.md`](docs/quickstart.md) — end-to-end usage
 - [`docs/supported_models.md`](docs/supported_models.md) — per-model behaviour
