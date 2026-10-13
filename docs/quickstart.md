@@ -192,6 +192,33 @@ future_spend = pd.DataFrame({"spend": [...]})   # len == horizon
 forecasts = forecaster.forecast(horizon=30, future_independent_data=future_spend)
 ```
 
+The table is matched to forecast periods **by position**: row 1 is the first
+period after your last date, and so on. It is checked before any model runs,
+and anything below raises `InvalidConfigError` with the reason:
+
+| Check | Accepted | Raises |
+|---|---|---|
+| Type | a pandas DataFrame | a dict, a Series, anything else |
+| Drivers declared | `independent_columns` was set on the constructor | a table when no drivers were declared |
+| Columns | declared drivers, all or some (the rest are generated); the date and target columns are allowed and ignored | a column that is not a declared driver (a misspelling gets a "did you mean" hint), the same column name twice |
+| Rows | exactly `horizon` rows | any other number, including an empty table |
+| Dates (optional) | none (rows taken in order), or a date column / `DatetimeIndex` equal to the forecast dates, in order | blank dates, dates out of order, dates that are not the forecast dates |
+| Values | numbers; booleans read as 0/1 | blanks, text, infinity |
+| Sign | negative values for a driver that goes negative in your data | negative values for a driver that never does |
+| Event flags | values the flag takes in your data (0 or 1) | any other value, e.g. 2 |
+
+Two cases warn instead: a value outside a driver's historical range (the
+models disagree about values they have never seen: Prophet and NeuralProphet
+extend the effect in a straight line, SARIMAX and Bayesian PyMC cap it at the
+historical range, CatBoost treats it like the most extreme value it has
+seen), and a column for a declared driver that was dropped for never
+changing in your data (its future values are ignored).
+
+Each `forecast()` call checks its table against its own horizon, so a table
+built for `horizon=12` is rejected by `forecast(horizon=26)`. A call that
+raises leaves `forecast_ensemble`, `forecast_errors` and `future_exog_used`
+empty rather than holding the previous call's results.
+
 ## 4b. Future values for your drivers
 
 When you do *not* supply future values for a declared independent column,

@@ -43,6 +43,7 @@ from horizon_forecaster.evaluation.ensemble import (
 )
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
 from horizon_forecaster.future_exog import (
+    check_future_table,
     AGGREGATORS,
     FUTURE_EXOG_STRATEGIES,
     resolve_future_exog,
@@ -438,6 +439,9 @@ class HorizonForecaster:
             )
 
         requested_independent_columns = independent_columns or []
+        # Kept for forecast(): a future table may name a declared driver that
+        # was dropped below, which warns rather than errors.
+        self._declared_independent_columns = list(requested_independent_columns)
         cleaned_df, dropped_columns = clean_zero_variance(
             raw_df, exclude_columns=[date_column, target_column]
         )
@@ -1378,14 +1382,27 @@ class HorizonForecaster:
         Args:
             horizon: number of future periods to forecast.
             future_independent_data: optional DataFrame of real future
-                values for this instance's independent_columns, aligned
-                to the horizon. If None and independent_columns were
-                declared, a default strategy is applied.
+                values for this instance's independent_columns: one row
+                per forecast period, in order. It may hold just some of
+                the drivers (the rest are generated via
+                future_exog_strategy) and, optionally, the date column or
+                a DatetimeIndex, which must then match the forecast dates
+                exactly. If None and independent_columns were declared,
+                every driver is generated. See
+                future_exog.check_future_table for the full contract.
 
         Raises:
-            InvalidConfigError: if horizon is not positive.
+            InvalidConfigError: if horizon is not positive, or the future
+                table breaks the contract in check_future_table.
             AllModelsRejectedError: if every requested model failed.
         """
+        # Clear the previous call's results first: if this call stops on a
+        # bad horizon or future table, these must not still describe the
+        # previous forecast as if it were this one.
+        self.forecast_ensemble = None
+        self.forecast_errors = {}
+        self.future_exog_used = None
+
         if horizon <= 0:
             raise InvalidConfigError(
                 f"horizon must be a positive integer, got {horizon}.",
@@ -1408,6 +1425,20 @@ class HorizonForecaster:
         # column the caller supplied is used as-is; the rest are generated via
         # future_exog_strategy. Exposed as self.future_exog_used.
         future_dates = self._future_dates(horizon)
+        if future_independent_data is not None:
+            future_independent_data = check_future_table(
+                future_independent_data,
+                history_df=self.raw_df,
+                date_column=self.date_column,
+                target_column=self.target_column,
+                independent_columns=self.independent_columns,
+                declared_columns=self._declared_independent_columns,
+                event_columns=self.event_columns,
+                future_dates=future_dates,
+                frequency=self.frequency,
+                date_format=self.date_format,
+                models=self.models,
+            )
         resolved_exog, self.future_exog_used, used_default, generated = self._resolve_future_exog(
             horizon, future_dates, future_independent_data
         )

@@ -67,6 +67,11 @@ forecasts = forecaster.forecast(horizon=30, future_independent_data=planned)
 
 The auto-generation warning names only the columns that were generated.
 
+The supplied table must have exactly one row per forecast period, only
+declared drivers (plus, optionally, the date and target columns), and clean
+numeric values; see the table in [`quickstart.md`](quickstart.md) for the full
+list of checks.
+
 ## Inspecting the assumptions
 
 After a forecast, the resolved future drivers (supplied **and** generated,
