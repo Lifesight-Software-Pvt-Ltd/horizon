@@ -67,6 +67,36 @@ isolation is the general guarantee, not a patch for that one case.
 
 ## 2. Evaluation protocol
 
+### The date column is checked, not trusted
+
+Every later step — sorting, the window split, the forecast dates, each
+model's seasonal settings — assumes the date column is real, regular dates
+at the declared frequency. When that was assumed rather than checked, bad
+dates produced confident wrong answers instead of errors: text dates such as
+`01/15/2023` were sorted alphabetically, so the windows mixed years and the
+forecast started from the wrong date; monthly data declared daily finished
+with a 0.67% MAPE and a daily-dated forecast; duplicate dates crashed
+`evaluate()` late with an unrelated error. So the constructor now parses the
+dates first, on a copy, and enforces an explicit contract (the table in
+[`quickstart.md`](quickstart.md)): one of six text formats or a datetime,
+each date once, weekly dates on one weekday, more than half the steps
+exactly one period, and no more than 28 days missing in a row.
+
+Three choices in it are worth recording:
+
+- **Ambiguous dates raise rather than being guessed.** A column whose every
+  value reads equally well day-first or month-first (`03/04/2024`) has no
+  safe default, and real exports had been read month-first silently.
+  `date_format` settles it.
+- **The gap limit is absolute, not a share of the history.** A hole of
+  three months removes the same stretch of trend and seasonality from four
+  years of data as from two, and SARIMAX treats the dates either side of it
+  as neighbours. Four weeks is the line; anything longer raises.
+- **Shorter, scattered gaps only warn.** They are common (weekday-only
+  sales, an occasional missing day), the models still run, and Robyn —
+  the MMM reference this library sits next to — does not reject them
+  either. The warning says what they cost; Horizon never fills them.
+
 ### Three windows, not two
 
 Data splits chronologically into **train / validation / test**.
@@ -107,6 +137,28 @@ one silently win.
 On a series too short for the defaults they scale down proportionally, capped
 at 40% of rows between them, preserving the 2:1 ratio and warning with the
 resulting sizes. Explicitly requested sizes are never silently shrunk.
+
+### A driver that never changes inside a fit window
+
+A driver that varies over the full history survives the zero-variance check,
+yet it can be one value throughout the window a model is fitted on — a price
+change or a new promotion that first appears in the validation or test
+window. No model can learn an effect from such a column, and they failed
+in different ways when given one: NeuralProphet discarded it at fit and then
+rejected it at prediction, so it dropped out of the run (reported on client
+data with a `Price_Hike` flag); Prophet, when the constant was not 0, fitted
+an arbitrary effect to it (+31,403 on a series around 3,500 whose true effect
+was −400); CatBoost, SARIMAX and Bayesian PyMC gave it no effect. The
+orchestrator now finds such drivers once per fit window and leaves them out
+of that fit for every model, so all of them give the same, honest answer —
+no effect yet — and stay comparable. A warning names the driver and the
+score that includes the effect no model could see.
+
+It leaves the split alone rather than moving it to include the change: a
+split that depended on the drivers would mean something different from run
+to run. A rolling backtest will meet this in every fold whose training ends
+before the change, which is why the check is one function that runs per fit
+window.
 
 ### Selection by MAPE, and its limits
 
@@ -233,9 +285,30 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   drivers use the chosen strategy; binary 0/1 event flags default to 0 ("no
   event unless supplied") — except under `seasonal_naive`, where they follow
   the cycle so recurring events still repeat. Flags come from an explicit
-  `event_columns` list, else are auto-detected (≤2 distinct, non-negative
-  values). `cycle` is exempt from all of this and tiles every column as-is,
+  `event_columns` list, else are auto-detected as columns whose values are
+  only 0 and 1. The first rule here was "≤2 distinct, non-negative values",
+  which caught quantities too: TV spend of 0 or 5,000, a 0%/20% discount and
+  a 9.99/12.99 price were all forecast at 0 — the last one a free product.
+  A two-value column is not necessarily an on/off switch; only 0/1 is.
+  `cycle` is exempt from all of this and tiles every column as-is,
   reproducing the old output exactly.
+- **On/off text is read from a fixed word list.** `true/false`, `yes/no`,
+  `y/n`, `t/f` and `on/off` become 1/0, in the data and in the future table.
+  Any other pair of words ("Promo"/"None") is an error, not a guess: guessing
+  which word means "on" wrong would flip the sign of every effect the models
+  learn, with nothing to show it.
+- **Two warnings point at generated values that are probably wrong.**
+  `carry_forward` repeats the last value, so a last period that was a
+  promotion sets the level for the whole forecast; on real data (Goodr) that
+  produced a forecast at 1.6–2.5× the same period last year. A warning fires
+  when a generated driver's last value is ≥1.5× or ≤0.5× its median over the
+  previous 13 weeks / 28 days, or an event flag is 1 there. It warns rather
+  than substituting a "non-promo" value, because a substitute would be one
+  more hidden assumption. Separately, a generated flag is 0 throughout (or
+  repeated by week number under `seasonal_naive`, which puts a moving
+  holiday in the wrong week), so an event that happened within a week of
+  the same date last year triggers a warning naming those dates — the
+  Homemakers forecast missed Black Friday this way.
 - **`seasonal_naive` carries drift.** Pure seasonal naive repeats last year's
   level, which is wrong for a growing driver over a long horizon. The
   implementation fits a trend, adds the phase-wise seasonal residual, and
@@ -244,6 +317,19 @@ behind a single `resolve_future_exog()` entry point. Strategies:
 - **Partial fill.** A supplied column is used as-is and only the missing
   columns are generated — matching the common case where next quarter's
   planned spend is known but the promotional calendar is not.
+- **A supplied table is checked, not trusted.** Every model reads it by
+  position, and each used to react to a bad one differently while the run
+  still finished: too few rows made Prophet and SARIMAX fail and CatBoost
+  forecast alone; a misspelled column was ignored and the real driver
+  silently generated; a blank dropped two models; a date column was never
+  read, so a table starting a week late was applied to the wrong periods.
+  `check_future_table()` now rejects anything that does not match the
+  forecast exactly — row count, columns, optional dates, values — before any
+  model runs. Values outside a driver's historical range only warn, because
+  scenario work needs them; the warning says what each model does with them
+  (Prophet and NeuralProphet extend the effect linearly, SARIMAX and PyMC
+  cap it, CatBoost treats it as the most extreme value seen), since that is
+  where the models disagree most.
 - **Transparency.** The resolved values (supplied + generated, with `ds`) are
   exposed as `forecaster.future_exog_used` and on each `ForecastResult`, so
   the assumptions behind a scenario can be inspected rather than trusted
@@ -476,7 +562,9 @@ in the wrapper, mirroring that split.
   adapter and wrapper are constructed independently, so nothing can tell the
   wrapper which column is spend. A continuous driver (>2 distinct values)
   gets an informative prior centred on its OLS slope against the standardised
-  target; a binary flag (≤2 distinct) gets a zero-centred prior. Prior
+  target; a binary flag (≤2 distinct values — this prior rule is the
+  wrapper's own, separate from the future-driver flag detection in §4) gets a
+  zero-centred prior. Prior
   estimation drops non-finite pairs.
 - **Bounds sample the likelihood, not just `mu`.** Banding the latent mean
   captures parameter uncertainty but omits observation noise, and

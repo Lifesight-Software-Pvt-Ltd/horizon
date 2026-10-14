@@ -1753,3 +1753,44 @@ def test_neuralprophet_runs_when_a_driver_first_changes_in_validation():
         results = forecaster.evaluate()
     assert forecaster.evaluate_errors == {}
     assert not math.isnan(results["neuralprophet"].validation_mape.value)
+
+
+# ---------- event flags and on/off text (item: flags and promo weeks) ----------
+
+
+def _flag_df(values):
+    df = make_raw_df(n=60, with_spend=True)
+    df["promo"] = values
+    return df
+
+
+def test_constructor_reads_yes_no_text_as_a_flag_without_changing_the_callers_data():
+    df = _flag_df(["Yes" if i % 5 == 0 else "No" for i in range(60)])
+    forecaster = HorizonForecaster(
+        df, "date", "orders", "daily", independent_columns=["spend", "promo"], models=["catboost"]
+    )
+    assert set(forecaster.raw_df["promo"]) == {0, 1}
+    assert df["promo"].iloc[0] == "Yes"
+
+
+def test_constructor_rejects_an_unclear_flag_pair_with_a_specific_message():
+    df = _flag_df(["Promo" if i % 5 == 0 else "Off-season" for i in range(60)])
+    with pytest.raises(InvalidConfigError, match="can't tell which one means"):
+        HorizonForecaster(
+            df,
+            "date",
+            "orders",
+            "daily",
+            independent_columns=["spend", "promo"],
+            models=["catboost"],
+        )
+
+
+def test_forecast_warns_when_carry_forward_holds_a_last_day_spike():
+    df = make_raw_df(n=60, with_spend=True)
+    df.loc[59, "spend"] = 500  # usual level ~80-108
+    forecaster = HorizonForecaster(
+        df, "date", "orders", "daily", independent_columns=["spend"], models=["catboost"]
+    )
+    with pytest.warns(UserWarning, match="last day of history .* looks unusual"):
+        forecaster.forecast(horizon=5)

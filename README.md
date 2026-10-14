@@ -92,8 +92,17 @@ behaviour.
   handling of event flags and partial fill for the columns you *do* know.
 - **Ready-to-use outputs.** Overlay and per-model charts, a MAPE comparison bar
   chart, and a one-call export of the run's CSVs plus PNGs.
-- **Built-in safety warnings** for over-long horizons, auto-generated future
-  driver values, and forecasts that land implausibly far outside history.
+- **Input checks that fail loudly.** Dates are parsed before anything is
+  sorted and must meet an explicit contract (format, duplicates, spacing,
+  gaps); a supplied future driver table must match the forecast exactly;
+  on/off text such as `yes/no` is read as 1/0, and other text is rejected
+  with the reason. See [`docs/quickstart.md`](docs/quickstart.md).
+- **Built-in safety warnings** for scattered missing dates, over-long
+  horizons, auto-generated future driver values, a last period that
+  `carry_forward` would hold (a promotion week), events from last year
+  missing from a generated future, future driver values outside their
+  historical range, drivers that never change inside a fit window, and
+  forecasts that land implausibly far outside history.
 
 ---
 

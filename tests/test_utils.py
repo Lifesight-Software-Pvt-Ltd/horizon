@@ -9,6 +9,7 @@ from horizon_forecaster.utils import (
     describe_date_spacing,
     find_duplicate_dates,
     parse_date_column,
+    parse_driver_column,
     resolve_split,
     clean_zero_variance,
     infer_frequency,
@@ -404,3 +405,43 @@ def test_describe_date_spacing_flags_weekly_dates_on_different_weekdays():
     spacing = describe_date_spacing(dates, "weekly")
     assert spacing.irregular_steps == 1
     assert spacing.missing_periods == 0
+
+
+# ---------- parse_driver_column ----------
+
+
+def test_parse_driver_reads_yes_no_words_in_any_case_and_mix():
+    out = parse_driver_column(pd.Series(["Yes", "no", " Y ", "N", "TRUE", "f", "On", "off"]), "p")
+    assert list(out) == [1, 0, 1, 0, 1, 0, 1, 0]
+
+
+def test_parse_driver_passes_numbers_and_turns_booleans_and_numeric_text_into_numbers():
+    assert list(parse_driver_column(pd.Series([True, False]), "p")) == [1, 0]
+    assert list(parse_driver_column(pd.Series(["3.5", "2"]), "p")) == [3.5, 2.0]
+    assert list(parse_driver_column(pd.Series([1.5, 2.5]), "p")) == [1.5, 2.5]
+
+
+def test_parse_driver_keeps_blanks_missing():
+    out = parse_driver_column(pd.Series(["Yes", None, ""]), "p")
+    assert out.iloc[0] == 1 and out.iloc[1:].isna().all()
+
+
+def test_parse_driver_rejects_an_unclear_pair():
+    with pytest.raises(InvalidConfigError, match=r"two values \['None', 'Promo'\] are unclear"):
+        parse_driver_column(pd.Series(["Promo", "None", "Promo"]), "promo")
+
+
+def test_parse_driver_rejects_categories():
+    with pytest.raises(InvalidConfigError, match="one 0/1 column per category"):
+        parse_driver_column(pd.Series(["Low", "Mid", "High"]), "tier")
+
+
+def test_parse_driver_rejects_a_single_text_value_with_blanks():
+    with pytest.raises(InvalidConfigError, match="single text value"):
+        parse_driver_column(pd.Series(["Promo", None, None]), "promo")
+
+
+def test_parse_driver_rejects_text_among_numbers_with_its_date():
+    dates = pd.Series(pd.date_range("2024-03-01", periods=3))
+    with pytest.raises(InvalidConfigError, match=r"\['1,200'\] on 2024-03-02"):
+        parse_driver_column(pd.Series(["100", "1,200", "300"]), "spend", dates=dates)

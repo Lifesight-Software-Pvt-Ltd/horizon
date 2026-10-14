@@ -94,16 +94,16 @@ too.
 
 **Only linting runs automatically on your PR.** `.github/workflows/lint.yml`
 runs `black --check`, `flake8` and `bandit` on every pull request and must
-pass before a merge. The test suite does not run in CI: it fits real models and takes
-25–60 minutes per Python version, so run it locally before you open a PR and
-say in the PR which Python version you ran it on. A maintainer runs it on the
-other supported versions as part of review.
+pass before a merge. The test suite does not run in CI: it fits real models
+rather than mocking them and takes roughly 15–30 minutes per Python version
+on a laptop, so run it locally before you open a PR and say in the PR which
+Python version you ran it on. A maintainer runs it on the other supported
+versions as part of review.
 
-Expect the full suite to take roughly 25–30 minutes: it fits real models rather
-than mocking them. A few tests run the default grid search (6 candidates for
-Prophet, 18 for CatBoost), which dominates that time. When writing a test that
-does not need to exercise the search itself, pass an explicit `model_params`
-override — `model_params={"prophet": {"seasonality_mode": "additive"}}` — to
+A few tests run the default grid search (6 candidates for Prophet, 18 for
+CatBoost), which dominates that time. When writing a test that does not need
+to exercise the search itself, pass an explicit `model_params` override —
+`model_params={"prophet": {"seasonality_mode": "additive"}}` — to
 skip it. Almost any test in `test_forecaster.py` shows the pattern.
 
 Two things about the cost model are worth knowing. `evaluate()` fits each model

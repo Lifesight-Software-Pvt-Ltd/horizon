@@ -14,7 +14,8 @@ spacing.
 
 **The data must be complete.** A single missing or non-numeric cell in any
 column used for training/testing — the date, the target, or an independent
-column — raises `InvalidConfigError` at construction. Missing values are never
+column — raises `InvalidConfigError` at construction. (Driver columns may
+also use on/off words such as `yes/no`; see 4b.) Missing values are never
 silently dropped or imputed: clean or impute your data first. (Columns in the
 DataFrame that you do not use are ignored, and a fully-constant column is
 dropped automatically with a report in `dropped_zero_variance_columns`.)
@@ -213,7 +214,7 @@ and anything below raises `InvalidConfigError` with the reason:
 | Columns | declared drivers, all or some (the rest are generated); the date and target columns are allowed and ignored | a column that is not a declared driver (a misspelling gets a "did you mean" hint), the same column name twice |
 | Rows | exactly `horizon` rows | any other number, including an empty table |
 | Dates (optional) | none (rows taken in order), or a date column / `DatetimeIndex` equal to the forecast dates, in order | blank dates, dates out of order, dates that are not the forecast dates |
-| Values | numbers; booleans read as 0/1 | blanks, text, infinity |
+| Values | numbers; booleans and on/off words (`yes/no`, `y/n`, `t/f`, `true/false`, `on/off`) read as 1/0 | blanks, other text, infinity |
 | Sign | negative values for a driver that goes negative in your data | negative values for a driver that never does |
 | Event flags | values the flag takes in your data (0 or 1) | any other value, e.g. 2 |
 
@@ -249,16 +250,26 @@ forecaster = HorizonForecaster(
 )
 ```
 
-Two things worth knowing:
+Worth knowing:
 
 - **Type-aware flags.** Binary 0/1 event columns (promos, holidays) default
   to `0` ("no event unless you supply one") instead of being carried forward
   or averaged into a fractional flag — except under `seasonal_naive`, where
   they follow the cycle. Name them with `event_columns`, or they're
-  auto-detected (≤2 distinct non-negative values). Naming them explicitly
-  disables auto-detection, which is worth doing if one of your continuous
-  drivers happens to take only two distinct values over the history — it
-  would otherwise be treated as a flag and defaulted to 0.
+  auto-detected: a column whose values are only 0 and 1. Any other column,
+  even one with two values (TV spend of 0 or 5,000, prices of 9.99 and
+  12.99), is a quantity and follows the strategy.
+- **On/off text.** A driver may use `true/false`, `yes/no`, `y/n`, `t/f` or
+  `on/off` (any case, mixed freely) instead of 1/0 — in your data and in the
+  future table. Other text raises an error that says what is unclear: two
+  other words such as "Promo"/"None" (which one means "on"?), categories such
+  as "Low"/"Mid"/"High", or text among numbers such as "1,200".
+- **Supply your known events.** A generated flag is 0 for the whole forecast,
+  so Black Friday, a launch or a sale you already have planned is left out
+  unless you pass it in `future_independent_data`. Horizon warns when a flag
+  was 1 at the same time last year, and when `carry_forward` would hold a
+  last period that looks like a promotion (a driver at 1.5× or more, or 0.5×
+  or less, of its recent median, or an event flag of 1).
 - **Partial fill.** You can supply future values for *some* columns and let
   the rest be generated — pass a DataFrame with only the columns you know.
 

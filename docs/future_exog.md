@@ -44,13 +44,35 @@ averaging it would produce a nonsensical fractional flag. So:
 - **Continuous drivers** (spend, impressions) use the chosen strategy.
 - **Binary 0/1 event flags** (promos, holidays) default to **0** — "no event
   unless you supply one" — *except* under `seasonal_naive`, where they follow
-  the cycle so genuinely recurring events still repeat.
+  the cycle so recurring events still repeat, by week of the year (weekly) or
+  day of the week (daily). A holiday whose date moves, such as Black Friday,
+  can land a week off; see the warnings below.
 
 Flags are taken from the explicit `event_columns` list if you give one;
-otherwise they're auto-detected (a column with ≤2 distinct, non-negative
-values). Declaring them explicitly is safer than relying on auto-detection,
-which can misfire on short history or unusual encodings. The `cycle` legacy
-strategy is exempt from all of this and tiles every column as-is.
+otherwise they're auto-detected: a column whose values are only 0 and 1
+(`True`/`False`, and the words `yes/no`, `y/n`, `t/f`, `on/off`, are read as
+1/0 first). A column with two other values — TV spend of 0 or 5,000, prices
+of 9.99 and 12.99, a 0% or 20% discount — is a quantity, not a flag, and
+follows the chosen strategy; before this rule such columns were set to 0 for
+the whole forecast. The `cycle` legacy strategy is exempt from all of this
+and tiles every column as-is.
+
+## Warnings about generated values
+
+Two warnings point at generated values that are likely wrong:
+
+- **A last period that looks like a promotion, held by `carry_forward`.**
+  When a generated driver's last value is at least 1.5× (or at most 0.5×)
+  its median over the previous 13 weeks / 28 days, or an event flag is 1 in
+  the last period, carry-forward would hold that level for the whole
+  forecast. The warning names the driver, its value and its usual level.
+  Supply planned values, or use `recent_average`.
+- **An event from last year left out.** When a flag is generated and it was
+  1 within a week of the same date last year (364 days, so the weekday
+  matches), the warning names those dates. Generated flags are 0 throughout
+  — and under `seasonal_naive` they repeat by week number or weekday, which
+  puts a holiday that moves (Black Friday) in the wrong period. Supply the
+  dates of known events in `future_independent_data`.
 
 ## Partial fill
 
@@ -69,8 +91,8 @@ The auto-generation warning names only the columns that were generated.
 
 The supplied table must have exactly one row per forecast period, only
 declared drivers (plus, optionally, the date and target columns), and clean
-numeric values; see the table in [`quickstart.md`](quickstart.md) for the full
-list of checks.
+numeric values (on/off words such as `yes/no` count as 1/0); see the table in
+[`quickstart.md`](quickstart.md) for the full list of checks.
 
 ## Inspecting the assumptions
 

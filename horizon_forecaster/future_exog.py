@@ -29,7 +29,7 @@ Type-aware: continuous drivers use the chosen strategy; binary 0/1 event
 flags (promos, holidays) default to 0 -- "no event unless you supply one" --
 EXCEPT under seasonal_naive, where they follow the cycle so recurring events
 still repeat. Flags come from an explicit `event_columns` list if given,
-else are auto-detected (<=2 distinct, non-negative values). The `cycle`
+else are auto-detected (columns whose values are only 0 and 1). The `cycle`
 legacy strategy is exempt from type-awareness and tiles every column as-is,
 to reproduce the old behaviour exactly.
 
@@ -52,6 +52,7 @@ from horizon_forecaster.utils import (
     _DAY_FIRST_FORMATS,
     _MONTH_FIRST_FORMATS,
     parse_date_column,
+    parse_driver_column,
 )
 
 _SEASONAL_PERIOD = {"daily": 7, "weekly": 52}
@@ -170,8 +171,14 @@ FUTURE_EXOG_STRATEGIES: Dict[str, Callable] = {
 
 
 def _looks_binary(hist: np.ndarray) -> bool:
+    """
+    A 0/1 column -- the only shape auto-detected as an event flag. Any other
+    two-value column is a quantity, not an on/off switch: TV spend of 0 or
+    5,000, a price of 9.99 or 12.99, a 0% or 20% discount. Treating those as
+    flags set their future to 0 -- a free product, no spend at all.
+    """
     finite = hist[np.isfinite(hist)]
-    return finite.size > 0 and np.unique(finite).size <= 2 and finite.min() >= 0
+    return finite.size > 0 and set(np.unique(finite)) <= {0.0, 1.0}
 
 
 def _is_flag(col: str, hist: np.ndarray, event_columns: Optional[List[str]]) -> bool:
@@ -281,6 +288,132 @@ def resolve_future_exog(
 
     future_df = pd.DataFrame({c: out[c] for c in independent_columns})
     return future_df, generated
+
+
+# --------------------------------------------------------------------------
+# warning about generated values that are likely wrong
+# --------------------------------------------------------------------------
+
+# carry_forward holds the last value; this many preceding periods give the
+# "usual" level it is compared with.
+_SPIKE_LOOKBACK = {"daily": 28, "weekly": 13}
+_SPIKE_HIGH = 1.5  # last value at least this many times the usual level ...
+_SPIKE_LOW = 0.5  # ... or at most this fraction of it
+# An event last year matches a forecast date within this many days of the
+# same weekday one year (364 days) on -- wide enough for holidays that move
+# by a few days (Black Friday), not for ones that move by weeks (Easter).
+_EVENT_TOLERANCE_DAYS = 7
+
+
+def _num(v: float) -> str:
+    return f"{v:,.0f}" if abs(v) >= 100 else f"{v:g}"
+
+
+def describe_generation_risks(
+    history_df: pd.DataFrame,
+    date_column: str,
+    independent_columns: List[str],
+    generated: List[str],
+    future_dates: pd.Series,
+    frequency: str,
+    strategy: str,
+    event_columns: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Warning messages for two ways generated future drivers go wrong.
+
+    1. A spike held flat. carry_forward repeats the last value, so a last
+       period that was a promotion -- spend 2.6x its usual level, or an event
+       flag of 1 -- sets the level for the whole forecast. In testing that
+       lifted an 8-week forecast by 15%; on real data (Goodr) the forecast
+       came out at 1.6-2.5x the same period last year.
+    2. A known event left out. A generated flag is 0 throughout the forecast
+       (or, under seasonal_naive, repeated by week number or weekday, which
+       puts a moving holiday in the wrong period), so an event that happened
+       at this time last year is missed unless supplied -- Black Friday, in
+       the Homemakers run.
+
+    Returns [] when nothing applies. The `cycle` legacy strategy tiles the
+    history as-is and is exempt, as it is from flag handling.
+    """
+    if strategy == "cycle" or not generated:
+        return []
+    unit = "day" if frequency == "daily" else "week"
+    future_dates = pd.Series(future_dates).reset_index(drop=True)
+    hist_dates = pd.to_datetime(history_df[date_column]).reset_index(drop=True)
+    numeric = {
+        c: pd.to_numeric(history_df[c], errors="coerce").to_numpy(dtype=float)
+        for c in independent_columns
+    }
+    flags = [c for c in independent_columns if _is_flag(c, numeric[c], event_columns)]
+    messages = []
+
+    if strategy == "carry_forward":
+        lookback = _SPIKE_LOOKBACK.get(frequency, 13)
+        continuous = [c for c in generated if c not in flags]
+        items = []
+        for col in continuous:
+            hist = numeric[col]
+            usual = hist[-1 - lookback : -1]
+            usual = usual[np.isfinite(usual)]
+            last = hist[-1]
+            if not usual.size or not np.isfinite(last):
+                continue
+            median = float(np.median(usual))
+            if median > 0 and (last >= _SPIKE_HIGH * median or last <= _SPIKE_LOW * median):
+                items.append(
+                    f"'{col}' is {_num(last)}, {last / median:.1f}x its median over the "
+                    f"previous {lookback} {unit}s ({_num(median)})"
+                )
+            elif median == 0 and last != 0:
+                items.append(
+                    f"'{col}' is {_num(last)}, while its median over the previous "
+                    f"{lookback} {unit}s is 0"
+                )
+        on_last = [c for c in flags if numeric[c][-1] == 1]
+        if continuous and on_last:
+            items.append(
+                f"{', '.join(repr(c) for c in on_last)} {'is' if len(on_last) == 1 else 'are'} "
+                f"1, so it was an event {unit}"
+            )
+        if items:
+            messages.append(
+                f"The last {unit} of history ({hist_dates.iloc[-1]:%Y-%m-%d}) looks unusual, "
+                f"and carry_forward holds its values for all {len(future_dates)} forecast "
+                f"{unit}s: {'; '.join(items)}. If that {unit} was a promotion or an event, "
+                f"supply planned values in future_independent_data, or use "
+                f"future_exog_strategy='recent_average'."
+            )
+
+    tolerance = pd.Timedelta(days=_EVENT_TOLERANCE_DAYS)
+    year = pd.Timedelta(days=364)
+    matches = []
+    for col in [c for c in flags if c in generated]:
+        event_dates = hist_dates[numeric[col] == 1]
+        found = []
+        for when in event_dates:
+            target = when + year
+            gap = (future_dates - target).abs()
+            if gap.min() <= tolerance:
+                found.append(f"{when:%Y-%m-%d} (now {future_dates[gap.idxmin()]:%Y-%m-%d})")
+        if found:
+            more = f" and {len(found) - 3} more" if len(found) > 3 else ""
+            matches.append(f"'{col}' was 1 on {', '.join(found[:3])}{more}")
+    if matches:
+        if strategy == "seasonal_naive":
+            phase = "week of the year" if frequency == "weekly" else "day of the week"
+            how = (
+                f"seasonal_naive repeats past flags by {phase}, so an event whose date "
+                f"moves, like Black Friday, can land in the wrong {unit}"
+            )
+        else:
+            how = "they are set to 0 throughout the forecast, so these events are left out"
+        messages.append(
+            f"Event flags were generated, not supplied, for a forecast that covers the same "
+            f"time of year as past events: {'; '.join(matches)}. Because they were generated, "
+            f"{how}. Supply the dates of known events in future_independent_data."
+        )
+    return messages
 
 
 # --------------------------------------------------------------------------
@@ -500,28 +633,34 @@ def check_future_table(
     supplied = [c for c in columns if c in independent_columns]
     ignored = [c for c in columns if c in declared_columns and c not in independent_columns]
 
+    # Text first, with the same reading as the history: on/off words become
+    # 1/0, numbers written as text become numbers, and other text gets a
+    # specific error per column.
+    parsed: Dict[str, pd.Series] = {}
+    text_errors: List[str] = []
+    for col in supplied:
+        try:
+            parsed[col] = parse_driver_column(table[col], str(col), dates=future_dates)
+        except InvalidConfigError as e:
+            text_errors.append(e.message)
+    if text_errors:
+        raise InvalidConfigError(
+            f"{_PARAM} has text the models cannot use. " + " ".join(text_errors),
+            param_name=_PARAM,
+        )
+
     cleaned: Dict[str, pd.Series] = {}
     problems: List[str] = []
     out_of_range: List[str] = []
     for col in supplied:
-        raw = table[col].reset_index(drop=True)
-        if pd.api.types.is_bool_dtype(raw):
-            raw = raw.astype(int)
-        blank = raw.isna().to_numpy()
-        values = pd.to_numeric(raw, errors="coerce")
-        text = values.isna().to_numpy() & ~blank
+        values = pd.to_numeric(parsed[col], errors="coerce").reset_index(drop=True)
+        blank = values.isna().to_numpy()
         infinite = np.isinf(values.to_numpy(dtype=float))
         if blank.any():
             problems.append(f"'{col}' is blank for {_fmt_dates(future_dates, blank)}")
-        if text.any():
-            examples = list(dict.fromkeys(raw[text].astype(str)))[:_MAX_EXAMPLES]
-            problems.append(
-                f"'{col}' is not a number for {_fmt_dates(future_dates, text)} (e.g. "
-                f"{examples})"
-            )
         if infinite.any():
             problems.append(f"'{col}' is infinite for {_fmt_dates(future_dates, infinite)}")
-        if blank.any() or text.any() or infinite.any():
+        if blank.any() or infinite.any():
             continue
 
         hist = pd.to_numeric(history_df[col], errors="coerce").to_numpy(dtype=float)
