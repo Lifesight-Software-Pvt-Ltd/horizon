@@ -540,6 +540,9 @@ class HorizonForecaster:
         self._evaluation_cache: Dict[str, EvaluationResult] = {}
         self._split_cache: Dict[str, tuple] = {}
         self._refit_cache: Dict[str, tuple] = {}
+        # Drivers that vary in each fit window ("train", "train+validation"),
+        # computed once per window -- see _drivers_that_vary_in().
+        self._window_drivers: Dict[str, List[str]] = {}
         self._forecast_models: Dict[str, BaseModel] = {}
         self._forecast_adapters: Dict[str, BaseAdapter] = {}
 
@@ -807,10 +810,86 @@ class HorizonForecaster:
                 stacklevel=3,
             )
 
-    def _adapt_window(self, model_name: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame):
+    def _drivers_that_vary_in(
+        self, window: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame
+    ) -> List[str]:
+        """
+        The declared drivers that take more than one value in a fit window,
+        computed once per window (every model shares the windows) and
+        warning once about the rest.
+
+        Constant-everywhere drivers are dropped at construction, but a
+        driver can still be constant inside ONE fit window: a price change
+        or a new promotion that first appears in the validation or test
+        window is all one value in the rows the model is fitted on. No model
+        can learn an effect from such a column, and they failed in different
+        ways when given one: NeuralProphet discards it at fit and then
+        rejects it at prediction (so it dropped out of the run entirely),
+        and Prophet -- when the constant value is not 0 -- fits an arbitrary
+        effect to it (+31,403 on a series around 3,500, where the true
+        effect was -400), while CatBoost, SARIMAX and Bayesian PyMC gave it
+        no effect. Leaving it out of that fit for every model gives all of
+        them the honest answer -- no effect yet -- and keeps the models
+        comparable. The change still lands inside the scoring window, so
+        the warning says which score includes an effect no model could see.
+        """
+        if window in self._window_drivers:
+            return self._window_drivers[window]
+
+        constant = [c for c in self.independent_columns if fit_rows[c].nunique(dropna=False) <= 1]
+        drivers = [c for c in self.independent_columns if c not in constant]
+        self._window_drivers[window] = drivers
+
+        # Warn only where it matters for a score: a driver whose first
+        # change lands in this window's scoring rows. One that only changes
+        # later (in the test window, for the training fit) leaves this score
+        # untouched and is reported by the train+validation window instead.
+        affected, names = [], []
+        for col in constant:
+            value = fit_rows[col].iloc[0]
+            changed = score_rows[score_rows[col] != value]
+            if len(changed):
+                names.append(f"'{col}'")
+                affected.append(
+                    f"'{col}' is always {value:g} there and first changes on "
+                    f"{changed[self.date_column].iloc[0]:%Y-%m-%d}"
+                )
+        if affected:
+            one = len(affected) == 1
+            if window == "train":
+                where = "the training window used for model selection"
+                score = (
+                    "the validation MAPE -- which picks the hyperparameters, is screened "
+                    "against mape_threshold and weights the ensemble -- includes an effect no "
+                    f"model could see. {'It is' if one else 'They are'} used in every later "
+                    f"fit where {'it changes' if one else 'they change'}"
+                )
+            else:
+                where = "the train+validation window used for the test score"
+                score = (
+                    "the test MAPE includes an effect no model could see. forecast() refits "
+                    f"on the full series, where {'it changes' if one else 'they change'}, "
+                    f"and uses {'it' if one else 'them'}"
+                )
+            start = fit_rows[self.date_column].iloc[0]
+            end = fit_rows[self.date_column].iloc[-1]
+            warnings.warn(
+                f"{', '.join(names)} {'never changes' if one else 'never change'} in {where} "
+                f"({start:%Y-%m-%d} to {end:%Y-%m-%d}): {'; '.join(affected)}. No model can "
+                f"learn an effect from a column that never changes, so "
+                f"{'it is' if one else 'they are'} left out of this fit for every model, "
+                f"and {score}.",
+                stacklevel=3,
+            )
+        return drivers
+
+    def _adapt_window(
+        self, model_name: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame, window: str
+    ):
         """
         Shape one (fit window, scoring window) pair for ONE model, using
-        that model's own adapter class.
+        that model's own adapter class. Drivers that never change in the
+        fit window are left out (see _drivers_that_vary_in).
 
         Returns (adapted_fit, adapted_score_features, y_score).
 
@@ -841,21 +920,18 @@ class HorizonForecaster:
         validation refit would leave the refit describing its own data
         with the wrong constants.
         """
+        drivers = self._drivers_that_vary_in(window, fit_rows, score_rows)
         AdapterClass = MODEL_REGISTRY[model_name]["adapter"]
         adapter = AdapterClass(
             date_column=self.date_column,
             target_column=self.target_column,
-            independent_columns=self.independent_columns,
+            independent_columns=drivers,
             frequency=self.frequency,
         )
         adapted_fit = adapter.transform_train(fit_rows)
 
         future_dates = pd.Series(score_rows[self.date_column].reset_index(drop=True))
-        future_independent_data = (
-            score_rows[self.independent_columns].reset_index(drop=True)
-            if self.independent_columns
-            else None
-        )
+        future_independent_data = score_rows[drivers].reset_index(drop=True) if drivers else None
         adapted_score_features = adapter.transform_future(future_dates, future_independent_data)
         y_score = score_rows[self.target_column].to_numpy()
 
@@ -875,6 +951,7 @@ class HorizonForecaster:
                 model_name,
                 fit_rows=self.raw_df.iloc[: self._n_train],
                 score_rows=self.raw_df.iloc[self._n_train : self._n_train + self._n_validation],
+                window="train",
             )
         return self._split_cache[model_name]
 
@@ -900,6 +977,7 @@ class HorizonForecaster:
                 model_name,
                 fit_rows=self.raw_df.iloc[:split_point],
                 score_rows=self.raw_df.iloc[split_point:],
+                window="train+validation",
             )
         return self._refit_cache[model_name]
 
