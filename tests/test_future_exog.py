@@ -13,6 +13,7 @@ from horizon_forecaster.exceptions import InvalidConfigError
 from horizon_forecaster.future_exog import (
     FUTURE_EXOG_STRATEGIES,
     check_future_table,
+    describe_generation_risks,
     resolve_future_exog,
 )
 
@@ -383,12 +384,32 @@ def test_check_rejects_a_blank_date():
 def test_check_reports_every_bad_value_in_one_error():
     table = _table().astype({"spend": object})
     table.loc[1, "spend"] = None
-    table.loc[2, "spend"] = "1,200"
+    table.loc[2, "spend"] = np.inf
     with pytest.raises(InvalidConfigError) as caught:
         _check(table)
     message = str(caught.value)
     assert "'spend' is blank for 2024-03-02" in message
-    assert "'spend' is not a number for 2024-03-03" in message
+    assert "'spend' is infinite for 2024-03-03" in message
+
+
+def test_check_rejects_text_among_numbers_naming_the_date():
+    table = _table().astype({"spend": object})
+    table.loc[2, "spend"] = "1,200"
+    with pytest.raises(
+        InvalidConfigError,
+        match=r"'spend' has values that aren't numbers, e\.g\. \['1,200'\] on 2024-03-03",
+    ):
+        _check(table)
+
+
+def test_check_reads_yes_no_words_as_a_flag():
+    out = _check(_table(promo=["No", "Yes", "n", "Y", "OFF"]))
+    assert list(out["promo"]) == [0.0, 1.0, 0.0, 1.0, 0.0]
+
+
+def test_check_rejects_an_unclear_text_pair():
+    with pytest.raises(InvalidConfigError, match="can't tell which one means"):
+        _check(_table(promo=["Promo", "None", "Promo", "None", "None"]))
 
 
 def test_check_rejects_infinite_values():
@@ -447,3 +468,107 @@ def test_check_does_not_warn_for_in_range_values():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _check(_table())
+
+
+# --------------------------------------------------------------------------
+# flag detection: only 0/1 columns
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "values, last",
+    [
+        ([0.0, 5000.0] * 15, 5000.0),  # TV spend: on or off, but a quantity
+        ([9.99, 12.99] * 15, 12.99),  # two price points
+        ([0.0, 20.0] * 15, 20.0),  # discount %
+        ([1.0, 0.5] * 15, 0.5),  # not 0/1
+    ],
+)
+def test_two_value_quantities_are_not_treated_as_flags(values, last):
+    df = _hist({"x": values})
+    out, _ = _resolve(df, ["x"], 4)
+    assert list(out["x"]) == [last] * 4  # carried forward, not zeroed
+
+
+def test_zero_one_columns_are_still_detected_as_flags():
+    df = _hist({"promo": [0, 1] * 15})
+    out, _ = _resolve(df, ["promo"], 4)
+    assert list(out["promo"]) == [0.0] * 4
+
+
+# --------------------------------------------------------------------------
+# describe_generation_risks: spikes held by carry_forward, missed events
+# --------------------------------------------------------------------------
+
+
+def _risk_hist(n=60, spend=None, flag=None, end="2025-09-28"):
+    dates = pd.date_range(end=end, periods=n, freq="W-SUN")
+    df = pd.DataFrame({"date": dates, "spend": [1000.0] * n if spend is None else spend})
+    if flag is not None:
+        df["event"] = flag
+    return df
+
+
+def _risks(df, cols, generated=None, horizon=8, strategy="carry_forward", events=None):
+    fut = pd.Series(
+        pd.date_range(df["date"].max() + pd.Timedelta(days=7), periods=horizon, freq="7D")
+    )
+    return describe_generation_risks(
+        df,
+        "date",
+        cols,
+        cols if generated is None else generated,
+        fut,
+        "weekly",
+        strategy,
+        event_columns=events,
+    )
+
+
+def test_risk_warns_when_carry_forward_holds_a_last_period_spike():
+    spend = [1000.0] * 59 + [2600.0]
+    (message,) = _risks(_risk_hist(spend=spend), ["spend"])
+    assert "'spend' is 2,600, 2.6x its median over the previous 13 weeks (1,000)" in message
+    assert "all 8 forecast weeks" in message and "recent_average" in message
+
+
+def test_risk_warns_on_a_last_period_dip_and_on_a_usually_zero_driver():
+    (dip,) = _risks(_risk_hist(spend=[1000.0] * 59 + [400.0]), ["spend"])
+    assert "0.4x its median" in dip
+    (zero,) = _risks(_risk_hist(spend=[0.0] * 59 + [5000.0]), ["spend"])
+    assert "while its median over the previous 13 weeks is 0" in zero
+
+
+def test_risk_flags_an_event_in_the_last_period_when_values_are_carried():
+    flag = [0] * 59 + [1]
+    (message,) = _risks(_risk_hist(flag=flag), ["spend", "event"], events=["event"])
+    assert "'event' is 1, so it was an event week" in message
+
+
+def test_risk_is_quiet_for_a_normal_last_period_or_another_strategy():
+    assert _risks(_risk_hist(), ["spend"]) == []
+    spike = _risk_hist(spend=[1000.0] * 59 + [2600.0])
+    assert _risks(spike, ["spend"], strategy="recent_average") == []
+    assert _risks(spike, ["spend"], generated=[]) == []  # supplied, not generated
+    assert _risks(spike, ["spend"], strategy="cycle") == []
+
+
+def test_risk_warns_when_a_generated_flag_misses_last_years_event():
+    dates = pd.date_range(end="2025-10-26", periods=60, freq="W-SUN")
+    flag = [1 if d == pd.Timestamp("2024-11-24") else 0 for d in dates]
+    df = _risk_hist(flag=flag, end="2025-10-26")
+    (message,) = _risks(df, ["spend", "event"], generated=["event"], events=["event"])
+    assert "'event' was 1 on 2024-11-24 (now 2025-11-23)" in message
+    assert "set to 0 throughout the forecast" in message
+    (seasonal,) = _risks(
+        df, ["spend", "event"], generated=["event"], strategy="seasonal_naive", events=["event"]
+    )
+    assert "by week of the year" in seasonal
+
+
+def test_risk_does_not_ask_for_events_that_were_supplied_or_out_of_range():
+    dates = pd.date_range(end="2025-10-26", periods=60, freq="W-SUN")
+    flag = [1 if d == pd.Timestamp("2024-11-24") else 0 for d in dates]
+    df = _risk_hist(flag=flag, end="2025-10-26")
+    assert _risks(df, ["spend", "event"], generated=["spend"], events=["event"]) == []
+    assert _risks(df, ["spend", "event"], generated=["event"], horizon=2, events=["event"]) == []

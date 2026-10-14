@@ -333,6 +333,103 @@ def describe_date_spacing(sorted_dates: pd.Series, frequency: str) -> DateSpacin
     )
 
 
+# Text a driver column may use for an on/off flag, matched case-insensitively
+# after trimming spaces. A fixed list on purpose: for any other pair of words
+# ("Promo"/"None", "A"/"B") Horizon would have to guess which one means "on",
+# and a wrong guess silently flips the sign of every effect the models learn.
+YES_NO_WORDS = {
+    "true": 1,
+    "false": 0,
+    "t": 1,
+    "f": 0,
+    "yes": 1,
+    "no": 0,
+    "y": 1,
+    "n": 0,
+    "on": 1,
+    "off": 0,
+}
+_YES_NO_LABEL = "true/false, yes/no, y/n, t/f, on/off"
+
+
+def parse_driver_column(
+    values: pd.Series, column_name: str, dates: Optional[pd.Series] = None
+) -> pd.Series:
+    """
+    Turn one driver column into numbers, before anything checks or models it.
+
+      - numbers pass through; booleans become 1/0;
+      - text that is a number ("12.5") becomes that number;
+      - the on/off words in YES_NO_WORDS become 1/0, in any case and any mix
+        ("Yes" next to "N" is fine -- each word means one thing);
+      - blanks stay missing, for the missing-value check to report.
+
+    Any other text raises InvalidConfigError saying what is unclear:
+      - two text values outside the list ("Promo"/"None"): an on/off column
+        whose "on" value cannot be told;
+      - several text values ("Low"/"Mid"/"High"): categories, which must be
+        converted to numbers first;
+      - text among numbers ("1,200" in a spend column).
+
+    `dates`, aligned with `values`, lets an error say where the text is.
+    """
+    values = pd.Series(values).reset_index(drop=True)
+    if pd.api.types.is_bool_dtype(values):
+        return values.astype(int)
+    if pd.api.types.is_numeric_dtype(values):
+        return values
+
+    text = values.map(lambda v: v if pd.isna(v) else str(v).strip())
+    blank = text.isna() | (text == "")
+    numbers = pd.to_numeric(text.where(~blank), errors="coerce")
+    is_text = ~blank & numbers.isna()
+    if not is_text.any():
+        return numbers
+
+    words = text[~blank].str.lower()
+    if words.isin(list(YES_NO_WORDS) + ["0", "1", "0.0", "1.0"]).all():
+        out = pd.Series(np.nan, index=values.index)
+        out[~blank] = words.map(lambda w: YES_NO_WORDS[w] if w in YES_NO_WORDS else float(w))
+        return out.astype(float)
+
+    distinct = list(dict.fromkeys(text[is_text]))
+    has_numbers = bool((~blank & ~is_text).any())
+    if not has_numbers and len(distinct) == 1:
+        message = (
+            f"'{column_name}' has a single text value {distinct} and blanks, so it can't be "
+            f"read as numbers. If it marks the periods when something is on, use 1 there "
+            f"and 0 everywhere else (a CSV reader may also have turned words such as "
+            f"'None' or 'NA' into blanks)."
+        )
+    elif not has_numbers and len(distinct) == 2:
+        message = (
+            f"'{column_name}' looks like an on/off flag, but its two values "
+            f'{sorted(distinct)} are unclear: Horizon can\'t tell which one means "on". Use '
+            f"1/0, or one of {_YES_NO_LABEL}."
+        )
+    elif not has_numbers:
+        shown = sorted(distinct)[:6]
+        more = f" and {len(distinct) - 6} more" if len(distinct) > 6 else ""
+        message = (
+            f"'{column_name}' has text values {shown}{more}, not numbers. Drivers must be "
+            f"numeric: convert categories to numbers yourself, or to one 0/1 column per "
+            f"category."
+        )
+    else:
+        first = int(np.flatnonzero(is_text.to_numpy())[0])
+        where = ""
+        if dates is not None:
+            when = pd.Series(dates).reset_index(drop=True).iloc[first]
+            if not pd.isna(when):
+                where = f" on {pd.Timestamp(when):%Y-%m-%d}"
+        message = (
+            f"'{column_name}' has values that aren't numbers, e.g. {distinct[:3]}{where}. "
+            f"Remove thousands separators, currency signs and other text before passing "
+            f"the data."
+        )
+    raise InvalidConfigError(message, param_name=column_name, provided_value=distinct[:6])
+
+
 def validate_no_missing_values(
     df: pd.DataFrame,
     date_column: str,

@@ -44,6 +44,7 @@ from horizon_forecaster.evaluation.ensemble import (
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
 from horizon_forecaster.future_exog import (
     check_future_table,
+    describe_generation_risks,
     AGGREGATORS,
     FUTURE_EXOG_STRATEGIES,
     resolve_future_exog,
@@ -68,6 +69,7 @@ from horizon_forecaster.utils import (
     describe_date_spacing,
     find_duplicate_dates,
     parse_date_column,
+    parse_driver_column,
     resolve_split,
     validate_frequency,
     validate_mape_threshold,
@@ -263,7 +265,11 @@ class HorizonForecaster:
             than letting one silently win. Note this parameter is
             percentages ONLY: training_size=80 is 80%, never 80 periods.
         independent_columns: names of independent variable columns
-            (spend, impressions, promos, etc.) to use, if any.
+            (spend, impressions, promos, etc.) to use, if any. Values must
+            be numbers; booleans and the on/off words in
+            utils.YES_NO_WORDS (yes/no, y/n, t/f, true/false, on/off) are
+            read as 1/0, and any other text raises InvalidConfigError
+            saying what is unclear (see utils.parse_driver_column).
         models: which models to run, e.g. ["prophet", "catboost"]. If
             None (the default), runs every model in MODEL_REGISTRY.
             Raises InvalidConfigError naming any unrecognized model.
@@ -303,9 +309,10 @@ class HorizonForecaster:
         event_columns: names of the binary 0/1 event/flag columns (promos,
             holidays) among independent_columns, so the strategy defaults them
             to 0 ("no event unless supplied") instead of carrying them forward.
-            None (default) auto-detects flags (<=2 distinct non-negative
-            values); passing a list disables auto-detection and uses exactly
-            those columns.
+            None (default) auto-detects flags: columns whose values are only
+            0 and 1 (any other column, even one with two values such as a
+            0/5,000 spend or a 9.99/12.99 price, is a quantity). Passing a
+            list disables auto-detection and uses exactly those columns.
         future_exog_aggregator: "mean" (default) or "median", used by the
             recent_average / historical_average / seasonal_naive strategies
             (median is robust to spikes in the driver history).
@@ -439,6 +446,21 @@ class HorizonForecaster:
             )
 
         requested_independent_columns = independent_columns or []
+
+        # Drivers too: booleans and the on/off words in YES_NO_WORDS become
+        # 1/0, numbers written as text become numbers, and any other text
+        # raises a specific error rather than the generic "non-numeric" one.
+        # Done on a copy, before the zero-variance and missing-value checks.
+        to_parse = [
+            c
+            for c in requested_independent_columns
+            if c in raw_df.columns and c not in (date_column, target_column)
+        ]
+        if to_parse:
+            raw_df = raw_df.copy()
+            dates = raw_df[date_column] if date_column in raw_df.columns else None
+            for col in to_parse:
+                raw_df[col] = parse_driver_column(raw_df[col], col, dates=dates).to_numpy()
         # Kept for forecast(): a future table may name a declared driver that
         # was dropped below, which warns rather than errors.
         self._declared_independent_columns = list(requested_independent_columns)
@@ -1532,6 +1554,19 @@ class HorizonForecaster:
                 f"than a prediction.",
                 stacklevel=2,
             )
+
+        if generated:
+            for message in describe_generation_risks(
+                history_df=self.raw_df,
+                date_column=self.date_column,
+                independent_columns=self.independent_columns,
+                generated=generated,
+                future_dates=future_dates,
+                frequency=self.frequency,
+                strategy=self.future_exog_strategy,
+                event_columns=self.event_columns,
+            ):
+                warnings.warn(message, stacklevel=2)
 
         results: Dict[str, ForecastResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
