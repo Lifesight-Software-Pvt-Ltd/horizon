@@ -19,6 +19,16 @@ silently dropped or imputed: clean or impute your data first. (Columns in the
 DataFrame that you do not use are ignored, and a fully-constant column is
 dropped automatically with a report in `dropped_zero_variance_columns`.)
 
+A driver that changes over the full history but never changes inside one fit
+window — a price change or a new promotion that first appears in the
+validation or test window — is left out of that window's fit for every model,
+since no model can learn an effect from it there. A warning names the driver,
+its value and the date it first changes, and says which score includes an
+effect the models could not see: the validation MAPE (which drives
+hyperparameter selection, `mape_threshold` screening and ensemble weights) or
+the test MAPE. `forecast()` refits on the full series, where the driver does
+change, and uses it.
+
 **What data is accepted.** The constructor checks the date column against the
 rules below. Anything outside them raises an error naming the rule and the fix,
 rather than running on data that would give a confident but wrong result.

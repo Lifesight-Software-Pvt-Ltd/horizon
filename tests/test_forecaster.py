@@ -1648,3 +1648,108 @@ def test_forecast_succeeds_when_the_model_cannot_be_scored_on_validation():
     import math
 
     assert math.isnan(forecaster._selection_cache["prophet"].validation_mape.value)
+
+
+# ---------- drivers that never change inside one fit window ----------
+# A driver can vary over the full history (so it survives the zero-variance
+# check) yet be one value throughout a fit window -- a price change that
+# first appears in validation. NeuralProphet used to crash on it and Prophet
+# to invent an effect; it is now left out of that window's fit for every
+# model, with a warning naming the score it affects.
+
+
+def _window_df(change_row, before=0.0, after=1.0, n=104):
+    """Weekly data: 65 train / 26 validation / 13 test rows by default."""
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    drv = np.where(np.arange(n) >= change_row, after, before)
+    spend = rng.uniform(800, 1200, n).round()
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2024-08-04", periods=n, freq="W-SUN"),
+            "sales": 3000 + 4 * np.arange(n) + 0.5 * spend - 400 * (drv != before),
+            "spend": spend,
+            "drv": drv,
+        }
+    )
+
+
+def _window_forecaster(df, models=("catboost",)):
+    return HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="sales",
+        frequency="weekly",
+        independent_columns=["spend", "drv"],
+        models=list(models),
+    )
+
+
+def test_driver_constant_in_training_is_left_out_of_the_selection_fit():
+    forecaster = _window_forecaster(_window_df(change_row=75))  # changes in validation
+    with pytest.warns(UserWarning, match=r"'drv' never changes in the training window") as w:
+        train, validation_features, _ = forecaster._prepare_split("catboost")
+    message = str(w[0].message)
+    assert "always 0 there and first changes on 2026-01-11" in message
+    assert "validation MAPE" in message
+    assert "drv" not in train.columns and "drv" not in validation_features.columns
+    assert "spend" in train.columns
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # varies in train+validation: no warning
+        refit_rows, _, _ = forecaster._prepare_refit("catboost")
+    assert "drv" in refit_rows.columns
+
+
+def test_driver_changing_only_in_test_warns_for_the_test_score_only():
+    forecaster = _window_forecaster(_window_df(change_row=95))  # changes in test
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # validation is unaffected: no warning
+        train, _, _ = forecaster._prepare_split("catboost")
+    assert "drv" not in train.columns
+    with pytest.warns(UserWarning, match=r"train\+validation window used for the test score"):
+        refit_rows, _, _ = forecaster._prepare_refit("catboost")
+    assert "drv" not in refit_rows.columns
+
+
+def test_window_constant_driver_warns_once_per_window_across_models():
+    forecaster = _window_forecaster(_window_df(change_row=75), models=("catboost", "sarimax"))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster._prepare_split("catboost")
+        forecaster._prepare_split("sarimax")
+    assert sum("never changes" in str(w.message) for w in caught) == 1
+
+
+def test_window_constant_driver_with_a_nonzero_value_is_also_left_out():
+    forecaster = _window_forecaster(_window_df(change_row=75, before=5.0, after=50.0))
+    with pytest.warns(UserWarning, match="always 5 there"):
+        train, _, _ = forecaster._prepare_split("catboost")
+    assert "drv" not in train.columns
+
+
+def test_drivers_that_vary_in_training_are_kept_without_a_warning():
+    forecaster = _window_forecaster(_window_df(change_row=30))  # changes inside train
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        train, _, _ = forecaster._prepare_split("catboost")
+    assert {"spend", "drv"} <= set(train.columns)
+
+
+def test_neuralprophet_runs_when_a_driver_first_changes_in_validation():
+    # The reported failure: NeuralProphet dropped the constant column at fit
+    # and rejected it at prediction ("Unexpected column ... in data").
+    forecaster = HorizonForecaster(
+        _window_df(change_row=75),
+        date_column="date",
+        target_column="sales",
+        frequency="weekly",
+        independent_columns=["spend", "drv"],
+        models=["neuralprophet"],
+        model_params={"neuralprophet": {"learning_rate": 0.03, "epochs": 30}},
+    )
+    with pytest.warns(UserWarning, match="never changes in the training window"):
+        results = forecaster.evaluate()
+    assert forecaster.evaluate_errors == {}
+    assert not math.isnan(results["neuralprophet"].validation_mape.value)
