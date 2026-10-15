@@ -103,6 +103,7 @@ forecaster = HorizonForecaster(
     df,
     date_column="date",
     target_column="orders",
+    frequency="daily",
     model_params={
         "prophet": {"seasonality_mode": "additive"},
         "catboost": {"iterations": 300, "depth": 6},
@@ -245,7 +246,7 @@ forecaster = HorizonForecaster(
                                              # historical_average | seasonal_naive |
                                              # linear_trend | cycle
     event_columns=["promo"],                 # 0/1 flags -> default to 0, not carried
-    future_exog_aggregator="median",         # for the *_average strategies
+    future_exog_aggregator="median",         # for the *_average strategies and seasonal_naive
     recent_average_window=28,                # N for recent_average
 )
 ```

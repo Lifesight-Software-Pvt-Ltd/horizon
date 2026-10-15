@@ -6,6 +6,7 @@ they operate purely on pandas DataFrames/Series and raw config values.
 """
 
 import datetime
+import numbers
 import warnings
 from typing import List, NamedTuple, Optional, Tuple, Union
 
@@ -627,14 +628,16 @@ def _resolve_window(value: Union[int, float, None], n_total: int, param_name: st
             provided_value=value,
         )
 
-    if isinstance(value, int):
+    # numbers.Integral rather than int, so a numpy integer (from len()
+    # arithmetic on an array, say) is a number of periods like any other.
+    if isinstance(value, numbers.Integral):
         if value < 1:
             raise InvalidConfigError(
                 f"{param_name} must be at least 1 period (got {value}).",
                 param_name=param_name,
                 provided_value=value,
             )
-        return value
+        return int(value)
 
     if isinstance(value, float):
         if not (0 < value < 1):

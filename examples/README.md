@@ -42,7 +42,7 @@ One Colab-specific note: the default runtime is Python 3.13, and `neuralprophet`
 takes several extra minutes. Setting **Runtime → Change runtime type → Runtime version →
 2026.07** (Python 3.12) avoids that. See [`docs/installation.md`](../docs/installation.md).
 
-**Locally** — install the library, then run the notebook from this directory:
+**Locally** — from the repository root, install the library and open a notebook:
 
 ```bash
 pip install -e ".[dev]"

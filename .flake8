@@ -1,6 +1,6 @@
 [flake8]
 # Aligned with black (see [tool.black] in pyproject.toml). Run `black .`
-# before flake8; the two agree on everything except the three codes below,
+# before flake8; the two agree on everything except the two codes below,
 # which flake8 raises on formatting black itself produces:
 #   E203  whitespace before ':'   -- black's slice formatting
 #   W503  line break before binary operator -- black's preferred wrap

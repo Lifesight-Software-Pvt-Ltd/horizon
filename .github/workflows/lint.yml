@@ -2,7 +2,7 @@ name: Lint
 
 # Runs black, flake8 and bandit on every pull request and on pushes to
 # main. This is the only automated check that gates a PR: the model test suite fits real backends
-# and takes 25-60 minutes per Python version, so it is run locally by
+# and takes about 15-30 minutes per Python version on a laptop, so it is run locally by
 # contributors and maintainers rather than in CI (see CONTRIBUTING.md).
 on:
   pull_request:
