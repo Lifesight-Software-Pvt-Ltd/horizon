@@ -115,7 +115,7 @@ away.
 
 A test that constructs a `HorizonForecaster` on a short synthetic series should
 set `validation_size`/`test_size` explicitly. The defaults are absolute period
-counts (56/28 daily, 26/13 weekly) and will either scale themselves down with a
+counts (84/28 daily, 39/13 weekly) and will either scale themselves down with a
 warning or leave too little to train on.
 
 **Fit real models; do not mock them.** Mocking is used in exactly one kind of

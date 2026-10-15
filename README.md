@@ -144,7 +144,7 @@ forecaster = HorizonForecaster(
     target_column="orders",
     frequency="daily",              # "daily" or "weekly"
     independent_columns=["spend"],  # omit if you have none
-    validation_size=56,             # periods used for selection; None = frequency default
+    validation_size=84,             # periods used for selection; None = frequency default
     test_size=28,                   # periods reported; None = frequency default
     models=None,                    # None = all five; or e.g. ["sarimax", "catboost"]
     mape_threshold=40.0,            # degenerate-fit filter on the validation MAPE; None disables it
@@ -167,8 +167,8 @@ future = forecasts["sarimax"].forecast      # DataFrame ["ds", "yhat"] (+ bounds
 ```
 
 Training takes whatever the two evaluation windows leave. Leave
-`validation_size`/`test_size` as `None` to use the per-frequency defaults (56
-validation / 28 test for daily, 26 / 13 for weekly), pass a float strictly
+`validation_size`/`test_size` as `None` to use the per-frequency defaults (84
+validation / 28 test for daily, 39 / 13 for weekly), pass a float strictly
 between 0 and 1 for a fraction of the data, or use `training_size=80` for the
 percentage route instead — the two routes are mutually exclusive.
 
@@ -215,8 +215,10 @@ run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
 
 - **CSVs** — one `final_ensemble_<method>` per combination rule, plus
   `final_best_model`, `per_model`, `rejected_models` (per model *and* method), and
-  `model_summary` (validation MAPE, test MAPE, method, rule applied, weight and
-  status).
+  `model_summary` (validation MAPE, test MAPE, method, rule applied, weight,
+  status, and why each model was or was not exported as the best single
+  model). The best single model is the lowest validation MAPE among the models
+  within `mape_threshold` on both validation and test.
 - **Plots** (unless disabled) — one overlay per combination rule (every
   model against that rule), one dedicated figure per model, and one per rule.
   Five models and three rules give three overlays and eight individual

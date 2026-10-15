@@ -36,35 +36,44 @@ SUPPORTED_FREQUENCIES = ("daily", "weekly")
 #
 #   - The VALIDATION window is a selection instrument. It has to rank 3-18
 #     grid candidates against each other, so it wants stability, which
-#     means more data. Hence it defaults to TWICE the test window rather
-#     than the same size -- the two windows measure different things and
-#     there is no reason for them to match.
+#     means more data. Hence it defaults to THREE TIMES the test window.
+#     It was twice until a comparison on 19 real series (5 weekly, 14
+#     daily, up to 4 test origins each): on weekly data, models chosen on
+#     a 26-week window had a mean regret of 9.1 MAPE points against the
+#     best model on test, and a rank correlation with the test ranking of
+#     0.01; scoring on 39 weeks cut that to 7.3 points and 0.20. Three
+#     rolling folds of 13 weeks did slightly better again (5.7) at three
+#     times the fitting cost, and on daily data neither changed the
+#     choice much -- so the cheap version is the default. See
+#     docs/design_notes.md, "Window sizes".
 #
 # These are Horizon's own defaults, chosen for users -- deliberately NOT
 # the window fractions used by any particular evaluation corpus.
 DEFAULT_EVALUATION_WINDOWS = {
-    "daily": {"validation": 56, "test": 28},  # 8 weeks / 4 weeks
-    "weekly": {"validation": 26, "test": 13},  # ~6 months / ~1 quarter
+    "daily": {"validation": 84, "test": 28},  # 12 weeks / 4 weeks
+    "weekly": {"validation": 39, "test": 13},  # ~9 months / ~1 quarter
 }
 
 # When the caller takes the percentage route (`training_size`), whatever is
 # left after training has to be divided between validation and test. It is
-# split in this ratio, for the same reason validation defaults to twice
-# test above: selection wants stability, reporting wants a realistic
-# horizon.
-_PERCENTAGE_ROUTE_VALIDATION_SHARE = 2 / 3
+# split in this ratio, for the same reason validation defaults to three
+# times test above: selection wants stability, reporting wants a
+# realistic horizon.
+_PERCENTAGE_ROUTE_VALIDATION_SHARE = 3 / 4
 
 # The most of a dataset the DEFAULT windows are ever allowed to consume
 # between them. On a long series the absolute defaults are already a small
-# fraction and this never binds (it starts binding below ~210 daily rows,
-# ~98 weekly). On a short one it stops the defaults from eating the
-# training data alive: 56 + 28 out of 60 rows is not a split, it's an
-# error message.
+# fraction and this never binds (it starts binding below ~249 daily rows,
+# ~116 weekly). On a short one it stops the defaults from eating the
+# training data alive: 84 + 28 out of 60 rows is not a split, it's an
+# error message. It was 0.4 while validation was twice test; at 0.4 the
+# wider windows would have shrunk the test window of a typical 2.3-year
+# weekly series (122 rows) below a quarter, so it moved to 0.45 with them.
 #
 # Applies to DEFAULTED windows only. A size the caller asked for
 # explicitly is honoured exactly, or raises -- silently shrinking a
 # window somebody deliberately chose would be worse than refusing.
-_MAX_DEFAULTED_EVALUATION_SHARE = 0.4
+_MAX_DEFAULTED_EVALUATION_SHARE = 0.45
 
 
 class SplitSizes(NamedTuple):
@@ -733,7 +742,7 @@ def resolve_split(
     # Short-series fallback: scale the defaults down proportionally rather
     # than refusing to split at all. Only when BOTH were defaulted -- if
     # the caller named either window, the pair they asked for is what they
-    # get. The 2:1 validation:test ratio is preserved through the scaling,
+    # get. The 3:1 validation:test ratio is preserved through the scaling,
     # since the reasoning behind it doesn't change with dataset size.
     budget = int(n_total * _MAX_DEFAULTED_EVALUATION_SHARE)
     if both_defaulted and (n_validation + n_test) > budget:

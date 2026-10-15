@@ -120,7 +120,7 @@ that refit — the model that actually produced `test_predictions`.
 
 ### Window sizes are absolute, not percentages
 
-Defaults are **56 validation / 28 test** for daily, **26 / 13** for weekly,
+Defaults are **84 validation / 28 test** for daily, **39 / 13** for weekly,
 with training taking the remainder. Percentages would make both windows scale
 with however much history the caller happens to have, which is the wrong
 driver for either: a test window estimates the error you will experience when
@@ -130,13 +130,44 @@ really act on, regardless of whether you hold two years of history or ten.
 `validation_size`/`test_size` accept an `int` (periods), a `float` strictly
 between 0 and 1 (a fraction), or `None` for the default. `training_size`
 survives as a percentage-only alternative route (50–100, or 0.5–1.0) with the
-remainder split two-thirds to validation, and is **mutually exclusive** with
+remainder split three-quarters to validation, and is **mutually exclusive** with
 the other two — passing both raises `InvalidConfigError` rather than letting
 one silently win.
 
 On a series too short for the defaults they scale down proportionally, capped
-at 40% of rows between them, preserving the 2:1 ratio and warning with the
+at 45% of rows between them, preserving the 3:1 ratio and warning with the
 resulting sizes. Explicitly requested sizes are never silently shrunk.
+
+**Validation is three times the test window, and why not a rolling
+backtest.** Validation started at twice the test window. Testing showed that
+the model it picked often did badly on test (validation-best ranked 4th or
+5th of five in all four real runs), so a 3-fold rolling backtest was the
+planned fix. Before building it, the two were compared on 19 real series (5
+weekly, 14 daily, up to 4 test origins each, 4 models at fixed settings):
+today's window, one window three test-lengths long, and three rolling folds
+of one test-length each, all judged by how well they picked the model that
+then did best on test.
+
+| | single (2×) | long (3×) | 3 folds |
+|---|---|---|---|
+| Weekly: picked the test-best model | 29% | 29% | 36% |
+| Weekly: rank correlation with test | 0.01 | 0.20 | 0.20 |
+| Weekly: mean / median regret, MAPE points | 9.1 / 3.0 | 7.3 / 2.1 | 5.7 / 1.9 |
+| Daily: picked the test-best model | 40% | 44% | 38% |
+| Daily: mean / median regret, MAPE points | 1.9 / 0.13 | 1.2 / 0.14 | 1.2 / 0.18 |
+
+On daily data none of them changed the choice much. On weekly data the folds
+helped, but a single longer window captured most of it at no extra fitting
+cost, while the folds triple the selection runtime — so the longer window
+became the default and the rolling backtest stays a deliberate gap (§9).
+Every score beat a random pick by a wide margin (median regret 0.2 against
+2.9 points); what none of them fixes is the handful of series where no score
+predicts the test window. Choosing on the most recent window instead (the
+test window, then forecasting the next one) was also measured and was worse
+on weekly data (picked the best model 11% of the time against 33%), so
+selection stays on validation. The budget for defaulted windows rose from 40%
+to 45% of rows at the same time, so a typical 122-week series keeps the full
+39 + 13 rather than shrinking its test window below a quarter.
 
 ### A driver that never changes inside a fit window
 
@@ -666,8 +697,21 @@ a first faceted-grid attempt made each panel too small to read.
   header-only CSVs rather than a crash or a missing file.
 - **Both a `final_ensemble_<method>` and a `final_best_model` CSV are
   written**, always, with `model_summary` carrying validation MAPE, test
-  MAPE, method, rule applied, weight and status. The export deliberately does
-  not bake in the choice between them.
+  MAPE, method, rule applied, weight, status and `best_model_check`. The
+  export deliberately does not bake in the choice between them.
+- **The best single model is chosen on validation, with test as a check.**
+  It used to be the lowest test MAPE with no threshold, so the export was
+  selected on the window that is meant only to be reported, and in one real
+  run a model the ensemble had rejected was exported at 103% error. It is
+  now the lowest validation MAPE among the models within `mape_threshold` on
+  validation *and* on test. Ranking on test was measured and picked worse
+  (§2, "Window sizes"), but as a veto it carries signal: in the same
+  comparison, models that passed validation and then scored above 40% on
+  test had a median error of 24.8% over the periods that followed, against
+  5.6% for the rest. The cost is that the chosen model's test MAPE is
+  slightly optimistic — test helped choose it — which `best_model_check`
+  states. When no model passes, the file is empty and a warning lists each
+  model's scores, consistent with "exporters never raise on empty input".
 - The `export_forecast()` bundle imports matplotlib lazily, so
   `export_forecast_csvs()` alone stays matplotlib-free.
 
@@ -768,7 +812,13 @@ None of these block a stable API; all are additive.
 
 - **Rolling-origin backtesting.** Every score comes from a single test
   window, so it reflects one stretch of history rather than an average over
-  several origins.
+  several origins. Measured against a longer single validation window (§2,
+  "Window sizes"), three folds improved weekly model choice only a little
+  further at three times the selection cost, and not daily choice at all.
+  Untested: whether folds help more during a full grid search, where one
+  window may favour candidates that suit it specifically. The per-window
+  driver check (§2) is already written as one function per fit window, so a
+  backtest can call it per fold.
 - **Benchmark-relative metrics (RelMAE) and MASE.** MAPE alone says nothing
   about whether a model beats a seasonal-naive baseline and is unusable on
   series with zero actuals. These reach into selection, the threshold and

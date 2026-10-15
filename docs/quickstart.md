@@ -78,7 +78,7 @@ forecaster = HorizonForecaster(
     target_column="orders",
     frequency="daily",              # "daily" or "weekly"
     independent_columns=["spend"],  # omit if you have none
-    validation_size=None,           # selection window; None = frequency default (56 daily / 26 weekly)
+    validation_size=None,           # selection window; None = frequency default (84 daily / 39 weekly)
     test_size=None,                 # reported window; None = frequency default (28 daily / 13 weekly)
     models=None,                    # None = every registered model; or e.g. ["sarimax", "catboost"]
     mape_threshold=40.0,            # degenerate-fit filter on the VALIDATION MAPE; None admits every model
@@ -123,8 +123,8 @@ takes every row the two windows leave.
 
 If you would rather think in percentages, `training_size` is the alternative
 route — and it is **percentages only**: `training_size=80` means 80%, never 80
-periods. The remainder is divided between validation and test, two-thirds to
-validation. It is mutually exclusive with `validation_size`/`test_size`;
+periods. The remainder is divided between validation and test, three-quarters
+to validation. It is mutually exclusive with `validation_size`/`test_size`;
 passing both raises `InvalidConfigError` rather than letting one silently win.
 
 On a short series the defaults are scaled down (with a warning) rather than
@@ -301,6 +301,7 @@ paths = export_forecast(
         if default_eval_ensemble is not None and default_eval_ensemble.mape is not None
         else None
     ),
+    mape_threshold=forecaster.mape_threshold,   # the best-model file's two checks use it
     history=df, date_column="date", target_column="orders",
     output_dir="output", prefix="forecast",
     save_plots=True,     # set False for CSVs only
@@ -312,6 +313,18 @@ This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
 `per_model`, `rejected_models` and `model_summary`.
 
+**How the best single model is chosen.** `final_best_model` is the model with
+the lowest **validation** MAPE among those within `mape_threshold` on
+validation *and* on test. Test is only a check that rules a model out, never
+what it is ranked on: ranking on test was measured to pick worse, and the
+second check stops a model that looked fine on validation but failed on
+test. Because test helped decide, that model's test MAPE is slightly
+optimistic, and `model_summary`'s `best_model_check` column says so, along
+with why every other model was not chosen. If no model passes, the file is
+written empty with a warning naming each model's scores; the ensemble files
+are unaffected. Pass `per_model_validation_mape` (required for the choice)
+and your forecaster's `mape_threshold`.
+
 Unless `save_plots=False`, it also writes, **per combination rule**, an
 overlay (`forecast_overlay_<method>.png`: every model, the history, and that
 rule) and a dedicated ensemble figure (`forecast_ensemble_<method>.png`),
@@ -321,7 +334,7 @@ suffix is present even for a single rule, so a downstream job can glob a
 stable pattern.
 
 `model_summary` carries `validation_mape` and `mape` side by side, so the
-selection-vs-reported gap is visible per model. Its `ensemble_weight` column
+selection-vs-reported gap is visible per model, plus `best_model_check`. Its `ensemble_weight` column
 is deliberately blank for weightless rules such as the default trimmed mean —
 there is no weight, and filling in an equal share would imply an averaging
 that did not happen. Note `ensemble_mape` is only a fallback for the combined
@@ -376,4 +389,7 @@ A combined ensemble can score worse than the single best model — this is a
 real property of combination, not a bug. Always compare each ensemble's
 `.mape` against each model's own `results[name].mape` before choosing which
 output to trust. Both a `final_ensemble_<method>` and a `final_best_model` CSV
-are exported for exactly this reason.
+are exported for exactly this reason. Prefer the ensemble when in doubt: in
+testing on 19 real series, no score picked the model that then did best on
+test more than about 40% of the time, which is the case the trimmed mean
+exists for — it does not need to know which model that is.

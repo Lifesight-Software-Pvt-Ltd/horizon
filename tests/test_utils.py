@@ -202,8 +202,15 @@ def test_validate_mape_threshold_rejects_out_of_bounds():
 
 
 def test_resolve_split_uses_frequency_defaults_on_a_long_series():
-    assert resolve_split(400, "daily") == (316, 56, 28)
-    assert resolve_split(300, "weekly") == (261, 26, 13)
+    assert resolve_split(400, "daily") == (288, 84, 28)
+    assert resolve_split(300, "weekly") == (248, 39, 13)
+
+
+def test_resolve_split_keeps_full_weekly_windows_on_a_typical_weekly_series():
+    # 122 weeks (~2.3 years) is common for weekly marketing data. The
+    # defaulted-window budget is 45% of rows, so it keeps the full 39 + 13
+    # rather than shrinking the test window below a quarter.
+    assert resolve_split(122, "weekly") == (70, 39, 13)
 
 
 def test_resolve_split_treats_ints_as_periods_and_floats_as_fractions():
@@ -230,13 +237,13 @@ def test_resolve_split_rejects_nonsensical_window_sizes(value):
         resolve_split(400, "daily", validation_size=value)
 
 
-def test_resolve_split_percentage_route_splits_remainder_two_to_one():
+def test_resolve_split_percentage_route_splits_remainder_three_to_one():
     n_train, n_validation, n_test = resolve_split(1000, "daily", training_size=80)
     assert n_train == 800
     assert n_validation + n_test == 200
     # Validation is the selection instrument and wants stability, so it
-    # takes two-thirds rather than an even split.
-    assert n_validation == 133 and n_test == 67
+    # takes three-quarters, matching the default windows' 3:1 ratio.
+    assert n_validation == 150 and n_test == 50
 
 
 def test_resolve_split_refuses_to_mix_the_two_routes():
@@ -247,9 +254,9 @@ def test_resolve_split_refuses_to_mix_the_two_routes():
 def test_resolve_split_scales_defaults_down_on_a_short_series():
     with pytest.warns(UserWarning, match="too short for the default"):
         n_train, n_validation, n_test = resolve_split(60, "daily")
-    # Capped at 40% of the data between them, keeping the 2:1 ratio.
-    assert (n_train, n_validation, n_test) == (36, 16, 8)
-    assert n_validation + n_test == int(60 * 0.4)
+    # Capped at 45% of the data between them, keeping the 3:1 ratio.
+    assert (n_train, n_validation, n_test) == (33, 20, 7)
+    assert n_validation + n_test == int(60 * 0.45)
 
 
 def test_resolve_split_never_silently_shrinks_an_explicit_window():
@@ -261,7 +268,7 @@ def test_resolve_split_never_silently_shrinks_an_explicit_window():
 
 def test_resolve_split_scaling_applies_only_when_both_windows_defaulted():
     # test_size named explicitly -> no scaling, so the daily default
-    # validation window of 56 is used as-is and there is no room left.
+    # validation window of 84 is used as-is and there is no room left.
     with pytest.raises(InvalidConfigError):
         resolve_split(60, "daily", test_size=5)
 

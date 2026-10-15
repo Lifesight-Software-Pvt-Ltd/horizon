@@ -16,7 +16,9 @@ Five deliverables:
    combination method, since several rules can be built in one run.
 2. Best single model's forecast -- exported alongside the combined one,
    because a combination is not guaranteed to beat the best individual
-   model, so both candidates ship with the scores needed to choose.
+   model, so both candidates ship with the scores needed to choose. The
+   model is chosen on VALIDATION MAPE among the models that pass
+   mape_threshold on both validation and test (see choose_best_model).
 3. Per-model forecast -- every model's own forecast, stacked into one
    long/tidy table with a "model" column (+ bounds where a model
    provides them), so all models sit in one file for easy comparison.
@@ -39,8 +41,9 @@ header-only files rather than a crash or a missing file.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -61,7 +64,12 @@ _SUMMARY_COLUMNS = [
     "rule_applied",
     "ensemble_weight",
     "status",
+    "best_model_check",
 ]
+
+# Matches HorizonForecaster's default mape_threshold. Pass the forecaster's
+# own value (forecaster.mape_threshold) when it was changed.
+DEFAULT_MAPE_THRESHOLD = 40.0
 
 
 def build_final_forecast_table(
@@ -116,35 +124,126 @@ def build_per_model_forecast_table(
     return combined[ordered]
 
 
+def _finite(value) -> bool:
+    return value is not None and value == value
+
+
+def choose_best_model(
+    forecast_results: "Dict[str, ForecastResult]",
+    per_model_validation_mape: "Optional[Dict[str, float]]",
+    per_model_mape: "Optional[Dict[str, float]]" = None,
+    mape_threshold: Optional[float] = DEFAULT_MAPE_THRESHOLD,
+) -> Tuple[Optional[str], Dict[str, str]]:
+    """
+    Pick the model exported as "best", and say why each model was or was not.
+
+    Two checks, then one choice:
+      1. validation MAPE at or below mape_threshold -- the same screen the
+         ensemble uses;
+      2. test MAPE at or below mape_threshold, when test scores are given;
+      then the lowest VALIDATION MAPE among the models that pass both.
+
+    It used to be the lowest TEST MAPE with no threshold at all, so the
+    export was chosen on the window that is supposed to be reported, never
+    selected on -- and a model the ensemble had rejected was exported at
+    103% error in a real run. Choosing on test was also measured directly
+    and picked worse (docs/design_notes.md, "Window sizes"). Test is kept
+    only as a check that rules a model out: a model that passed validation
+    but scored above the threshold on test kept doing badly in the periods
+    that followed (median 24.8% against 5.6% for the rest). The trade-off,
+    stated in the note: the exported model's test MAPE is slightly
+    optimistic, because test helped decide which model it is.
+
+    mape_threshold=None skips both checks; a model without a finite
+    validation MAPE is never chosen, since there is nothing to choose on.
+
+    Returns (best_model_or_None, {model: reason}).
+    """
+    checks: Dict[str, str] = {}
+    eligible: Dict[str, float] = {}
+    validation = per_model_validation_mape or {}
+    for name in forecast_results:
+        val = validation.get(name)
+        if not _finite(val):
+            checks[name] = "not chosen: no validation MAPE"
+            continue
+        if mape_threshold is not None and val > mape_threshold:
+            checks[name] = f"not chosen: validation MAPE {val:.2f} > {mape_threshold:g}"
+            continue
+        if per_model_mape is not None:
+            test = per_model_mape.get(name)
+            if not _finite(test):
+                checks[name] = "not chosen: no test MAPE"
+                continue
+            if mape_threshold is not None and test > mape_threshold:
+                checks[name] = f"not chosen: test MAPE {test:.2f} > {mape_threshold:g}"
+                continue
+        checks[name] = "passed"
+        eligible[name] = val
+
+    best = min(eligible, key=eligible.get) if eligible else None
+    if best is not None and mape_threshold is None:
+        checks[best] = (
+            "exported as best: lowest validation MAPE (mape_threshold is None, no checks)"
+        )
+    elif best is not None:
+        checks[best] = "exported as best: lowest validation MAPE among the models that passed"
+        if per_model_mape is not None:
+            checks[best] += (
+                " both checks (test MAPE was used as a check, so it is slightly optimistic "
+                "for this model)"
+            )
+        else:
+            checks[best] += " the validation check (no test MAPEs were given)"
+    return best, checks
+
+
 def build_best_model_forecast_table(
     forecast_results: "Dict[str, ForecastResult]",
     per_model_mape: "Optional[Dict[str, float]]" = None,
+    *,
+    per_model_validation_mape: "Optional[Dict[str, float]]" = None,
+    mape_threshold: Optional[float] = DEFAULT_MAPE_THRESHOLD,
 ) -> pd.DataFrame:
     """
-    The single best-scoring model's forecast, as a ["model", "ds", "yhat"]
-    table (+ bounds where that model provides them).
+    The best single model's forecast, as a ["model", "ds", "yhat"] table
+    (+ bounds where that model provides them).
 
     Exists because a weighted ensemble is NOT guaranteed to beat the best
     individual model (see evaluation/ensemble.py) -- exporting only the
     blend can mean shipping the worse forecast. This is written alongside
     the ensemble so the choice can be made per run rather than baked in.
 
-    `per_model_mape` is {model_name: mape} from evaluate(); the lowest
-    finite MAPE wins. Returns a header-only DataFrame when no scores (or
-    no forecasts) are available.
+    The model is chosen by choose_best_model(): validation MAPE among the
+    models within mape_threshold on validation and on test. `per_model_mape`
+    is the test-window MAPE and `per_model_validation_mape` the validation
+    MAPE, both from evaluate(). Returns a header-only DataFrame, with a
+    warning saying why, when no model qualifies; the ensemble files are
+    unaffected.
     """
-    if not forecast_results or not per_model_mape:
+    if not forecast_results:
+        return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
+    if per_model_validation_mape is None:
+        warnings.warn(
+            "The best-model file is written empty: the best model is chosen on validation "
+            "MAPE, and per_model_validation_mape was not given. Pass "
+            "{m: r.validation_mape.value for m, r in results.items()} from evaluate().",
+            stacklevel=3,
+        )
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
 
-    scored = {
-        name: value
-        for name, value in per_model_mape.items()
-        if name in forecast_results and value == value  # drop NaN
-    }
-    if not scored:
+    best, checks = choose_best_model(
+        forecast_results, per_model_validation_mape, per_model_mape, mape_threshold
+    )
+    if best is None:
+        warnings.warn(
+            f"No model qualifies as the best single model, so the best-model file is written "
+            f"empty (the ensemble files are unaffected): "
+            f"{'; '.join(f'{m}: {why}' for m, why in checks.items())}.",
+            stacklevel=3,
+        )
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
 
-    best = min(scored, key=scored.get)
     table = forecast_results[best].forecast.copy()
     table.insert(0, "model", best)
     ordered = [c for c in _PER_MODEL_BASE_COLUMNS if c in table.columns]
@@ -158,6 +257,7 @@ def build_model_summary_table(
     ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     ensemble_mape: "Optional[float]" = None,
     per_model_validation_mape: "Optional[Dict[str, float]]" = None,
+    best_model_checks: "Optional[Dict[str, str]]" = None,
 ) -> pd.DataFrame:
     """
     The at-a-glance table for deciding whether to act on a combined
@@ -170,7 +270,11 @@ def build_model_summary_table(
     depends on how many were requested.
 
     Columns: ["model", "validation_mape", "mape", "ensemble_method",
-    "rule_applied", "ensemble_weight", "status"].
+    "rule_applied", "ensemble_weight", "status", "best_model_check"].
+
+    `best_model_check` says, per model, whether it was exported as the best
+    single model and why not otherwise (from choose_best_model); empty on
+    the ensemble rows and when no checks were given.
 
     Both MAPEs are reported because they answer different questions:
     `validation_mape` is what the model was SELECTED and screened on,
@@ -185,6 +289,7 @@ def build_model_summary_table(
     ensembles = as_ensemble_dict(ensemble)
     per_model_mape = per_model_mape or {}
     per_model_validation_mape = per_model_validation_mape or {}
+    best_model_checks = best_model_checks or {}
 
     if not ensembles:
         rows = [
@@ -196,6 +301,7 @@ def build_model_summary_table(
                 "rule_applied": None,
                 "ensemble_weight": None,
                 "status": "not_in_ensemble",
+                "best_model_check": best_model_checks.get(name),
             }
             for name, value in per_model_mape.items()
         ]
@@ -220,6 +326,7 @@ def build_model_summary_table(
                     "rule_applied": result.rule_applied if status == "in_ensemble" else None,
                     "ensemble_weight": weights.get(name),
                     "status": status,
+                    "best_model_check": best_model_checks.get(name),
                 }
             )
 
@@ -245,6 +352,7 @@ def build_model_summary_table(
                     "rule_applied": result.rule_applied,
                     "ensemble_weight": 1.0,
                     "status": "degraded" if result.degraded else "ensemble",
+                    "best_model_check": None,
                 }
             )
 
@@ -291,6 +399,7 @@ def export_forecast_csvs(
     per_model_mape: "Optional[Dict[str, float]]" = None,
     per_model_validation_mape: "Optional[Dict[str, float]]" = None,
     ensemble_mape: "Optional[float]" = None,
+    mape_threshold: Optional[float] = DEFAULT_MAPE_THRESHOLD,
     output_dir: str = ".",
     prefix: str = "forecast",
 ) -> Dict[str, str]:
@@ -317,13 +426,18 @@ def export_forecast_csvs(
             EnsembleResult}), a single EnsembleResult, or None. Drives the
             combined-forecast and rejected-models files.
         per_model_mape: {model_name: test-window mape} from evaluate(),
-            used to pick the best model and populate the summary. Without
-            it those two files are written header-only.
-        per_model_validation_mape: {model_name: validation-window mape},
-            reported alongside so the selection-vs-reported gap is visible.
+            reported in the summary and used as the second check on the
+            best model (it must be within mape_threshold on test too).
+        per_model_validation_mape: {model_name: validation-window mape}
+            from evaluate(). The best model is the lowest of these among
+            the models that pass both checks; without it the best-model
+            file is written header-only, with a warning.
         ensemble_mape: fallback for the combined score when an
             EnsembleResult carries none of its own (the forecast()
             context, where no future actuals exist).
+        mape_threshold: the threshold both best-model checks use. Pass the
+            forecaster's own (forecaster.mape_threshold) if you changed it;
+            None skips the checks.
         output_dir: directory to write into (created if missing).
         prefix: filename prefix for all files.
 
@@ -334,18 +448,34 @@ def export_forecast_csvs(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     ensembles = as_ensemble_dict(ensemble)
+    _, best_model_checks = (
+        choose_best_model(
+            forecast_results, per_model_validation_mape, per_model_mape, mape_threshold
+        )
+        if forecast_results and per_model_validation_mape is not None
+        else (None, {})
+    )
 
     tables = {
         "final_best_model": (
             f"{prefix}_final_best_model.csv",
-            build_best_model_forecast_table(forecast_results, per_model_mape),
+            build_best_model_forecast_table(
+                forecast_results,
+                per_model_mape,
+                per_model_validation_mape=per_model_validation_mape,
+                mape_threshold=mape_threshold,
+            ),
         ),
         "per_model": (f"{prefix}_per_model.csv", build_per_model_forecast_table(forecast_results)),
         "rejected": (f"{prefix}_rejected_models.csv", build_rejected_models_table(ensembles)),
         "model_summary": (
             f"{prefix}_model_summary.csv",
             build_model_summary_table(
-                per_model_mape, ensembles, ensemble_mape, per_model_validation_mape
+                per_model_mape,
+                ensembles,
+                ensemble_mape,
+                per_model_validation_mape,
+                best_model_checks=best_model_checks,
             ),
         ),
     }
@@ -382,6 +512,7 @@ def export_forecast(
     per_model_mape: "Optional[Dict[str, float]]" = None,
     per_model_validation_mape: "Optional[Dict[str, float]]" = None,
     ensemble_mape: "Optional[float]" = None,
+    mape_threshold: Optional[float] = DEFAULT_MAPE_THRESHOLD,
     history=None,
     date_column: str = "ds",
     target_column: str = "y",
@@ -404,6 +535,11 @@ def export_forecast(
     Args:
         forecast_results: {model_name: ForecastResult} from forecast().
         ensemble: forecast_ensemble (EnsembleResult), or None.
+        per_model_mape, per_model_validation_mape, ensemble_mape,
+        mape_threshold: as in export_forecast_csvs(). The best-model file
+            needs per_model_validation_mape, and uses mape_threshold for
+            its two checks -- pass forecaster.mape_threshold if you changed
+            it.
         history: optional raw history DataFrame drawn behind the forecast
             plots; date_column/target_column name its columns.
         date_column, target_column: column names in `history`.
@@ -430,6 +566,7 @@ def export_forecast(
         per_model_mape=per_model_mape,
         per_model_validation_mape=per_model_validation_mape,
         ensemble_mape=ensemble_mape,
+        mape_threshold=mape_threshold,
         output_dir=output_dir,
         prefix=prefix,
     )

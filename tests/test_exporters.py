@@ -1,9 +1,11 @@
 import math
 
 import pandas as pd
+import pytest
 from types import SimpleNamespace
 
 from horizon_forecaster.exporters import (
+    choose_best_model,
     _REJECTED_COLUMNS,
     _SUMMARY_COLUMNS,
     build_best_model_forecast_table,
@@ -101,29 +103,93 @@ def test_build_per_model_table_empty_is_shaped():
 # ---------- best-model forecast table ----------
 
 
-def test_build_best_model_table_picks_lowest_mape():
-    results = {
+def _two_models():
+    return {
         "prophet": make_forecast_result([1.0, 2.0, 3.0]),
         "catboost": make_forecast_result([4.0, 5.0, 6.0]),
     }
-    table = build_best_model_forecast_table(results, {"prophet": 29.7, "catboost": 21.3})
-    assert set(table["model"]) == {"catboost"}  # lower MAPE wins
+
+
+def test_best_model_is_the_lowest_validation_mape_not_the_lowest_test_mape():
+    table = build_best_model_forecast_table(
+        _two_models(),
+        {"prophet": 12.0, "catboost": 20.0},  # test: prophet better
+        per_model_validation_mape={"prophet": 9.0, "catboost": 6.0},  # validation: catboost
+    )
+    assert set(table["model"]) == {"catboost"}
     assert list(table["yhat"]) == [4.0, 5.0, 6.0]
 
 
-def test_build_best_model_table_ignores_nan_scores():
-    results = {"a": make_forecast_result([1.0]), "b": make_forecast_result([2.0])}
-    table = build_best_model_forecast_table(results, {"a": float("nan"), "b": 40.0})
-    assert set(table["model"]) == {"b"}
+def test_best_model_must_pass_the_threshold_on_validation():
+    # The real-run failure: a model the ensemble rejected was exported at 103%.
+    best, checks = choose_best_model(
+        _two_models(), {"prophet": 45.0, "catboost": 30.0}, {"prophet": 5.0, "catboost": 103.0}
+    )
+    assert best is None
+    assert checks["prophet"] == "not chosen: validation MAPE 45.00 > 40"
+    assert checks["catboost"] == "not chosen: test MAPE 103.00 > 40"
 
 
-def test_build_best_model_table_empty_without_scores():
-    results = {"a": make_forecast_result([1.0])}
-    assert len(build_best_model_forecast_table(results, None)) == 0
+def test_best_model_must_pass_the_threshold_on_test_too():
+    best, checks = choose_best_model(
+        _two_models(), {"prophet": 5.0, "catboost": 9.0}, {"prophet": 55.0, "catboost": 12.0}
+    )
+    assert best == "catboost"
+    assert checks["prophet"] == "not chosen: test MAPE 55.00 > 40"
+    assert "test MAPE was used as a check" in checks["catboost"]
+
+
+def test_best_model_uses_the_given_threshold_and_none_skips_the_checks():
+    results, val, test = _two_models(), {"prophet": 5.0, "catboost": 9.0}, {"prophet": 55.0}
+    assert choose_best_model(results, val, test, mape_threshold=60)[0] == "prophet"
+    assert choose_best_model(results, val, test, mape_threshold=None)[0] == "prophet"
+
+
+def test_best_model_without_test_scores_applies_only_the_validation_check():
+    best, checks = choose_best_model(_two_models(), {"prophet": 5.0, "catboost": 9.0}, None)
+    assert best == "prophet"
+    assert "no test MAPEs were given" in checks["prophet"]
+
+
+def test_best_model_never_picks_a_model_without_a_validation_mape():
+    best, checks = choose_best_model(
+        _two_models(),
+        {"prophet": float("nan"), "catboost": 30.0},
+        {"prophet": 1.0, "catboost": 2.0},
+    )
+    assert best == "catboost"
+    assert checks["prophet"] == "not chosen: no validation MAPE"
+
+
+def test_best_model_table_is_empty_with_a_warning_when_no_model_qualifies():
+    with pytest.warns(UserWarning, match="No model qualifies .* catboost: not chosen"):
+        table = build_best_model_forecast_table(
+            _two_models(),
+            {"prophet": 50.0, "catboost": 60.0},
+            per_model_validation_mape={"prophet": 5.0, "catboost": 6.0},
+        )
+    assert len(table) == 0 and list(table.columns) == ["model", "ds", "yhat"]
+
+
+def test_best_model_table_is_empty_with_a_warning_without_validation_scores():
+    with pytest.warns(UserWarning, match="per_model_validation_mape was not given"):
+        table = build_best_model_forecast_table(_two_models(), {"prophet": 5.0})
+    assert len(table) == 0
     assert len(build_best_model_forecast_table({}, {"a": 10.0})) == 0
 
 
-# ---------- model summary table ----------
+def test_summary_reports_each_models_best_model_check():
+    _, checks = choose_best_model(
+        _two_models(), {"prophet": 5.0, "catboost": 9.0}, {"prophet": 55.0, "catboost": 12.0}
+    )
+    table = build_model_summary_table(
+        {"prophet": 55.0, "catboost": 12.0},
+        per_model_validation_mape={"prophet": 5.0, "catboost": 9.0},
+        best_model_checks=checks,
+    )
+    by_model = table.set_index("model")["best_model_check"]
+    assert by_model["prophet"] == "not chosen: test MAPE 55.00 > 40"
+    assert by_model["catboost"].startswith("exported as best")
 
 
 def test_build_model_summary_reports_mape_weight_and_status():
@@ -469,3 +535,20 @@ def test_scalar_ensemble_mape_is_not_stamped_on_every_method(tmp_path):
         ensemble_mape=9.0,
     )
     assert single[single["model"] == "ensemble"].iloc[0]["mape"] == 9.0
+
+
+def test_export_applies_both_best_model_checks_with_the_given_threshold(tmp_path):
+    results = _two_models()
+    written = export_forecast_csvs(
+        results,
+        make_ensemble(),
+        per_model_mape={"prophet": 35.0, "catboost": 12.0},
+        per_model_validation_mape={"prophet": 5.0, "catboost": 9.0},
+        mape_threshold=30.0,
+        output_dir=str(tmp_path),
+    )
+    best = pd.read_csv(written["final_best_model"])
+    assert set(best["model"]) == {"catboost"}  # prophet fails the test check at 30
+    summary = pd.read_csv(written["model_summary"]).drop_duplicates("model").set_index("model")
+    assert summary.loc["prophet", "best_model_check"] == "not chosen: test MAPE 35.00 > 30"
+    assert summary.loc["catboost", "best_model_check"].startswith("exported as best")

@@ -92,9 +92,9 @@ def test_constructor_validates_training_size():
 
 
 def test_constructor_defaults_to_frequency_sized_evaluation_windows():
-    # 60 daily rows is below the ~210 needed for the full 56/28 defaults,
+    # 60 daily rows is below the ~249 needed for the full 84/28 defaults,
     # so they scale down proportionally (see utils._MAX_DEFAULTED_
-    # EVALUATION_SHARE) while keeping the 2:1 validation:test ratio.
+    # EVALUATION_SHARE) while keeping the 3:1 validation:test ratio.
     df = make_raw_df()
     with pytest.warns(UserWarning, match="too short for the default"):
         forecaster = HorizonForecaster(
@@ -104,7 +104,7 @@ def test_constructor_defaults_to_frequency_sized_evaluation_windows():
             frequency="daily",
             models=["prophet"],
         )
-    assert (forecaster._n_train, forecaster._n_validation, forecaster._n_test) == (36, 16, 8)
+    assert (forecaster._n_train, forecaster._n_validation, forecaster._n_test) == (33, 20, 7)
 
 
 def test_constructor_uses_full_default_windows_on_a_long_series():
@@ -116,8 +116,8 @@ def test_constructor_uses_full_default_windows_on_a_long_series():
         frequency="daily",
         models=["prophet"],
     )
-    assert (forecaster._n_validation, forecaster._n_test) == (56, 28)
-    assert forecaster._n_train == 400 - 56 - 28
+    assert (forecaster._n_validation, forecaster._n_test) == (84, 28)
+    assert forecaster._n_train == 400 - 84 - 28
 
 
 def test_constructor_rejects_mixing_the_percentage_and_window_routes():
@@ -584,10 +584,10 @@ def test_evaluate_returns_structured_result():
     assert isinstance(results, dict)
     assert isinstance(result, EvaluationResult)
     assert result.model_name == "prophet"
-    # 60 daily rows is below the ~210 the full 56/28 defaults need, so they
-    # scale to 40% of the data (16 + 8), leaving 36 to train on.
-    assert (result.n_train, result.n_validation, result.n_test) == (36, 16, 8)
-    assert len(result.test_predictions) == 8
+    # 60 daily rows is below the ~249 the full 84/28 defaults need, so they
+    # scale to 45% of the data (20 + 7), leaving 33 to train on.
+    assert (result.n_train, result.n_validation, result.n_test) == (33, 20, 7)
+    assert len(result.test_predictions) == 7
     assert result.fitted_model.is_fitted is True
     # The two scores must come from DIFFERENT windows -- checking they are
     # merely "not None" cannot fail, since both are non-optional fields.
@@ -1243,7 +1243,15 @@ def test_grid_search_skips_failing_candidates_and_uses_the_survivors():
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["sarimax"],
+        # The split these tests were written against: SARIMAX needs 35
+        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        validation_size=16,
+        test_size=8,
     )
     real = forecaster._fit_predict_mape
     calls = {"n": 0}
@@ -1265,7 +1273,15 @@ def test_grid_search_skips_failing_candidates_and_uses_the_survivors():
 def test_grid_search_fails_the_model_only_when_every_candidate_fails():
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["sarimax"],
+        # The split these tests were written against: SARIMAX needs 35
+        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        validation_size=16,
+        test_size=8,
     )
 
     def always_fails(model_name, params, *args, **kwargs):
@@ -1336,7 +1352,15 @@ def test_total_grid_failure_preserves_the_original_exception_type():
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["sarimax"],
+        # The split these tests were written against: SARIMAX needs 35
+        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        validation_size=16,
+        test_size=8,
     )
 
     def always_insufficient(model_name, params, *args, **kwargs):
@@ -1362,7 +1386,15 @@ def test_mixed_grid_failures_become_an_aggregate_convergence_error():
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
-        df, date_column="date", target_column="orders", frequency="daily", models=["sarimax"]
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        models=["sarimax"],
+        # The split these tests were written against: SARIMAX needs 35
+        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        validation_size=16,
+        test_size=8,
     )
     calls = {"n": 0}
 
@@ -1659,7 +1691,7 @@ def test_forecast_succeeds_when_the_model_cannot_be_scored_on_validation():
 
 
 def _window_df(change_row, before=0.0, after=1.0, n=104):
-    """Weekly data: 65 train / 26 validation / 13 test rows by default."""
+    """Weekly data, split 65 train / 26 validation / 13 test by _window_forecaster."""
     import numpy as np
 
     rng = np.random.default_rng(3)
@@ -1683,6 +1715,8 @@ def _window_forecaster(df, models=("catboost",)):
         frequency="weekly",
         independent_columns=["spend", "drv"],
         models=list(models),
+        validation_size=26,
+        test_size=13,
     )
 
 
@@ -1748,6 +1782,8 @@ def test_neuralprophet_runs_when_a_driver_first_changes_in_validation():
         independent_columns=["spend", "drv"],
         models=["neuralprophet"],
         model_params={"neuralprophet": {"learning_rate": 0.03, "epochs": 30}},
+        validation_size=26,
+        test_size=13,
     )
     with pytest.warns(UserWarning, match="never changes in the training window"):
         results = forecaster.evaluate()
