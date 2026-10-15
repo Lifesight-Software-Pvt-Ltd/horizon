@@ -250,7 +250,7 @@ class HorizonForecaster:
             screening, inverse-MAPE weighting). An int is a number of
             periods, a float strictly between 0 and 1 is a fraction of the
             data, and None (the default) uses the frequency default from
-            utils.DEFAULT_EVALUATION_WINDOWS -- 56 periods daily, 26
+            utils.DEFAULT_EVALUATION_WINDOWS -- 84 periods daily, 39
             weekly.
         test_size: size of the test window, which is REPORTED and never
             read by any selection path. Same int/float/None semantics as
@@ -259,7 +259,7 @@ class HorizonForecaster:
         training_size: the percentage route, for callers who would rather
             think in percentages than windows. A percentage (50-100) or
             fraction (0.5-1.0), meaning exactly what it always has; the
-            remainder is divided between validation and test, two-thirds
+            remainder is divided between validation and test, three-quarters
             to validation. Mutually exclusive with validation_size/
             test_size -- passing both raises InvalidConfigError rather
             than letting one silently win. Note this parameter is
