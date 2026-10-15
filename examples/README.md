@@ -15,10 +15,17 @@ than as evidence about how well these models forecast real data.
 
 ## The paper
 
-[`paper/Robust-Ensemble-Forecasting.pdf`](paper/Robust-Ensemble-Forecasting.pdf) is the current
-version of *Robust Ensemble Forecasting in Practice: Model Selection and Combination Across
+[`paper/Robust-Ensemble-Forecasting.pdf`](paper/Robust-Ensemble-Forecasting.pdf) is
+*Robust Ensemble Forecasting in Practice: Model Selection and Combination Across
 Heterogeneous Time Series* (Anil Kumar Singh, Sanvi Bhardwaj, Rajeev Aravindakshan Nair;
-Lifesight). It is also published at https://lifesight.io/resources/ensemble-forecasting/.
+Lifesight).
+
+- **Research paper:** https://github.com/lifesight/robust-ensemble-forecasting — the paper
+  with its data, out-of-fold forecasts and the code that regenerates every table and figure in it.
+- **White paper:** https://lifesight.io/resources/ensemble-forecasting/
+
+The paper is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), not under
+this repository's Apache License; see the research paper repository for its licence terms.
 
 The paper evaluates the approach behind this library (screen candidate models on a validation
 window, combine the survivors with a trimmed mean) on 99 real daily commercial series. These
@@ -49,10 +56,10 @@ The notebooks read their data from a URL by default so that Colab works unchange
 ## A word on runtime
 
 These notebooks fit real models — Prophet and PyMC compile on first use, and Bayesian PyMC
-draws a full MCMC sample per grid candidate. Each notebook therefore ships with a `FAST`
-switch: on by default, running a subset of the models with their grid searches intact, so the
-real selection machinery still runs. Turning it off runs all five and takes considerably
-longer. Both paths are in the notebook; neither is hidden.
+draws a full MCMC sample per grid candidate. Each notebook has a `FAST` switch. It is off as
+committed, so the saved outputs show all five models; expect the daily notebook to take an hour
+or more on a free Colab CPU. Set `FAST = True` to run three models (Prophet, CatBoost, SARIMAX)
+in a few minutes, with their grid searches intact, so the real selection machinery still runs.
 
 ## Data
 
