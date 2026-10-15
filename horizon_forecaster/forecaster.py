@@ -20,6 +20,7 @@ the shared contract (BaseModel/BaseAdapter) has a gap -- fix the
 contract, rather than special-casing the orchestrator.
 """
 
+import numbers
 import warnings
 from dataclasses import dataclass
 from functools import lru_cache
@@ -419,7 +420,11 @@ class HorizonForecaster:
                 param_name="future_exog_aggregator",
                 provided_value=future_exog_aggregator,
             )
-        if not (isinstance(recent_average_window, int) and recent_average_window > 0):
+        if (
+            isinstance(recent_average_window, bool)
+            or not isinstance(recent_average_window, numbers.Integral)
+            or recent_average_window <= 0
+        ):
             raise InvalidConfigError(
                 "recent_average_window must be a positive integer "
                 f"(got {recent_average_window!r}).",
@@ -428,7 +433,7 @@ class HorizonForecaster:
             )
         self.future_exog_strategy = future_exog_strategy
         self.future_exog_aggregator = future_exog_aggregator
-        self.recent_average_window = recent_average_window
+        self.recent_average_window = int(recent_average_window)
 
         self.models = self._validate_models(models)
 
@@ -1503,12 +1508,23 @@ class HorizonForecaster:
         self.forecast_errors = {}
         self.future_exog_used = None
 
-        if horizon <= 0:
+        # A whole number, checked before anything else: a float such as 2.5
+        # used to build two future dates and then fail inside every model as
+        # a row-count mismatch, ending in an AllModelsRejectedError that hid
+        # the real cause. A whole float (30.0) always worked and still does.
+        # bool is excluded because it is an int subclass.
+        is_whole = (
+            not isinstance(horizon, bool)
+            and isinstance(horizon, numbers.Real)
+            and float(horizon).is_integer()
+        )
+        if not is_whole or horizon <= 0:
             raise InvalidConfigError(
-                f"horizon must be a positive integer, got {horizon}.",
+                f"horizon must be a positive integer, got {horizon!r}.",
                 param_name="horizon",
                 provided_value=horizon,
             )
+        horizon = int(horizon)
 
         n_total = len(self.raw_df)
         if horizon > _HORIZON_WARNING_FRACTION * n_total:

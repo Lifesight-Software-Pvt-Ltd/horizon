@@ -859,6 +859,19 @@ def test_forecast_raises_on_non_positive_horizon():
         forecaster.forecast(horizon=-5)
 
 
+@pytest.mark.parametrize("horizon", [2.5, float("nan"), True, "5"])
+def test_forecast_raises_on_non_integer_horizon(horizon):
+    # A float used to build int(horizon) future dates and then fail inside
+    # every model as a row-count mismatch, surfacing as AllModelsRejectedError.
+    # Raised before any model is fitted, so this costs no fit.
+    df = make_raw_df(n=60)
+    forecaster = HorizonForecaster(
+        df, date_column="date", target_column="orders", frequency="daily", models=["prophet"]
+    )
+    with pytest.raises(InvalidConfigError, match="positive integer"):
+        forecaster.forecast(horizon=horizon)
+
+
 def test_forecast_refits_only_once_and_caches_across_calls():
     """
     Critical design contract: the full-data refit must happen exactly

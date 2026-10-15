@@ -219,6 +219,13 @@ def test_resolve_split_treats_ints_as_periods_and_floats_as_fractions():
     assert resolve_split(400, "daily", validation_size=0.1, test_size=0.05) == (340, 40, 20)
 
 
+def test_resolve_split_accepts_numpy_integers_as_periods():
+    # A size computed with numpy (np.int64) is still a number of periods.
+    split = resolve_split(400, "daily", validation_size=np.int64(40), test_size=np.int32(20))
+    assert split == (340, 40, 20)
+    assert all(type(n) is int for n in split)
+
+
 @pytest.mark.parametrize("value", [1.0, 28.0, 2.5])
 def test_resolve_split_rejects_ambiguous_floats(value):
     """

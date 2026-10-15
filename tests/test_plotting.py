@@ -222,6 +222,19 @@ def test_plot_model_comparison_flags_when_no_ensemble_formed():
     assert len(ax.patches) == 1  # only the individual model bar, no ensemble bar
 
 
+def test_plot_model_comparison_tolerates_a_nan_mape():
+    # A test window of nothing but zero actuals gives a NaN MAPE. The chart
+    # used to pass that to set_ylim, which raised -- and took
+    # save_evaluation_plots down with it.
+    results = {"prophet": make_eval_result(float("nan")), "catboost": make_eval_result(12.0)}
+    ax = plot_model_comparison(results)
+    assert len(ax.patches) == 2
+    assert ax.get_ylim() == pytest.approx((0, 12.0 * 1.15))
+
+    ax = plot_model_comparison({"prophet": make_eval_result(float("nan"))})
+    assert ax.get_ylim() == (0, 1.0)
+
+
 def test_plot_model_comparison_empty_raises():
     with pytest.raises(ValueError):
         plot_model_comparison({})

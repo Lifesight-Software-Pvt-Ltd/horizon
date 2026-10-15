@@ -36,9 +36,11 @@ rejections here are about scope, not quality.
 - Bug fixes, with a test that fails before the fix and passes after.
 - A **new model**, as a matched adapter + wrapper + config block + tests. This
   is the best-supported kind of contribution; see below.
-- New future-driver strategies in `future_exog.py`, new combination rules in
-  `evaluation/ensemble.py`, new metrics in `evaluation/metrics.py` — all three
-  are registries of pure functions and are designed to be extended.
+- New future-driver strategies in `future_exog.py` (a registry of pure
+  functions, `FUTURE_EXOG_STRATEGIES`), new combination rules in
+  `evaluation/ensemble.py` (listed in `ENSEMBLE_METHODS`), and new metrics in
+  `evaluation/metrics.py`. All three modules are pure and import no model, so
+  they are the easiest places to extend.
 - Documentation fixes, and clearer errors or warnings.
 - Platform and packaging fixes (a dependency pin that can be lifted, a build
   that fails on your OS).
@@ -157,8 +159,8 @@ contribution is:
    the backend does not pickle reliably. `predict()` returns `ds`/`yhat`, and
    `yhat_lower`/`yhat_upper` only if the model produces them natively.
 3. A `<name>:` block in `config/default_params.yaml` with daily and weekly
-   `hyperparameters`, `hyperparameter_grid` and `wrapper_config`, mirroring the
-   existing blocks.
+   `base_hyperparameters`, `hyperparameter_grid` and `wrapper_config`
+   (`min_rows_required`, `random_seed`), mirroring the existing blocks.
 4. One `MODEL_REGISTRY` line.
 5. Tests: adapter tests that need no backend, plus wrapper and integration
    tests guarded by `pytest.importorskip` if the backend is heavy.

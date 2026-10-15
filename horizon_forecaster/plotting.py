@@ -399,8 +399,9 @@ def plot_model_comparison(
 
     Args:
         evaluation_results: {model_name: EvaluationResult} from evaluate().
-        ensemble: evaluate_ensemble (EnsembleResult), or None. Its bar is
-            shown only when ensemble.mape is not None.
+        ensemble: evaluate_ensemble ({method: EnsembleResult}), a single
+            EnsembleResult, or None. A rule's bar is shown only when its
+            mape is not None.
         ax: existing Axes, or None to create one.
         title: chart title.
 
@@ -441,8 +442,12 @@ def plot_model_comparison(
     ax.set_title(title)
     ax.set_xticks(range(len(names)))
     ax.set_xticklabels(names, rotation=30, ha="right")
-    # Headroom for the value labels, which sit above the tallest bar.
-    ax.set_ylim(0, max(values) * 1.15)
+    # Headroom for the value labels, which sit above the tallest bar. Only
+    # finite values count: a model whose test window held nothing but zero
+    # actuals has a NaN MAPE (no bar), and a NaN limit makes matplotlib raise.
+    finite = [v for v in values if v == v and abs(v) != float("inf")]
+    top = max(finite) if finite else 0.0
+    ax.set_ylim(0, top * 1.15 if top > 0 else 1.0)
     _annotate_no_ensemble(ax, _no_ensemble_marker(ensembles))
     ax.figure.tight_layout()
     return ax

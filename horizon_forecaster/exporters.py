@@ -80,7 +80,7 @@ def build_final_forecast_table(
 
     Accepts the {method: EnsembleResult} dict a forecaster actually
     produces, a single EnsembleResult, or None. Given several methods it
-    tables the FIRST one, matching plotting._primary_ensemble -- a single
+    tables the FIRST one requested -- a single
     two-column table cannot represent several rules at once, and
     export_forecast_csvs() writes one file per method anyway rather than
     relying on this choice.
@@ -534,7 +534,8 @@ def export_forecast(
 
     Args:
         forecast_results: {model_name: ForecastResult} from forecast().
-        ensemble: forecast_ensemble (EnsembleResult), or None.
+        ensemble: forecast_ensemble ({method: EnsembleResult}), a single
+            EnsembleResult, or None.
         per_model_mape, per_model_validation_mape, ensemble_mape,
         mape_threshold: as in export_forecast_csvs(). The best-model file
             needs per_model_validation_mape, and uses mape_threshold for

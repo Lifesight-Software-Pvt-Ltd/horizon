@@ -12,7 +12,8 @@ The design mirrors evaluation/ensemble.py: a `FUTURE_EXOG_STRATEGIES`
 registry of pure functions with no dependency on forecaster/model/adapter
 classes, so it is standalone and unit-testable.
 
-Strategies (all defined for any horizon -- short takes the head, long tiles):
+Strategies (all defined for any horizon; `cycle` takes the tail of the
+history for a short horizon and tiles it for a long one):
     carry_forward       last observed value held flat.
     recent_average      mean/median of the last N periods.
     historical_average  SEASON-AWARE mean/median (by day-of-week for daily,
@@ -36,7 +37,8 @@ to reproduce the old behaviour exactly.
 Robustness: history is coerced to numeric and all aggregations are NaN-aware;
 any continuous output for a non-negative driver is clipped at 0 (so a
 projected trend can't go negative); out-of-range *clamping* is left to the
-model adapters, which already do it.
+SARIMAX and Bayesian PyMC adapters, which already do it (the other models
+take values as given -- see _OUT_OF_RANGE_BEHAVIOUR).
 """
 
 import difflib
@@ -325,13 +327,13 @@ def describe_generation_risks(
     1. A spike held flat. carry_forward repeats the last value, so a last
        period that was a promotion -- spend 2.6x its usual level, or an event
        flag of 1 -- sets the level for the whole forecast. In testing that
-       lifted an 8-week forecast by 15%; on real data (Goodr) the forecast
+       lifted an 8-week forecast by 15%; on real retail data the forecast
        came out at 1.6-2.5x the same period last year.
     2. A known event left out. A generated flag is 0 throughout the forecast
        (or, under seasonal_naive, repeated by week number or weekday, which
        puts a moving holiday in the wrong period), so an event that happened
        at this time last year is missed unless supplied -- Black Friday, in
-       the Homemakers run.
+       one real run.
 
     Returns [] when nothing applies. The `cycle` legacy strategy tiles the
     history as-is and is exempt, as it is from flag handling.

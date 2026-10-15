@@ -330,7 +330,7 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   learn, with nothing to show it.
 - **Two warnings point at generated values that are probably wrong.**
   `carry_forward` repeats the last value, so a last period that was a
-  promotion sets the level for the whole forecast; on real data (Goodr) that
+  promotion sets the level for the whole forecast; on real retail data that
   produced a forecast at 1.6–2.5× the same period last year. A warning fires
   when a generated driver's last value is ≥1.5× or ≤0.5× its median over the
   previous 13 weeks / 28 days, or an event flag is 1 there. It warns rather
@@ -338,8 +338,8 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   more hidden assumption. Separately, a generated flag is 0 throughout (or
   repeated by week number under `seasonal_naive`, which puts a moving
   holiday in the wrong week), so an event that happened within a week of
-  the same date last year triggers a warning naming those dates — the
-  Homemakers forecast missed Black Friday this way.
+  the same date last year triggers a warning naming those dates — one real
+  forecast missed Black Friday this way.
 - **`seasonal_naive` carries drift.** Pure seasonal naive repeats last year's
   level, which is wrong for a growing driver over a long horizon. The
   implementation fits a trend, adds the phase-wise seasonal residual, and
@@ -384,10 +384,11 @@ Independent columns keep their original names, since Prophet's
 - **Seeded, because it was not reproducible.** `yhat_lower`/`yhat_upper`
   varied between repeated `predict()` calls on the same fitted model —
   Prophet's uncertainty simulation draws from numpy's global random state.
-  `predict()` now sets the seed (default 42, overridable via
-  `params={"random_seed": ...}`) immediately before calling Prophet. The seed
-  is filtered out before Prophet's constructor sees it, being a wrapper-level
-  concept. Verified across separate processes, not just repeated calls.
+  `predict()` now sets the seed (default 42, from `wrapper_config.random_seed`
+  in the config) immediately before calling Prophet. The seed is an explicit
+  wrapper constructor argument, never part of `params`, because `params` is
+  passed straight to `Prophet(**params)`, which would reject it. Verified
+  across separate processes, not just repeated calls.
 - **`save()`/`load()` use `model_to_json()`, not pickle**, per Prophet's own
   documentation — the cmdstanpy backend does not deserialize reliably across
   environments. The JSON is wrapped in an envelope carrying wrapper state
@@ -620,9 +621,9 @@ in the wrapper, mirroring that split.
   with very deep leapfrog trees. Three changes fixed it — halve draws/tune to
   1000 (a sweep showed point MAPE flat across a 4× range: 500 → 11.46%,
   1000 → 11.56%, 2000 → 11.65%, pure Monte-Carlo jitter, while time scaled
-  linearly), keep the Fourier order low (2–4, never 6, which was slowest and
-  never won), and grid-select `beta_fourier_sigma` (0.3 tight vs 1.0 loose)
-  rather than hardcoding it. A tight Fourier prior regularises the ridge — on
+  linearly), keep the Fourier order low (3–4 on daily data, never 6, which was
+  slowest and never won), and grid-select `beta_fourier_sigma` (0.3 tight vs
+  1.0 loose) rather than hardcoding it. A tight Fourier prior regularises the ridge — on
   the collinear synthetic it halved sampling time *and* improved MAPE (1.0 →
   14.55%, 0.3 → 11.56%) — but it underfits strong, well-supported
   seasonality, so which wins is data-dependent and belongs in the grid.
