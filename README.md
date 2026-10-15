@@ -20,10 +20,14 @@ best individual model (it is not guaranteed to).
 
 **Research paper:** *Robust Ensemble Forecasting in Practice: Model Selection
 and Combination Across Heterogeneous Time Series* (Singh, Bhardwaj, Nair;
-Lifesight), on [lifesight.io](https://lifesight.io/resources/ensemble-forecasting/).
-It tests the approach this library is built on across 99 daily commercial series
-from 65 organisations, and finds that a per-period trimmed mean matched the best
-single model without having to identify it. A copy is in [`examples/paper/`](examples/paper/Robust-Ensemble-Forecasting.pdf).
+Lifesight). It tests the approach this library is built on across 99 daily
+commercial series from 65 organisations, and finds that a per-period trimmed
+mean matched the best single model without having to identify it.
+
+- [Research paper repository](https://github.com/lifesight/robust-ensemble-forecasting) — the paper with
+  its data, forecasts and the code that reproduces every table and figure
+- [White paper](https://lifesight.io/resources/ensemble-forecasting/) on lifesight.io
+- [PDF in this repo](examples/paper/Robust-Ensemble-Forecasting.pdf)
 
 **Examples:** two runnable notebooks, daily and weekly, with their results saved
 so they read on GitHub — see [`examples/`](examples/).
@@ -283,8 +287,9 @@ the failure modes that produced them — is in
 ## Documentation
 
 - [`examples/`](examples/) — runnable daily and weekly notebooks, with Open-in-Colab badges
-- *Robust Ensemble Forecasting in Practice* — the research paper, on [lifesight.io](https://lifesight.io/resources/ensemble-forecasting/)
-  and as a [PDF in this repo](examples/paper/Robust-Ensemble-Forecasting.pdf)
+- *Robust Ensemble Forecasting in Practice* — the [research paper](https://github.com/lifesight/robust-ensemble-forecasting),
+  the [white paper](https://lifesight.io/resources/ensemble-forecasting/), and a
+  [PDF in this repo](examples/paper/Robust-Ensemble-Forecasting.pdf)
 - [`docs/installation.md`](docs/installation.md) — install & dependencies
 - [`docs/quickstart.md`](docs/quickstart.md) — end-to-end usage
 - [`docs/supported_models.md`](docs/supported_models.md) — per-model behaviour
