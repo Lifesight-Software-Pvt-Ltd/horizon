@@ -25,7 +25,8 @@ commercial series from 65 organisations, and finds that a per-period trimmed
 mean matched the best single model without having to identify it.
 
 - [Research paper repository](https://github.com/lifesight/robust-ensemble-forecasting) — the paper with
-  its data, forecasts and the code that reproduces every table and figure
+  its data, forecasts and the code that reproduces every table and figure, archived on Zenodo as
+  [doi:10.5281/zenodo.23387858](https://doi.org/10.5281/zenodo.23387858)
 - [White paper](https://lifesight.io/resources/ensemble-forecasting/) on lifesight.io
 - [PDF in this repo](examples/paper/Robust-Ensemble-Forecasting.pdf)
 

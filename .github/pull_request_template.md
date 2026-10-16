@@ -20,6 +20,8 @@ For a feature: what it makes possible that was not possible before.
 - [ ] New behaviour has real tests (a bug fix has a test that fails without it)
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`, if a user would notice
 - [ ] `docs/` updated, if this changes documented behaviour or a design decision
+- [ ] `examples/` notebooks still run and match, if this changes anything they
+      call or show <!-- delete if not applicable -->
 - [ ] Verified against a real dataset, if this touches feature engineering or
       model behaviour <!-- delete if not applicable -->
 

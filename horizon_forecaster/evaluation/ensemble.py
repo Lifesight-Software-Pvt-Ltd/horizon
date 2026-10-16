@@ -75,7 +75,7 @@ import numpy as np
 import pandas as pd
 
 from horizon_forecaster.evaluation.metrics import MapeResult, mape
-from horizon_forecaster.exceptions import ThresholdRejectionError
+from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejectionError
 
 # Every combination rule this module can apply. Order matters only for
 # presentation (it is the order build_ensembles() returns them in when
@@ -182,9 +182,23 @@ def as_ensemble_dict(
     """
     if ensemble is None:
         return {}
+    if isinstance(ensemble, EnsembleResult):
+        return {ensemble.method: ensemble}
     if isinstance(ensemble, dict):
-        return ensemble
-    return {ensemble.method: ensemble}
+        wrong = {
+            k: type(v).__name__ for k, v in ensemble.items() if not isinstance(v, EnsembleResult)
+        }
+        if not wrong:
+            return ensemble
+        detail = f"its values {wrong} are not EnsembleResults"
+    else:
+        detail = f"got {type(ensemble).__name__}"
+    raise InvalidConfigError(
+        f"ensemble must be forecaster.evaluate_ensemble or forecaster.forecast_ensemble (a "
+        f"dict of method name to EnsembleResult), a single EnsembleResult, or None; {detail}.",
+        param_name="ensemble",
+        provided_value=detail,
+    )
 
 
 def _align_members(
@@ -219,7 +233,7 @@ def _align_members(
 
         aligned = aligned.merge(model_df, on="ds", how="inner")
         if len(aligned) != expected_rows:
-            raise ValueError(
+            raise InvalidConfigError(
                 f"Cannot build ensemble: '{model_name}' predictions don't share the "
                 f"same 'ds' values as the other member(s) ({len(aligned)} aligned "
                 f"rows vs. {expected_rows} expected)."
@@ -239,7 +253,7 @@ def _compute_weights(member_mapes: Dict[str, float], weighting: str) -> Dict[str
         total = sum(inverse.values())
         return {name: v / total for name, v in inverse.items()}
 
-    raise ValueError(
+    raise InvalidConfigError(
         f"Unknown weighting strategy: '{weighting}'. Expected one of {WEIGHTING_STRATEGIES}."
     )
 
@@ -454,7 +468,7 @@ def build_ensemble(
         values between models) raise.
     """
     if method not in ENSEMBLE_METHODS:
-        raise ValueError(
+        raise InvalidConfigError(
             f"Unknown ensemble method: '{method}'. Expected one of {ENSEMBLE_METHODS}."
         )
 
@@ -481,7 +495,7 @@ def build_ensemble(
     if actuals is not None:
         merged_actuals = combined_df.merge(actuals[["ds", "y"]], on="ds", how="inner")
         if len(merged_actuals) != len(combined_df):
-            raise ValueError(
+            raise InvalidConfigError(
                 f"Cannot score ensemble MAPE: 'actuals' don't share the same 'ds' "
                 f"values as the combined ensemble ({len(merged_actuals)} aligned rows "
                 f"vs. {len(combined_df)} expected)."

@@ -48,6 +48,13 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 import pandas as pd
 
 from horizon_forecaster.evaluation.ensemble import as_ensemble_dict
+from horizon_forecaster.utils import (
+    check_history,
+    check_optional_number,
+    check_results_dict,
+    check_score_dict,
+    validate_mape_threshold,
+)
 
 if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy stack)
     from horizon_forecaster.evaluation.ensemble import EnsembleResult
@@ -106,6 +113,7 @@ def build_per_model_forecast_table(
     get NaN in those columns). Returns a header-only DataFrame when
     forecast_results is empty.
     """
+    check_results_dict(forecast_results, "forecast", "build_per_model_forecast_table")
     if not forecast_results:
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
 
@@ -159,6 +167,10 @@ def choose_best_model(
 
     Returns (best_model_or_None, {model: reason}).
     """
+    check_results_dict(forecast_results, "forecast", "choose_best_model")
+    check_score_dict(per_model_validation_mape, "per_model_validation_mape", "choose_best_model")
+    check_score_dict(per_model_mape, "per_model_mape", "choose_best_model")
+    mape_threshold = validate_mape_threshold(mape_threshold)
     checks: Dict[str, str] = {}
     eligible: Dict[str, float] = {}
     validation = per_model_validation_mape or {}
@@ -221,6 +233,7 @@ def build_best_model_forecast_table(
     warning saying why, when no model qualifies; the ensemble files are
     unaffected.
     """
+    check_results_dict(forecast_results, "forecast", "build_best_model_forecast_table")
     if not forecast_results:
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
     if per_model_validation_mape is None:
@@ -286,6 +299,11 @@ def build_model_summary_table(
     there is no weight, and filling in an equal share would imply an
     averaging that did not happen.
     """
+    check_score_dict(per_model_mape, "per_model_mape", "build_model_summary_table")
+    check_score_dict(
+        per_model_validation_mape, "per_model_validation_mape", "build_model_summary_table"
+    )
+    check_optional_number(ensemble_mape, "ensemble_mape", "build_model_summary_table")
     ensembles = as_ensemble_dict(ensemble)
     per_model_mape = per_model_mape or {}
     per_model_validation_mape = per_model_validation_mape or {}
@@ -445,6 +463,11 @@ def export_forecast_csvs(
         {"final_ensemble_<method>": path, "final_best_model": path,
         "per_model": path, "rejected": path, "model_summary": path}.
     """
+    check_results_dict(forecast_results, "forecast", "export_forecast_csvs")
+    check_score_dict(per_model_mape, "per_model_mape", "export_forecast_csvs")
+    check_score_dict(per_model_validation_mape, "per_model_validation_mape", "export_forecast_csvs")
+    check_optional_number(ensemble_mape, "ensemble_mape", "export_forecast_csvs")
+    mape_threshold = validate_mape_threshold(mape_threshold)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     ensembles = as_ensemble_dict(ensemble)
@@ -561,6 +584,11 @@ def export_forecast(
         three overlays and three ensemble figures, each against the same
         models -- not one chart that silently shows only the first rule.
     """
+    check_results_dict(forecast_results, "forecast", "export_forecast")
+    if save_plots:
+        # Before any file is written, so a bad history doesn't leave the
+        # CSVs on disk without their charts.
+        check_history(history, date_column, target_column, "export_forecast")
     written = export_forecast_csvs(
         forecast_results,
         ensemble,

@@ -8,6 +8,7 @@ they operate purely on pandas DataFrames/Series and raw config values.
 import datetime
 import numbers
 import warnings
+from collections.abc import Iterable, Mapping
 from typing import List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
@@ -386,6 +387,20 @@ def parse_driver_column(
     values = pd.Series(values).reset_index(drop=True)
     if pd.api.types.is_bool_dtype(values):
         return values.astype(int)
+    if pd.api.types.is_complex_dtype(values):
+        raise InvalidConfigError(
+            f"'{column_name}' holds complex numbers. Every column a model uses must hold "
+            f"real numbers.",
+            param_name=column_name,
+            provided_value=str(values.dtype),
+        )
+    if pd.api.types.is_datetime64_any_dtype(values) or pd.api.types.is_timedelta64_dtype(values):
+        raise InvalidConfigError(
+            f"'{column_name}' holds dates or durations ({values.dtype}), not numbers. Only the "
+            f"date column may hold dates; turn this column into numbers first, or leave it out.",
+            param_name=column_name,
+            provided_value=str(values.dtype),
+        )
     if pd.api.types.is_numeric_dtype(values):
         return values
 
@@ -440,6 +455,27 @@ def parse_driver_column(
     raise InvalidConfigError(message, param_name=column_name, provided_value=distinct[:6])
 
 
+_MAX_DATE_EXAMPLES = 3
+
+
+def describe_rows(dates: Optional[pd.Series], mask: np.ndarray) -> str:
+    """
+    Name the rows picked by `mask`: their dates when `dates` (aligned with
+    the mask) has them, else 1-based row numbers. At most three are listed,
+    then "and N more".
+    """
+    positions = np.flatnonzero(mask)
+    shown = []
+    for pos in positions[:_MAX_DATE_EXAMPLES]:
+        when = None if dates is None else dates.iloc[pos]
+        if when is None or pd.isna(when):
+            shown.append(f"row {pos + 1}")
+        else:
+            shown.append(f"{pd.Timestamp(when):%Y-%m-%d}")
+    more = len(positions) - _MAX_DATE_EXAMPLES
+    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+
+
 def validate_no_missing_values(
     df: pd.DataFrame,
     date_column: str,
@@ -447,17 +483,26 @@ def validate_no_missing_values(
     independent_columns: Optional[List[str]] = None,
 ) -> None:
     """
-    Hard-fail if ANY cell of the data used for training/testing is missing.
+    Hard-fail if ANY cell of the data used for training/testing is unusable.
 
-    Every value in the date column, the target column, and each independent
-    column that is actually used must be present -- a single NaN, NaT, or
-    non-numeric entry raises InvalidConfigError. Missing data is NOT dropped or
-    imputed: forecasting requires complete input, so the caller must supply it
-    (project convention -- fail loudly rather than silently forecasting on a
-    quietly-shrunk or gap-filled series).
+    Every value in the date column, the target column, and each listed
+    independent column must be present, and every target and driver value
+    must be a finite number -- a single NaN, NaT, non-numeric entry, inf or
+    -inf raises InvalidConfigError. Nothing is dropped or imputed: the caller
+    must supply complete data (project convention -- fail loudly rather than
+    silently forecasting on a quietly-shrunk or gap-filled series).
 
-    Columns present in the DataFrame but not used (i.e. not the date, target,
-    or a surviving independent column) are ignored.
+    inf is rejected like a blank because no model handles it, and each fails
+    differently: Prophet, CatBoost and PyMC drop out, SARIMAX scores NaN (or,
+    for -inf, which its log transform turns into a gap, a normal-looking
+    score), and NeuralProphet skips the row -- a degraded ensemble that still
+    looks like a forecast.
+
+    The message names the dates of the bad values (the first three per
+    column), or the row numbers where the date itself is unreadable.
+    `provided_value` is {column: number of bad values}.
+
+    Columns present in the DataFrame but not listed are ignored.
     """
     independent_columns = independent_columns or []
 
@@ -474,25 +519,48 @@ def validate_no_missing_values(
             provided_value=missing_columns,
         )
 
-    problems = {}
+    counts = {}
+    problems = []
 
-    n_bad_dates = int(pd.to_datetime(df[date_column], errors="coerce").isna().sum())
-    if n_bad_dates:
-        problems[date_column] = n_bad_dates
+    dates = pd.to_datetime(df[date_column], errors="coerce").reset_index(drop=True)
+    bad_dates = dates.isna().to_numpy()
+    if bad_dates.any():
+        counts[date_column] = int(bad_dates.sum())
+        where = "every row" if bad_dates.all() else describe_rows(None, bad_dates)
+        problems.append(f"'{date_column}' is blank or not a date in {where}")
 
     for col in [target_column, *independent_columns]:
-        n_missing = int(pd.to_numeric(df[col], errors="coerce").isna().sum())
-        if n_missing:
-            problems[col] = n_missing
+        raw = df[col].reset_index(drop=True)
+        if pd.api.types.is_complex_dtype(raw):
+            counts[col] = len(raw)
+            problems.append(f"'{col}' holds complex numbers")
+            continue
+        values = pd.to_numeric(raw, errors="coerce")
+        blank = (raw.isna() | raw.map(lambda v: isinstance(v, str) and not v.strip())).to_numpy()
+        not_number = values.isna().to_numpy() & ~blank
+        infinite = np.isinf(values.to_numpy(dtype=float))
+        for mask, what in (
+            (blank, "blank"),
+            (not_number, "not a number"),
+            (infinite, "infinite"),
+        ):
+            if mask.all() and len(mask) > 1:
+                problems.append(f"'{col}' is {what} in every row")
+            elif mask.any():
+                problems.append(f"'{col}' is {what} for {describe_rows(dates, mask)}")
+        n_bad = int((blank | not_number | infinite).sum())
+        if n_bad:
+            counts[col] = n_bad
 
     if problems:
         raise InvalidConfigError(
-            f"The data has missing or non-numeric values in column(s) used for "
-            f"training/testing: {problems}. Every cell of the date, target and "
-            f"independent columns must be present -- clean or impute the data "
-            f"before forecasting (missing values are not dropped automatically).",
+            f"The data has values the models cannot use: {'; '.join(problems)}. Every value "
+            f"of the date, target and independent columns must be present, and every target "
+            f"and driver value a finite number -- clean or impute the data before "
+            f"forecasting (blank and infinite values are not dropped or filled in "
+            f"automatically).",
             param_name="raw_df",
-            provided_value=problems,
+            provided_value=counts,
         )
 
 
@@ -568,6 +636,12 @@ def validate_frequency(freq: str) -> str:
     Validate a user-declared frequency string against supported values.
     Case-insensitive; returns the normalized lowercase value.
     """
+    if not isinstance(freq, str):
+        raise UnsupportedFrequencyError(
+            f"frequency must be one of {', '.join(repr(f) for f in SUPPORTED_FREQUENCIES)} "
+            f"(got {freq!r}).",
+            provided_frequency=freq,
+        )
     normalized = freq.strip().lower()
     if normalized not in SUPPORTED_FREQUENCIES:
         raise UnsupportedFrequencyError(
@@ -576,6 +650,35 @@ def validate_frequency(freq: str) -> str:
             provided_frequency=freq,
         )
     return normalized
+
+
+def as_name_list(value, param_name: str) -> Optional[list]:
+    """
+    Read a column-or-model-names argument: None stays None, a single name
+    becomes a one-item list (as ensemble_method already allows), and any
+    other collection of names (list, tuple, set, pandas Index, 1-D array)
+    becomes a list. Anything else raises InvalidConfigError.
+
+    A bare string used to be iterated letter by letter, so
+    independent_columns="spend" asked for the columns 's', 'p', 'e', ...
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, np.ndarray) and value.ndim != 1:
+        raise InvalidConfigError(
+            f"{param_name} must be a list of names (got a {value.ndim}-D array).",
+            param_name=param_name,
+            provided_value=value,
+        )
+    if isinstance(value, Iterable) and not isinstance(value, (Mapping, pd.DataFrame, bytes)):
+        return list(value)
+    raise InvalidConfigError(
+        f"{param_name} must be a name or a list of names (got {type(value).__name__}).",
+        param_name=param_name,
+        provided_value=value,
+    )
 
 
 def validate_training_size(training_size: float) -> float:
@@ -818,6 +921,18 @@ def validate_mape_threshold(mape_threshold: Optional[float]) -> Optional[float]:
     if mape_threshold is None:
         return None
 
+    # A number, checked first: "40" used to fail later with a bare TypeError
+    # from the comparison below, and in the exporters it silently emptied
+    # model_summary.csv. bool is excluded because it is an int subclass.
+    if isinstance(mape_threshold, bool) or not isinstance(mape_threshold, numbers.Real):
+        raise InvalidConfigError(
+            f"mape_threshold must be a number between {MAPE_THRESHOLD_MIN:g} and "
+            f"{MAPE_THRESHOLD_MAX:g}, or None for no screening (got {mape_threshold!r}).",
+            param_name="mape_threshold",
+            provided_value=mape_threshold,
+            valid_range=(MAPE_THRESHOLD_MIN, MAPE_THRESHOLD_MAX),
+        )
+
     if not (MAPE_THRESHOLD_MIN <= mape_threshold <= MAPE_THRESHOLD_MAX):
         raise InvalidConfigError(
             f"mape_threshold must be between {MAPE_THRESHOLD_MIN:g} and "
@@ -827,3 +942,114 @@ def validate_mape_threshold(mape_threshold: Optional[float]) -> Optional[float]:
             valid_range=(MAPE_THRESHOLD_MIN, MAPE_THRESHOLD_MAX),
         )
     return mape_threshold
+
+
+# ---------- argument checks for the exporters and plotting helpers ----------
+#
+# Those modules take the result dicts a forecaster returns and are
+# duck-typed (they never import forecaster.py), so a wrong argument -- the
+# evaluate() results handed to export_forecast(), a list instead of a dict,
+# EvaluationResult objects as per_model_mape -- used to surface as a raw
+# AttributeError deep inside, or, for the scores, as Python reprs written
+# into the CSV.
+
+_RESULT_KINDS = {
+    "forecast": (("forecast",), "forecaster.forecast(horizon)", "ForecastResult"),
+    "evaluation": (("test_predictions", "mape"), "forecaster.evaluate()", "EvaluationResult"),
+}
+
+
+def check_results_dict(results, kind: str, caller: str) -> None:
+    """
+    `results` must be the {model name: result} dict that evaluate() or
+    forecast() returns (kind "evaluation" / "forecast"). Raises
+    InvalidConfigError otherwise, saying which call's output is expected.
+    """
+    attrs, source, cls = _RESULT_KINDS[kind]
+    expected = f"{caller} expects the dict returned by {source} ({{model name: {cls}}})"
+    if not isinstance(results, Mapping):
+        raise InvalidConfigError(
+            f"{expected}, got {type(results).__name__}.",
+            param_name=f"{kind}_results",
+            provided_value=type(results).__name__,
+        )
+    wrong = {name: r for name, r in results.items() if not all(hasattr(r, a) for a in attrs)}
+    if not wrong:
+        return
+    sample = next(iter(wrong.values()))
+    other = next(
+        (
+            other_source
+            for other_kind, (other_attrs, other_source, _) in _RESULT_KINDS.items()
+            if other_kind != kind and all(hasattr(sample, a) for a in other_attrs)
+        ),
+        None,
+    )
+    hint = f" These look like the results of {other} instead." if other else ""
+    raise InvalidConfigError(
+        f"{expected}, but {sorted(map(str, wrong))} hold {type(sample).__name__}.{hint}",
+        param_name=f"{kind}_results",
+        provided_value=type(sample).__name__,
+    )
+
+
+def check_score_dict(scores, param_name: str, caller: str) -> None:
+    """
+    `scores` must be None or a {model name: number} dict (None or NaN for
+    a model without a score). Raises InvalidConfigError otherwise.
+    """
+    if scores is None:
+        return
+    example = "{m: r.mape.value for m, r in forecaster.evaluate().items()}"
+    if not isinstance(scores, Mapping):
+        raise InvalidConfigError(
+            f"{caller}: {param_name} must be a dict of model name to number, e.g. {example} "
+            f"(got {type(scores).__name__}).",
+            param_name=param_name,
+            provided_value=type(scores).__name__,
+        )
+    bad = {
+        name: type(v).__name__
+        for name, v in scores.items()
+        if v is not None and (isinstance(v, bool) or not isinstance(v, numbers.Real))
+    }
+    if bad:
+        raise InvalidConfigError(
+            f"{caller}: {param_name} must map each model to a number, but {bad} are not "
+            f"numbers. Build it from the scores, e.g. {example}.",
+            param_name=param_name,
+            provided_value=bad,
+        )
+
+
+def check_optional_number(value, param_name: str, caller: str) -> None:
+    """`value` must be None or a real number."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise InvalidConfigError(
+            f"{caller}: {param_name} must be a number or None (got {type(value).__name__}).",
+            param_name=param_name,
+            provided_value=type(value).__name__,
+        )
+
+
+def check_history(history, date_column, target_column, caller: str) -> None:
+    """`history`, when given, must be a DataFrame holding the two named columns."""
+    if history is None:
+        return
+    if not isinstance(history, pd.DataFrame):
+        raise InvalidConfigError(
+            f"{caller}: history must be a pandas DataFrame (got {type(history).__name__}).",
+            param_name="history",
+            provided_value=type(history).__name__,
+        )
+    missing = [c for c in (date_column, target_column) if c not in history.columns]
+    if missing:
+        raise InvalidConfigError(
+            f"{caller}: history has no column(s) {missing}. Pass date_column= and "
+            f"target_column= naming its date and target columns (they default to 'ds' and "
+            f"'y'). Its columns are {list(history.columns)}.",
+            param_name="history",
+            provided_value=missing,
+        )

@@ -86,7 +86,15 @@ class AllModelsRejectedError(HorizonForecasterError):
         super().__init__(message)
 
 
-class InvalidConfigError(HorizonForecasterError):
+class InvalidConfigError(HorizonForecasterError, ValueError):
+    """
+    A bad argument or bad input data.
+
+    Also a ValueError: in 1.0.0 the metrics, the ensemble builders and the
+    plotting helpers raised plain ValueErrors, and code that catches
+    ValueError around them keeps working.
+    """
+
     def __init__(
         self,
         message: str,

@@ -203,6 +203,12 @@ actually needed them.
   actually broke, how it was diagnosed, and what confirmed the fix — the
   entries in 1.0.0 set the level of detail. Purely internal refactoring needs
   no entry, but still needs test coverage.
+- If you changed anything the example notebooks call or show — a parameter,
+  a default, an exported column, a warning — check that the notebooks in
+  `examples/` still run (`FAST = True` takes a few minutes) and update their
+  code and text to match. Commit the code change without re-executed outputs:
+  the saved outputs come from a full `FAST = False` run, which the
+  maintainers refresh.
 - Substantial design decisions go in `docs/design_notes.md`, in the relevant
   section, written for someone who was not in the room.
 - If you touched feature engineering or model behaviour, verify against a real

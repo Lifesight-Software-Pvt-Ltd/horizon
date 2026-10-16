@@ -63,6 +63,24 @@ class SARIMAXWrapper(BaseModel):
     model_name = "sarimax"
 
     _FREQUENCY_MIN_ROWS_DEFAULTS = {"daily": 35, "weekly": 18}
+    # Every key __init__ reads from params; keep in step with it.
+    accepted_params = frozenset(
+        {
+            "p",
+            "q",
+            "P",
+            "Q",
+            "fourier_order_annual",
+            "use_seasonal",
+            "seasonal_period",
+            "alpha",
+            "log_clip_headroom",
+            "clip_anchor_quantile",
+            "bias_correction",
+            "enforce_stationarity_final",
+            "maxiter_final",
+        }
+    )
     _FALLBACK_MIN_ROWS = 20
 
     def __init__(

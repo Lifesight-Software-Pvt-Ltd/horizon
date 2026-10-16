@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from horizon_forecaster.exceptions import InvalidConfigError
+
 
 @dataclass
 class MapeResult:
@@ -68,14 +70,14 @@ def mape(
         12.5%), .excluded_zero_actual_count, and .total_count.
 
     Raises:
-        ValueError: if y_true and y_pred have different lengths, or if
+        InvalidConfigError (a ValueError): if y_true and y_pred have different lengths, or if
             zero_handling is not a recognized strategy.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
 
     if y_true.shape != y_pred.shape:
-        raise ValueError(
+        raise InvalidConfigError(
             f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
@@ -114,7 +116,7 @@ def mape(
         )
 
     else:
-        raise ValueError(
+        raise InvalidConfigError(
             f"Unknown zero_handling strategy: '{zero_handling}'. "
             f"Expected 'exclude' or 'epsilon'."
         )
@@ -133,7 +135,7 @@ def wape(y_true, y_pred) -> float:
     y_pred = np.asarray(y_pred, dtype=float)
 
     if y_true.shape != y_pred.shape:
-        raise ValueError(
+        raise InvalidConfigError(
             f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
@@ -152,7 +154,7 @@ def rmse(y_true, y_pred) -> float:
     y_pred = np.asarray(y_pred, dtype=float)
 
     if y_true.shape != y_pred.shape:
-        raise ValueError(
+        raise InvalidConfigError(
             f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 
@@ -167,7 +169,7 @@ def mae(y_true, y_pred) -> float:
     y_pred = np.asarray(y_pred, dtype=float)
 
     if y_true.shape != y_pred.shape:
-        raise ValueError(
+        raise InvalidConfigError(
             f"y_true and y_pred must have the same shape. " f"Got {y_true.shape} vs {y_pred.shape}."
         )
 

@@ -18,6 +18,7 @@ from horizon_forecaster.plotting import (
 )
 from horizon_forecaster.evaluation.ensemble import EnsembleResult
 from horizon_forecaster.evaluation.metrics import MapeResult
+from horizon_forecaster.exceptions import InvalidConfigError
 
 
 @pytest.fixture(autouse=True)
@@ -555,3 +556,31 @@ def test_no_ensemble_note_is_shown_through_the_forecaster_dict():
     results = {"prophet": make_eval_result(5.0)}
     ax = _only(plot_evaluation(results, {"trimmed": make_ensemble(combined=False)}))
     assert _has_no_ensemble_note(ax)
+
+
+# ---------- argument checks ----------
+
+
+def test_plots_say_which_results_they_expect():
+    forecast_results = {"prophet": make_forecast_result()}
+    evaluation_results = {"prophet": make_eval_result(5.0)}
+    with pytest.raises(InvalidConfigError, match=r"plot_forecast expects .*forecaster\.forecast"):
+        plot_forecast(evaluation_results)
+    with pytest.raises(InvalidConfigError, match=r"plot_evaluation expects .*forecaster\.evaluate"):
+        plot_evaluation(forecast_results)
+    with pytest.raises(InvalidConfigError, match="plot_model_comparison expects"):
+        plot_model_comparison(forecast_results)
+    with pytest.raises(InvalidConfigError, match="got list"):
+        plot_forecast_per_model([make_forecast_result()])
+
+
+def test_plot_forecast_names_missing_history_columns():
+    history = pd.DataFrame({"date": _ds(3), "orders": [1, 2, 3]})
+    with pytest.raises(InvalidConfigError, match=r"history has no column\(s\) \['ds', 'y'\]"):
+        plot_forecast({"prophet": make_forecast_result()}, history=history)
+
+
+def test_empty_results_raise_the_librarys_error_which_is_still_a_value_error():
+    with pytest.raises(InvalidConfigError, match="nothing to plot"):
+        plot_evaluation({})
+    assert issubclass(InvalidConfigError, ValueError)

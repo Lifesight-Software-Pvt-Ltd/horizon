@@ -6,6 +6,7 @@ import numpy as np
 from horizon_forecaster.exceptions import InvalidConfigError, UnsupportedFrequencyError
 from horizon_forecaster.utils import (
     ACCEPTED_DATE_FORMATS,
+    as_name_list,
     describe_date_spacing,
     find_duplicate_dates,
     parse_date_column,
@@ -64,6 +65,34 @@ def test_validate_no_missing_raises_on_missing_date():
     df.loc[0, "date"] = None
     with pytest.raises(InvalidConfigError):
         validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+@pytest.mark.parametrize("bad", [np.inf, -np.inf])
+def test_validate_no_missing_raises_on_infinite_values(bad):
+    df = _complete_df()
+    df.loc[5, "spend"] = bad
+    with pytest.raises(InvalidConfigError, match="'spend' is infinite for 2022-01-06") as info:
+        validate_no_missing_values(df, "date", "y", ["spend"])
+    assert info.value.provided_value == {"spend": 1}
+
+
+def test_validate_no_missing_counts_blank_text_as_blank():
+    df = _complete_df()
+    df["spend"] = df["spend"].astype(object)
+    df.loc[5, "spend"] = "  "
+    with pytest.raises(InvalidConfigError, match="'spend' is blank for 2022-01-06"):
+        validate_no_missing_values(df, "date", "y", ["spend"])
+
+
+def test_validate_no_missing_names_rows_when_the_date_is_unreadable():
+    df = _complete_df()
+    df["date"] = df["date"].astype(object)
+    df.loc[0, "date"] = None
+    df.loc[0, "y"] = None
+    with pytest.raises(InvalidConfigError) as info:
+        validate_no_missing_values(df, "date", "y", ["spend"])
+    assert "'date' is blank or not a date in row 1" in str(info.value)
+    assert "'y' is blank for row 1" in str(info.value)
 
 
 def test_validate_no_missing_ignores_unused_columns():
@@ -147,6 +176,12 @@ def test_infer_frequency_raises_on_insufficient_dates():
 
 
 # ---------- validate_frequency ----------
+
+
+@pytest.mark.parametrize("freq", [None, 7, ["daily"]])
+def test_validate_frequency_rejects_non_text(freq):
+    with pytest.raises(UnsupportedFrequencyError, match="frequency must be one of"):
+        validate_frequency(freq)
 
 
 def test_validate_frequency_accepts_daily_and_weekly_case_insensitive():
@@ -459,3 +494,33 @@ def test_parse_driver_rejects_text_among_numbers_with_its_date():
     dates = pd.Series(pd.date_range("2024-03-01", periods=3))
     with pytest.raises(InvalidConfigError, match=r"\['1,200'\] on 2024-03-02"):
         parse_driver_column(pd.Series(["100", "1,200", "300"]), "spend", dates=dates)
+
+
+# ---------- as_name_list ----------
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        ("spend", ["spend"]),
+        (["a", "b"], ["a", "b"]),
+        (("a",), ["a"]),
+        (pd.Index(["a"]), ["a"]),
+        (np.array(["a", "b"]), ["a", "b"]),
+    ],
+)
+def test_as_name_list_reads_names(value, expected):
+    assert as_name_list(value, "independent_columns") == expected
+
+
+@pytest.mark.parametrize("value", [5, {"a": 1}, np.array([["a"]])])
+def test_as_name_list_rejects_non_names(value):
+    with pytest.raises(InvalidConfigError, match="independent_columns must be"):
+        as_name_list(value, "independent_columns")
+
+
+def test_validate_mape_threshold_rejects_text_and_bool():
+    for bad in ("40", True):
+        with pytest.raises(InvalidConfigError, match="mape_threshold must be a number"):
+            validate_mape_threshold(bad)

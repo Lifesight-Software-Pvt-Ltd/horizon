@@ -96,6 +96,31 @@ _NOISY_LOGGERS = (
 _NON_CONSTRUCTOR_PARAMS = ("freq",)
 
 
+def _import_neuralprophet():
+    """
+    Import NeuralProphet without letting it reroute the caller's warnings.
+
+    neuralprophet/__init__.py calls logging.captureWarnings(True) at import
+    time, which replaces warnings.showwarning for the whole process: from
+    then on every warning -- Horizon's own included -- prints as a log line
+    ("WARNING - (py.warnings._showwarnmsg) - ..."), and a
+    warnings.catch_warnings(record=True) or pytest.warns block that was
+    open when NeuralProphet was first imported stops recording. If the
+    import switched capture on, it is switched straight off again, which
+    puts back exactly the handler that was there before. A caller who had
+    turned capture on themselves is left alone (the import changes nothing
+    then).
+
+    Every NeuralProphet import in this module goes through here.
+    """
+    before = warnings.showwarning
+    import neuralprophet
+
+    if warnings.showwarning is not before:
+        logging.captureWarnings(False)
+    return neuralprophet
+
+
 class NeuralProphetWrapper(BaseModel):
     """Wraps NeuralProphet to conform to the BaseModel contract."""
 
@@ -155,12 +180,12 @@ class NeuralProphetWrapper(BaseModel):
             # doesn't require NeuralProphet's heavy torch/Lightning chain
             # unless this specific wrapper is actually used -- same pattern
             # as ProphetWrapper's cmdstanpy-backed import.
-            from neuralprophet import NeuralProphet, set_random_seed
+            neuralprophet = _import_neuralprophet()
 
             self._silence_loggers()
-            set_random_seed(self.random_seed)
+            neuralprophet.set_random_seed(self.random_seed)
 
-            model = NeuralProphet(**constructor_params)
+            model = neuralprophet.NeuralProphet(**constructor_params)
             for col in regressor_columns:
                 model.add_future_regressor(col)
 
@@ -289,7 +314,7 @@ class NeuralProphetWrapper(BaseModel):
         """
         import pickle  # nosec B403 -- model save/load, trusted files only
 
-        from neuralprophet import save as np_save
+        np_save = _import_neuralprophet().save
 
         self._check_is_fitted()
 
@@ -368,7 +393,7 @@ class NeuralProphetWrapper(BaseModel):
         is why tests/test_neuralprophet_compat.py stubs torch to exercise it
         on any version.
         """
-        from neuralprophet import load as np_load
+        np_load = _import_neuralprophet().load
 
         try:
             return np_load(path)

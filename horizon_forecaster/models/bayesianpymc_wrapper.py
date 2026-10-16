@@ -106,6 +106,30 @@ class BayesianPyMCWrapper(BaseModel):
     model_name = "bayesianpymc"
 
     _FREQUENCY_MIN_ROWS_DEFAULTS = {"daily": 35, "weekly": 18}
+    # Every key __init__ reads from params; keep in step with it.
+    accepted_params = frozenset(
+        {
+            "n_fourier",
+            "target_accept",
+            "draws",
+            "tune",
+            "chains",
+            "cores",
+            "max_treedepth",
+            "init",
+            "slope_sigma",
+            "intercept_sigma",
+            "beta_fourier_sigma",
+            "driver_coef_sigma",
+            "flag_coef_sigma",
+            "sigma_sigma",
+            "nu_alpha",
+            "nu_beta",
+            "ci_lower_pct",
+            "ci_upper_pct",
+            "use_short_seasonal",
+        }
+    )
     _FALLBACK_MIN_ROWS = 20
 
     def __init__(

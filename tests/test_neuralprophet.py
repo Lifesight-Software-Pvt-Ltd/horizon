@@ -226,3 +226,37 @@ def test_neuralprophet_is_registered_and_flows_through_forecaster():
 
     forecasts = f.forecast(horizon=7)
     assert len(forecasts["neuralprophet"].forecast) == 7
+
+
+# ---------- NeuralProphet's import must not reroute the caller's warnings ----------
+
+
+def test_first_import_inside_a_warning_recorder_still_records_horizon_warnings():
+    """
+    neuralprophet/__init__.py calls logging.captureWarnings(True). Before the
+    fix, a catch_warnings(record=True) (or pytest.warns) block that was open
+    when NeuralProphet was first imported stopped recording, and every later
+    warning in the process printed as a log line. Run in a fresh interpreter:
+    NeuralProphet is already imported in this one.
+    """
+    import subprocess
+    import sys
+
+    script = (
+        "import warnings, io, contextlib\n"
+        "from horizon_forecaster.models.neuralprophet_wrapper import _import_neuralprophet\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    _import_neuralprophet()\n"
+        "    warnings.warn('HORIZON-TEST')\n"
+        "assert any('HORIZON-TEST' in str(w.message) for w in caught), 'not recorded'\n"
+        "buf = io.StringIO()\n"
+        "with contextlib.redirect_stderr(buf):\n"
+        "    warnings.warn('AFTER')\n"
+        "assert 'UserWarning: AFTER' in buf.getvalue(), buf.getvalue()\n"
+        "assert 'py.warnings' not in buf.getvalue(), buf.getvalue()\n"
+    )
+    result = subprocess.run(  # nosec B603 -- fixed script, current interpreter
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, result.stderr[-2000:]

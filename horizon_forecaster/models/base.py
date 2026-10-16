@@ -19,7 +19,7 @@ Exception contract (must be honored by every subclass):
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, FrozenSet, Optional
 
 import pandas as pd
 
@@ -43,9 +43,17 @@ class BaseModel(ABC):
             set by each subclass. Used in exception messages and in the
             rejected-models report.
         is_fitted: True once fit() has completed successfully.
+        accepted_params: the hyperparameter names this wrapper reads, for
+            wrappers that read their params one by one (SARIMAX, PyMC):
+            there an unknown key would otherwise be ignored without a
+            word, so the forecaster rejects it up front. None for the
+            wrappers that pass params straight to their library's
+            constructor (Prophet, CatBoost, NeuralProphet), which rejects
+            unknown names itself.
     """
 
     model_name: str = "base"
+    accepted_params: Optional[FrozenSet[str]] = None
 
     def __init__(self, frequency: str, params: Optional[Dict[str, Any]] = None):
         self.frequency = frequency

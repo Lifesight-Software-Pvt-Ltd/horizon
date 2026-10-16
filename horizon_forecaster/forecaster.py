@@ -20,8 +20,10 @@ the shared contract (BaseModel/BaseAdapter) has a gap -- fix the
 contract, rather than special-casing the orchestrator.
 """
 
+import difflib
 import numbers
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -66,6 +68,7 @@ from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
 from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
 from horizon_forecaster.utils import (
     MAX_CONTINUOUS_GAP_DAYS,
+    as_name_list,
     clean_zero_variance,
     describe_date_spacing,
     find_duplicate_dates,
@@ -124,6 +127,174 @@ MODEL_REGISTRY: Dict[str, dict] = {
     "neuralprophet": {"adapter": NeuralProphetAdapter, "wrapper": NeuralProphetWrapper},
     "bayesianpymc": {"adapter": BayesianPyMCAdapter, "wrapper": BayesianPyMCWrapper},
 }
+
+
+def _check_raw_df(raw_df) -> None:
+    """raw_df must be a DataFrame with one row of plain column names."""
+    if not isinstance(raw_df, pd.DataFrame):
+        raise InvalidConfigError(
+            f"raw_df must be a pandas DataFrame, got {type(raw_df).__name__}. Wrap it first, "
+            f"e.g. pd.DataFrame(...), with the date, target and driver columns named.",
+            param_name="raw_df",
+            provided_value=type(raw_df).__name__,
+        )
+    if isinstance(raw_df.columns, pd.MultiIndex):
+        raise InvalidConfigError(
+            f"raw_df has {raw_df.columns.nlevels} levels of column headers. Flatten them to "
+            f"one name per column first, e.g. df.columns = ['_'.join(map(str, c)) for c in "
+            f"df.columns].",
+            param_name="raw_df",
+            provided_value=raw_df.columns.nlevels,
+        )
+    if raw_df.empty and len(raw_df.columns):
+        raise InvalidConfigError(
+            "raw_df has no rows.",
+            param_name="raw_df",
+            provided_value=0,
+        )
+
+
+def _parse_target(values: pd.Series, target_column, dates: Optional[pd.Series]) -> pd.Series:
+    """
+    Read the target like a driver (numbers written as text become numbers,
+    booleans 1/0), but word any failure for a target: the driver messages
+    talk about on/off flags and categories, which a target is not.
+    """
+    try:
+        return parse_driver_column(values, target_column, dates=dates)
+    except InvalidConfigError as e:
+        if not pd.api.types.is_object_dtype(values) and not pd.api.types.is_string_dtype(values):
+            raise  # complex numbers, dates: the driver message already fits
+        text = pd.Series(values).reset_index(drop=True)
+        as_text = text.map(lambda v: v if pd.isna(v) else str(v).strip())
+        bad = as_text.notna() & (as_text != "") & pd.to_numeric(as_text, errors="coerce").isna()
+        if not bad.any():
+            raise
+        examples = list(dict.fromkeys(as_text[bad]))[:3]
+        where = ""
+        if dates is not None:
+            when = pd.Series(dates).reset_index(drop=True)[bad].iloc[0]
+            if not pd.isna(when):
+                where = f" (first on {pd.Timestamp(when):%Y-%m-%d})"
+        raise InvalidConfigError(
+            f"The target column '{target_column}' has values that aren't numbers, e.g. "
+            f"{examples}{where}. Remove thousands separators, currency signs and other text "
+            f"before passing the data.",
+            param_name="target_column",
+            provided_value=examples,
+        ) from e
+
+
+def _check_column_roles(
+    raw_df: pd.DataFrame, date_column, target_column, independent_columns: List
+) -> None:
+    """
+    Each used column plays one role, is named once in independent_columns,
+    and appears once in raw_df. Each of these used to run without complaint:
+    the date as the target, or the target as its own driver, scored a MAPE
+    of 0.0; the date as a driver gave SARIMAX 99.97%; a driver listed twice
+    made every model fail with a raw ValueError.
+    """
+    if target_column == date_column:
+        raise InvalidConfigError(
+            f"target_column and date_column are both '{target_column}'. The target is the "
+            f"numeric column to forecast; the date column holds each row's date.",
+            param_name="target_column",
+            provided_value=target_column,
+        )
+    for role, name in (("target_column", target_column), ("date_column", date_column)):
+        if name in independent_columns:
+            raise InvalidConfigError(
+                f"'{name}' is the {role.replace('_', ' ')}, so it cannot also be in "
+                f"independent_columns. "
+                + (
+                    "A model given the target as a driver just copies it, which scores a "
+                    "perfect MAPE and cannot forecast."
+                    if role == "target_column"
+                    else "Calendar effects are built from the date by every model already."
+                ),
+                param_name="independent_columns",
+                provided_value=list(independent_columns),
+            )
+    repeated = list(
+        dict.fromkeys(c for c in independent_columns if independent_columns.count(c) > 1)
+    )
+    if repeated:
+        raise InvalidConfigError(
+            f"independent_columns lists {repeated} more than once. Name each driver once.",
+            param_name="independent_columns",
+            provided_value=list(independent_columns),
+        )
+    columns = list(raw_df.columns)
+    used = [date_column, target_column, *independent_columns]
+    doubled = [c for c in used if columns.count(c) > 1]
+    if doubled:
+        raise InvalidConfigError(
+            f"raw_df has more than one column named {doubled}. Rename or drop the extra "
+            f"column(s) so each name is used once.",
+            param_name="raw_df",
+            provided_value=doubled,
+        )
+
+
+def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
+    """
+    model_params must map model names to dicts of settings. An unknown model
+    name is an error (a typo such as "neural_prophet" used to be ignored, so
+    the model ran on its defaults). For wrappers that read their settings
+    one by one (SARIMAX, PyMC -- see BaseModel.accepted_params) an unknown
+    setting is an error too: it used to be ignored while still switching off
+    the grid search, so a typo changed the result without a word. Names for
+    a known model that was not requested are allowed and unused.
+    """
+    if model_params is None:
+        return {}
+    if not isinstance(model_params, Mapping):
+        raise InvalidConfigError(
+            f"model_params must be a dict of {{model name: {{setting: value}}}}, e.g. "
+            f"{{'prophet': {{'seasonality_mode': 'multiplicative'}}}} (got "
+            f"{type(model_params).__name__}).",
+            param_name="model_params",
+            provided_value=type(model_params).__name__,
+        )
+    unknown = [m for m in model_params if m not in MODEL_REGISTRY]
+    if unknown:
+        hints = []
+        for m in unknown:
+            close = difflib.get_close_matches(str(m), list(MODEL_REGISTRY), n=1, cutoff=0.6)
+            hints.append(f"'{m}'" + (f" (did you mean '{close[0]}'?)" if close else ""))
+        raise InvalidConfigError(
+            f"model_params names unknown model(s): {', '.join(hints)}. Available models: "
+            f"{list(MODEL_REGISTRY)}.",
+            param_name="model_params",
+            provided_value=unknown,
+        )
+    for name, settings in model_params.items():
+        if settings is None:
+            continue
+        if not isinstance(settings, Mapping):
+            raise InvalidConfigError(
+                f"model_params['{name}'] must be a dict of settings, e.g. {{'{name}': "
+                f"{{...}}}} (got {type(settings).__name__}).",
+                param_name="model_params",
+                provided_value={name: settings},
+            )
+        accepted = MODEL_REGISTRY[name]["wrapper"].accepted_params
+        if accepted is None:
+            continue
+        bad = [k for k in settings if k not in accepted]
+        if bad:
+            hints = []
+            for k in bad:
+                close = difflib.get_close_matches(str(k), sorted(accepted), n=1, cutoff=0.6)
+                hints.append(f"'{k}'" + (f" (did you mean '{close[0]}'?)" if close else ""))
+            raise InvalidConfigError(
+                f"model_params['{name}'] has setting(s) {name} does not use: "
+                f"{', '.join(hints)}. Its settings are {sorted(accepted)}.",
+                param_name="model_params",
+                provided_value={name: bad},
+            )
+    return dict(model_params)
 
 
 @dataclass
@@ -437,6 +608,26 @@ class HorizonForecaster:
 
         self.models = self._validate_models(models)
 
+        # The data and the column roles, before anything reads a column:
+        # a raw_df that is not a DataFrame, a column that plays two roles
+        # (the target as a driver, the date as the target), or a name that
+        # appears twice all used to run to completion with a meaningless
+        # score or fail as a raw pandas error deep inside every model.
+        _check_raw_df(raw_df)
+        requested_independent_columns = (
+            as_name_list(independent_columns, "independent_columns") or []
+        )
+        event_columns = as_name_list(event_columns, "event_columns")
+        _check_column_roles(raw_df, date_column, target_column, requested_independent_columns)
+        if date_format is not None and not isinstance(date_format, str):
+            raise InvalidConfigError(
+                f"date_format must be a strptime format string such as '%d/%m/%Y', or None "
+                f"(got {date_format!r}).",
+                param_name="date_format",
+                provided_value=date_format,
+            )
+        model_params = _check_model_params(model_params)
+
         # Parse dates first, on a copy, so the caller's DataFrame is never
         # modified. Everything below -- sorting, the window split, frequency
         # inference, every model -- must see real dates: sorting text dates
@@ -450,46 +641,64 @@ class HorizonForecaster:
                 raw_df[date_column], date_column, date_format=date_format
             )
 
-        requested_independent_columns = independent_columns or []
-
-        # Drivers too: booleans and the on/off words in YES_NO_WORDS become
-        # 1/0, numbers written as text become numbers, and any other text
-        # raises a specific error rather than the generic "non-numeric" one.
-        # Done on a copy, before the zero-variance and missing-value checks.
+        # The target and the drivers are read the same way: booleans and the
+        # on/off words in YES_NO_WORDS become 1/0, numbers written as text
+        # become numbers, and any other text raises a specific error (with
+        # the date) rather than the generic "not a number" one. Done on a
+        # copy, before the value and zero-variance checks.
         to_parse = [
             c
-            for c in requested_independent_columns
-            if c in raw_df.columns and c not in (date_column, target_column)
+            for c in [target_column, *requested_independent_columns]
+            if c in raw_df.columns and c != date_column
         ]
         if to_parse:
             raw_df = raw_df.copy()
             dates = raw_df[date_column] if date_column in raw_df.columns else None
             for col in to_parse:
-                raw_df[col] = parse_driver_column(raw_df[col], col, dates=dates).to_numpy()
+                read = _parse_target if col == target_column else parse_driver_column
+                raw_df[col] = read(raw_df[col], col, dates=dates).to_numpy()
+
+        # Complete, finite data: a single blank, non-numeric or infinite cell
+        # in the date, the target or ANY declared driver is a hard failure --
+        # nothing is silently dropped or imputed. This runs BEFORE the
+        # zero-variance cleanup below: an all-blank driver used to count as
+        # "constant" there and vanish, while a single blank raised.
+        validate_no_missing_values(
+            raw_df, date_column, target_column, requested_independent_columns
+        )
+        self._reject_duplicate_dates(raw_df)
+
         # Kept for forecast(): a future table may name a declared driver that
         # was dropped below, which warns rather than errors.
         self._declared_independent_columns = list(requested_independent_columns)
+
+        # A declared driver with the same value in every row cannot be
+        # learned (and makes SARIMAX's exog matrix singular), so it is dropped
+        # -- with a warning, since the caller asked for it. Only declared
+        # drivers are looked at: other columns in raw_df are never used.
         cleaned_df, dropped_columns = clean_zero_variance(
-            raw_df, exclude_columns=[date_column, target_column]
+            raw_df,
+            exclude_columns=[c for c in raw_df.columns if c not in requested_independent_columns],
         )
         self.dropped_zero_variance_columns = dropped_columns
+        if dropped_columns:
+            values = ", ".join(f"'{c}' is always {raw_df[c].iloc[0]:g}" for c in dropped_columns)
+            warnings.warn(
+                f"independent_columns {dropped_columns} never change in your data ({values}), "
+                f"so no model can learn from them. They were dropped, and the models run "
+                f"without them. If they should vary, check the data.",
+                stacklevel=2,
+            )
 
         self.independent_columns = [
             c for c in requested_independent_columns if c not in dropped_columns
         ]
 
-        # Complete-data requirement: a single missing/non-numeric cell in any
-        # column used for training/testing (date, target, or a surviving
-        # independent column) is a hard failure -- missing data is never
-        # silently dropped or imputed. Done here, at construction, alongside
-        # the other dataset-level validation.
-        validate_no_missing_values(cleaned_df, date_column, target_column, self.independent_columns)
-        self._reject_duplicate_dates(cleaned_df)
-
         # event_columns (explicit 0/1 flags for the future-exog strategy). None
         # means "auto-detect flags"; a list means "these exact columns are the
         # flags, auto-detect nothing else". A listed column dropped for zero
-        # variance is silently ignored; anything else unrecognized is an error.
+        # variance is ignored (the warning above already named it); anything
+        # else unrecognized is an error.
         if event_columns is None:
             self.event_columns: Optional[List[str]] = None
         else:
@@ -542,7 +751,6 @@ class HorizonForecaster:
         # split, not the data) is buried in an AllModelsRejectedError.
         self._validate_train_size_against_model_floors()
 
-        model_params = model_params or {}
         self._use_grid_search: Dict[str, bool] = {}
         self._selected_hyperparameters: Dict[str, Optional[dict]] = {}
         for model_name in self.models:
@@ -628,6 +836,7 @@ class HorizonForecaster:
         return list(dict.fromkeys(requested))
 
     def _validate_models(self, models: Optional[List[str]]) -> List[str]:
+        models = as_name_list(models, "models")
         if models is None:
             return list(MODEL_REGISTRY.keys())
 
@@ -646,7 +855,9 @@ class HorizonForecaster:
                 param_name="models",
                 provided_value=models,
             )
-        return list(models)
+        # De-duplicate while preserving the caller's order, as
+        # ensemble_method does: a model listed twice is fitted once.
+        return list(dict.fromkeys(models))
 
     def _load_config(self, model_name: str) -> dict:
         """
@@ -1525,6 +1736,17 @@ class HorizonForecaster:
                 provided_value=horizon,
             )
         horizon = int(horizon)
+        # pandas cannot represent dates after 2262-04-11; a horizon reaching
+        # past it used to fail with a raw OutOfBoundsDatetime.
+        last_date = pd.Timestamp(self.raw_df[self.date_column].max())
+        days_per_period = 7 if self.frequency == "weekly" else 1
+        if horizon * days_per_period > (pd.Timestamp.max - last_date).days:
+            raise InvalidConfigError(
+                f"horizon={horizon} would run the forecast past {pd.Timestamp.max:%Y-%m-%d}, "
+                f"the last date pandas can represent.",
+                param_name="horizon",
+                provided_value=horizon,
+            )
 
         n_total = len(self.raw_df)
         if horizon > _HORIZON_WARNING_FRACTION * n_total:
