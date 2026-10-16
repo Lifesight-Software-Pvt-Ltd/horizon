@@ -1034,10 +1034,16 @@ def check_optional_number(value, param_name: str, caller: str) -> None:
         )
 
 
-def check_history(history, date_column, target_column, caller: str) -> None:
-    """`history`, when given, must be a DataFrame holding the two named columns."""
+def check_history(history, date_column, target_column, caller: str):
+    """
+    `history`, when given, must be a DataFrame holding the two named columns.
+    Returns it with the date column read as dates (on a copy), using the same
+    rules as the forecaster: text dates straight from a CSV used to crash the
+    plots with a raw matplotlib TypeError, because they were drawn as text
+    categories on a date axis.
+    """
     if history is None:
-        return
+        return None
     if not isinstance(history, pd.DataFrame):
         raise InvalidConfigError(
             f"{caller}: history must be a pandas DataFrame (got {type(history).__name__}).",
@@ -1053,3 +1059,8 @@ def check_history(history, date_column, target_column, caller: str) -> None:
             param_name="history",
             provided_value=missing,
         )
+    if pd.api.types.is_datetime64_any_dtype(history[date_column]):
+        return history
+    history = history.copy()
+    history[date_column] = parse_date_column(history[date_column], date_column).to_numpy()
+    return history

@@ -20,6 +20,7 @@ from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetA
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.exceptions import (
     InsufficientDataError,
+    InvalidConfigError,
     ModelPredictionError,
 )
 
@@ -260,3 +261,16 @@ def test_first_import_inside_a_warning_recorder_still_records_horizon_warnings()
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=300
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+@pytest.mark.parametrize("drop", ["learning_rate", "epochs"])
+def test_fit_requires_learning_rate_and_epochs(drop):
+    """
+    Without either, NeuralProphet runs its learning-rate finder, which fails
+    on torch 2.6+ with an UnpicklingError that says nothing about the cause.
+    """
+    train, _, _ = make_adapted()
+    params = {k: v for k, v in FAST_PARAMS.items() if k != drop}
+    model = NeuralProphetWrapper("daily", params, min_rows_required=30)
+    with pytest.raises(InvalidConfigError, match=f"missing: \\['{drop}'\\]"):
+        model.fit(train)

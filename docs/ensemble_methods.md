@@ -108,6 +108,11 @@ completely separately, and rejection never raises an exception, even if every
 model gets excluded — `evaluate()` still returns everyone's individual results
 normally; only that method's `combined` comes back `None`.
 
+Both are also warned about, once per `evaluate()` or `forecast()` call: models
+that failed (with the cause), each rule that lost requested models (and why:
+failed, above `mape_threshold`, or no validation MAPE), and, separately, any
+rule that ended up with no members and so no ensemble forecast.
+
 ### Exclusion is per method
 
 Two independent things can exclude a model, and they do not apply to every

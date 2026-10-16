@@ -41,7 +41,9 @@ from dates alone, with no dependence on the target's recent history. That is
 deliberate: it lets one batched `predict()` cover any horizon without a
 recursive per-step loop. The alternative — lag and rolling features — degrades
 badly across sudden level shifts on real data (see [`design_notes.md`](design_notes.md) §5). Non-negative clipping is data-driven (only when the training target
-was itself never negative). CatBoost-native `save()`/`load()`.
+was itself never negative). CatBoost-native `save()`/`load()`; `load()` reads the model
+file from next to the saved envelope, so the pair can be moved together. Training logs
+are not written to disk (`allow_writing_files=False`, overridable through `model_params`).
 
 ### sarimax
 
@@ -76,6 +78,10 @@ grid-searched. Design points worth knowing:
 - **Divergence guard**: if a fit saturates the log-space explosion clip across
   most of the horizon, `predict()` raises and the orchestrator drops the model
   into `evaluate_errors` rather than emitting a degenerate flat line.
+- **Negative targets**: the log-space fit cannot represent a value below -1
+  (it becomes a gap) and never forecasts below zero, so SARIMAX is left out,
+  with a warning, of any run whose target has a negative value, and listed in
+  `forecaster.skipped_models`.
 - **Exog is clamped to the training range** so an out-of-range future value
   cannot extrapolate a fitted coefficient into a divergence.
 - **Annual-collinearity warning**: if an independent column strongly tracks
@@ -91,7 +97,8 @@ Decomposition model via NeuralProphet/PyTorch Lightning. Deliberate v1 choices:
 `n_lags=0` (no autoregression, so it stays comparable to the other models and
 fits the fit-once/predict-any-horizon contract); CPU pinned and logging
 silenced so Apple-silicon (MPS) and CPU-only runs agree; `epochs` and `learning_rate`
-pinned via the grid for reproducibility; `collect_metrics: false` (required —
+pinned via the grid for reproducibility (a `model_params` override must set both: with
+either missing NeuralProphet runs its learning-rate finder, which fails on torch 2.6+); `collect_metrics: false` (required —
 enabling metrics attaches a Lightning logger that crashes `fit()` via an
 OmegaConf serialisation of the loss-function type union). No uncertainty
 bounds in v1. Torch-backed `save()`/`load()`, with a load fallback that
