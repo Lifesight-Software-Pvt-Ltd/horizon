@@ -339,7 +339,7 @@ def plot_forecast(
             `ax` is supplied for more than one combination method.
     """
     check_results_dict(forecast_results, "forecast", "plot_forecast")
-    check_history(history, date_column, target_column, "plot_forecast")
+    history = check_history(history, date_column, target_column, "plot_forecast")
     if not forecast_results:
         raise InvalidConfigError("plot_forecast: forecast_results is empty, nothing to plot.")
 
@@ -567,7 +567,7 @@ def plot_forecast_per_model(
         InvalidConfigError (a ValueError): if forecast_results is empty.
     """
     check_results_dict(forecast_results, "forecast", "plot_forecast_per_model")
-    check_history(history, date_column, target_column, "plot_forecast_per_model")
+    history = check_history(history, date_column, target_column, "plot_forecast_per_model")
     if not forecast_results:
         raise InvalidConfigError(
             "plot_forecast_per_model: forecast_results is empty, nothing to plot."
@@ -696,7 +696,7 @@ def save_forecast_plots(
         InvalidConfigError (a ValueError): if forecast_results is empty.
     """
     check_results_dict(forecast_results, "forecast", "save_forecast_plots")
-    check_history(history, date_column, target_column, "save_forecast_plots")
+    history = check_history(history, date_column, target_column, "save_forecast_plots")
     if not forecast_results:
         raise InvalidConfigError("save_forecast_plots: forecast_results is empty, nothing to save.")
 

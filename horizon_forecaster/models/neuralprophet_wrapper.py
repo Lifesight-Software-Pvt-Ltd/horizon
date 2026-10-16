@@ -67,6 +67,7 @@ import pandas as pd
 
 from horizon_forecaster.exceptions import (
     InsufficientDataError,
+    InvalidConfigError,
     ModelConvergenceError,
     ModelPredictionError,
 )
@@ -168,6 +169,20 @@ class NeuralProphetWrapper(BaseModel):
                 model_name=self.model_name,
                 required_periods=self.min_rows_required,
                 available_periods=len(train_df),
+            )
+
+        # Both pinned, always: with either left unset NeuralProphet runs its
+        # learning-rate finder, which fails on torch 2.6+ (an UnpicklingError
+        # from its torch.load of a checkpoint) and auto-sizes training, so
+        # two runs on the same data are not comparable.
+        missing = [k for k in ("learning_rate", "epochs") if self.params.get(k) is None]
+        if missing:
+            raise InvalidConfigError(
+                f"NeuralProphet needs learning_rate and epochs set (missing: {missing}); "
+                f"without them it runs its learning-rate finder, which fails on torch 2.6 and "
+                f"later. E.g. {{'learning_rate': 0.03, 'epochs': 150}}.",
+                param_name="params",
+                provided_value=missing,
             )
 
         regressor_columns = [c for c in train_df.columns if c not in ("ds", "y")]

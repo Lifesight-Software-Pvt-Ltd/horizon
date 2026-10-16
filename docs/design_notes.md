@@ -256,9 +256,13 @@ For the trimmed rule: 3+ members trim normally; 2 fall back to a plain mean;
 1 returns that model's own forecast; 0 gives `combined=None`. Three is where
 the arithmetic stops working, not a tuned threshold — remove the highest and
 lowest of two values and nothing remains. Degradation is reported as a
-first-class `degraded` field rather than a warning, and `rule_applied` names
-what actually ran: over exactly four members, trimming leaves two values
-whose mean *is* the median, and it says `"median"`.
+first-class `degraded` field, and `rule_applied` names what actually ran:
+over exactly four members, trimming leaves two values whose mean *is* the
+median, and it says `"median"`. It also warns, but only when the fallback
+comes from losing models the caller asked for (a failure, the threshold, no
+validation MAPE): asking for two models and getting their mean is not a
+loss. A rule left with no members at all gets its own, louder warning,
+since its `combined` is `None` and there is no ensemble forecast.
 
 ### `mape_threshold` filters degenerate fits
 
@@ -837,7 +841,8 @@ None of these block a stable API; all are additive.
   across members would let users check whether there is anything to exploit
   on their own series.
 - **Non-negativity is not enforced library-wide.** Prophet can emit negative
-  point forecasts; SARIMAX is non-negative structurally via its `log1p` fit;
+  point forecasts; SARIMAX is non-negative structurally via its `log1p` fit,
+  which is also why it is left out of any run whose target goes negative;
   CatBoost, NeuralProphet and Bayesian PyMC clamp only when the training
   target was itself non-negative.
 - **NeuralProphet autoregression** (`n_lags > 0`), which needs the contract

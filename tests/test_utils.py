@@ -524,3 +524,12 @@ def test_validate_mape_threshold_rejects_text_and_bool():
     for bad in ("40", True):
         with pytest.raises(InvalidConfigError, match="mape_threshold must be a number"):
             validate_mape_threshold(bad)
+
+
+def test_check_history_reads_text_dates_on_a_copy():
+    from horizon_forecaster.utils import check_history
+
+    history = pd.DataFrame({"date": ["2023-01-01", "2023-01-02"], "y": [1, 2]})
+    out = check_history(history, "date", "y", "test")
+    assert pd.api.types.is_datetime64_any_dtype(out["date"])
+    assert history["date"].dtype == object  # the caller's frame is untouched

@@ -611,3 +611,18 @@ def test_export_checks_history_columns_before_writing_anything(tmp_path):
     with pytest.raises(InvalidConfigError, match=r"history has no column\(s\) \['ds', 'y'\]"):
         export_forecast(_two_models(), make_ensemble(), history=history, output_dir=str(tmp_path))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_export_forecast_plots_a_history_with_text_dates(tmp_path):
+    history = pd.DataFrame(
+        {"date": ["2022-12-29", "2022-12-30", "2022-12-31"], "orders": [1.0, 2.0, 3.0]}
+    )
+    written = export_forecast(
+        _two_models(),
+        make_ensemble(),
+        history=history,
+        date_column="date",
+        target_column="orders",
+        output_dir=str(tmp_path),
+    )
+    assert any(k.startswith("plot_") for k in written)

@@ -386,3 +386,50 @@ def test_save_and_load_preserves_wrapper_level_config(tmp_path):
     assert reloaded.min_rows_required == 12
     assert reloaded.random_seed == 99
     assert reloaded.frequency == "weekly"
+
+
+# ---------- failure messages, files on disk ----------
+
+
+def test_fit_failure_message_names_the_cause():
+    # "CatBoost failed to fit." alone left evaluate_errors with no reason.
+    model = CatBoostWrapper(frequency="daily", params={"depth": 20})
+    with pytest.raises(
+        ModelConvergenceError, match=r"CatBoost failed to fit \(CatBoostError: .*depth"
+    ):
+        model.fit(make_train_df())
+
+
+def test_fit_writes_no_catboost_info_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    CatBoostWrapper(frequency="daily").fit(make_train_df())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_load_reads_the_model_file_next_to_the_envelope_after_a_move(tmp_path):
+    """
+    load() used to read the .cbm path stored inside the envelope, so moving
+    the saved files broke it ("Model file doesn't exist"), and a different
+    model left at the old path would have been loaded instead.
+    """
+    original_dir, moved_dir = tmp_path / "saved", tmp_path / "moved"
+    original_dir.mkdir()
+    original = CatBoostWrapper(frequency="daily")
+    original.fit(make_train_df())
+    original.save(str(original_dir / "model"))
+    (original_dir / "model").rename(tmp_path / "model.tmp")
+    moved_dir.mkdir()
+    (tmp_path / "model.tmp").rename(moved_dir / "model")
+    (original_dir / "model.cbm").rename(moved_dir / "model.cbm")
+
+    # A different model now sits at the old path: it must not be the one loaded.
+    other = CatBoostWrapper(frequency="daily", params={"iterations": 5})
+    other.fit(make_train_df())
+    other.save(str(original_dir / "model"))
+
+    reloaded = CatBoostWrapper.load(str(moved_dir / "model"))
+    future = make_future_df()
+    pd.testing.assert_frame_equal(
+        reloaded.predict(horizon=5, future_exog=future),
+        original.predict(horizon=5, future_exog=future),
+    )

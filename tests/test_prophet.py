@@ -310,3 +310,10 @@ def test_save_and_load_preserves_wrapper_level_config():
         assert reloaded.min_rows_required == 12
         assert reloaded.random_seed == 99
         assert reloaded.frequency == "weekly"
+
+
+def test_fit_failure_message_names_the_cause():
+    # "Prophet failed to fit." alone left evaluate_errors with no reason.
+    model = ProphetWrapper(frequency="daily", params={"not_a_prophet_setting": 1})
+    with pytest.raises(ModelConvergenceError, match=r"Prophet failed to fit \(TypeError: "):
+        model.fit(make_train_df(), target_column="y")

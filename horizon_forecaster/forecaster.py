@@ -29,6 +29,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -58,6 +59,7 @@ from horizon_forecaster.exceptions import (
     InsufficientDataError,
     InvalidConfigError,
     ModelConvergenceError,
+    ModelPredictionError,
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.models.base import BaseModel
@@ -279,6 +281,18 @@ def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
                 param_name="model_params",
                 provided_value={name: settings},
             )
+        if name == "neuralprophet":
+            missing = [k for k in ("learning_rate", "epochs") if settings.get(k) is None]
+            if missing:
+                raise InvalidConfigError(
+                    f"model_params['neuralprophet'] must set both learning_rate and epochs "
+                    f"(missing: {missing}). Without them NeuralProphet runs its learning-rate "
+                    f"finder, which fails on torch 2.6 and later and makes two runs on the same "
+                    f"data non-comparable. The default grid uses learning_rate 0.01-0.10 and "
+                    f"epochs 150-300, e.g. {{'learning_rate': 0.03, 'epochs': 150}}.",
+                    param_name="model_params",
+                    provided_value={name: missing},
+                )
         accepted = MODEL_REGISTRY[name]["wrapper"].accepted_params
         if accepted is None:
             continue
@@ -295,6 +309,30 @@ def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
                 provided_value={name: bad},
             )
     return dict(model_params)
+
+
+def _check_finite_predictions(model_name: str, forecast_df: pd.DataFrame) -> None:
+    """
+    A model that returns NaN or inf predictions has failed, even if it raised
+    nothing. Such a model used to be kept: SARIMAX on an all-negative target
+    returned NaN everywhere, scored NaN, and was still listed as a member of
+    the trimmed ensemble while the other members did the work.
+    """
+    yhat = pd.to_numeric(forecast_df["yhat"], errors="coerce").to_numpy(dtype=float)
+    bad = ~np.isfinite(yhat)
+    if bad.any():
+        first = forecast_df["ds"].iloc[int(np.flatnonzero(bad)[0])]
+        raise ModelPredictionError(
+            f"{model_name} returned {int(bad.sum())} of {len(yhat)} predictions that are not "
+            f"finite numbers (NaN or inf), the first for {pd.Timestamp(first):%Y-%m-%d}, so it "
+            f"is treated as failed.",
+            model_name=model_name,
+        )
+
+
+def _short_error(error: Exception, limit: int = 220) -> str:
+    text = f"{type(error).__name__}: {error}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 @dataclass
@@ -668,6 +706,11 @@ class HorizonForecaster:
         )
         self._reject_duplicate_dates(raw_df)
 
+        # Models that cannot handle this data are left out up front, with the
+        # reason, rather than run to a misleading result. {model: reason}.
+        self.skipped_models: Dict[str, str] = {}
+        self._skip_models_that_cannot_fit(raw_df[target_column])
+
         # Kept for forecast(): a future table may name a declared driver that
         # was dropped below, which warns rather than errors.
         self._declared_independent_columns = list(requested_independent_columns)
@@ -834,6 +877,124 @@ class HorizonForecaster:
 
         # De-duplicate while preserving the caller's order.
         return list(dict.fromkeys(requested))
+
+    def _skip_models_that_cannot_fit(self, target: pd.Series) -> None:
+        """
+        SARIMAX fits in log1p space, so a target that goes negative breaks it
+        without an error: values below -1 become NaN and are skipped as gaps,
+        and every forecast comes back positive. On a series that was negative
+        on 43% of days it forecast 399 to 1,352 (test MAE twice Prophet's); on
+        a day-to-day change series centred on zero it never forecast below 56;
+        on an all-negative series it returned NaN. It is left out of any run
+        whose target has a negative value, with a warning, or refused when it
+        is the only model requested.
+        """
+        if "sarimax" not in self.models:
+            return
+        values = pd.to_numeric(target, errors="coerce")
+        n_negative = int((values < 0).sum())
+        if not n_negative:
+            return
+        reason = (
+            f"the target '{self.target_column}' is negative in {n_negative} of {len(values)} "
+            f"rows (minimum {values.min():g}), and SARIMAX fits in log space, where negative "
+            f"values cannot be modelled"
+        )
+        if self.models == ["sarimax"]:
+            raise InvalidConfigError(
+                f"SARIMAX cannot forecast this series: {reason}. Choose another model (Prophet, "
+                f"CatBoost, NeuralProphet and Bayesian PyMC all handle negative values).",
+                param_name="models",
+                provided_value=self.models,
+            )
+        self.models = [m for m in self.models if m != "sarimax"]
+        self.skipped_models["sarimax"] = reason
+        warnings.warn(
+            f"SARIMAX is left out of this run: {reason}. The other models "
+            f"{self.models} run as usual; see forecaster.skipped_models.",
+            stacklevel=3,
+        )
+
+    def _warn_about_lost_models(self, stage: str, results, errors, ensembles) -> None:
+        """
+        After evaluate() or forecast(): say which requested models are missing
+        from the results or from an ensemble, and why. Each of these used to be
+        visible only by inspecting evaluate_errors / forecast_errors or the
+        EnsembleResult fields: a failed model, a model screened out by
+        mape_threshold, a trimmed rule that fell back to a mean because members
+        were lost, and an ensemble with no members at all.
+        """
+        requested = list(self.models)
+        if errors:
+            listed = "; ".join(f"{m} ({_short_error(e)})" for m, e in errors.items())
+            verb = "is" if len(errors) == 1 else "are"
+            warnings.warn(
+                f"{len(errors)} of the {len(requested)} requested models failed in {stage}() and "
+                f"{verb} in no ensemble: {listed}. Full errors in forecaster.{stage}_errors.",
+                stacklevel=3,
+            )
+
+        def why(model: str, ensemble) -> str:
+            if model in errors:
+                return f"{model} failed"
+            rejection = ensemble.rejected_models.get(model)
+            if rejection is not None and rejection.allowed_max is not None:
+                return (
+                    f"{model}'s validation MAPE {rejection.mape_value:.2f} is above "
+                    f"mape_threshold {rejection.allowed_max:g}"
+                )
+            if rejection is not None:
+                return f"{model} has no validation MAPE"
+            return f"{model} was not used"
+
+        def names(models) -> str:
+            models = list(models)
+            return models[0] if len(models) == 1 else ", ".join(models[:-1]) + " and " + models[-1]
+
+        empty, thinned = [], []
+        for method, ensemble in (ensembles or {}).items():
+            lost = [m for m in requested if m not in ensemble.members]
+            if ensemble.combined is None:
+                ran = [m for m in requested if m in results]
+                over = {
+                    m: ensemble.rejected_models[m]
+                    for m in ran
+                    if m in ensemble.rejected_models
+                    and ensemble.rejected_models[m].allowed_max is not None
+                }
+                if ran and len(over) == len(ran):
+                    limit = next(iter(over.values())).allowed_max
+                    scores = ", ".join(f"{m} {r.mape_value:.2f}" for m, r in over.items())
+                    reasons = (
+                        f"every model's validation MAPE is above mape_threshold {limit:g}: {scores}"
+                    )
+                else:
+                    reasons = "; ".join(why(m, ensemble) for m in ran)
+                empty.append(f"'{method}' ({reasons})" if reasons else f"'{method}'")
+            elif lost:
+                members = names(ensemble.members)
+                if not ensemble.degraded:
+                    how = f"combined {members}"
+                elif ensemble.rule_applied == "single":
+                    how = f"is just {members}"
+                elif ensemble.rule_applied == "median":
+                    how = f"is the median of {members}, not a trimmed mean"
+                else:
+                    how = f"is a plain {ensemble.rule_applied} of {members}, not a trimmed mean"
+                thinned.append(f"'{method}' {how} ({'; '.join(why(m, ensemble) for m in lost)})")
+        if thinned:
+            warnings.warn(
+                f"The {stage}() ensemble lost models: " + "; ".join(thinned) + ".",
+                stacklevel=3,
+            )
+        if empty:
+            warnings.warn(
+                f"No ensemble could be formed in {stage}() for "
+                + "; ".join(empty)
+                + ". The ensemble forecast is empty. Raise mape_threshold (or set it to None), "
+                "or use the best single model (exporters.choose_best_model).",
+                stacklevel=3,
+            )
 
     def _validate_models(self, models: Optional[List[str]]) -> List[str]:
         models = as_name_list(models, "models")
@@ -1236,6 +1397,7 @@ class HorizonForecaster:
         forecast_df = model.predict(
             horizon=len(adapted_score_features), future_exog=adapted_score_features
         )
+        _check_finite_predictions(model_name, forecast_df)
         mape_result = mape(y_score, forecast_df["yhat"].values)
         return model, forecast_df, mape_result
 
@@ -1551,6 +1713,7 @@ class HorizonForecaster:
             mape_threshold=self.mape_threshold,
             actuals=first_result.test_predictions[["ds", "y"]],
         )
+        self._warn_about_lost_models("evaluate", results, errors, self.evaluate_ensemble)
 
         return results
 
@@ -1613,6 +1776,7 @@ class HorizonForecaster:
         forecast_df = self._forecast_models[model_name].predict(
             horizon=horizon, future_exog=future_exog
         )
+        _check_finite_predictions(model_name, forecast_df)
 
         return ForecastResult(
             model_name=self._forecast_models[model_name].model_name,
@@ -1854,6 +2018,7 @@ class HorizonForecaster:
             mape_threshold=self.mape_threshold,
             actuals=None,
         )
+        self._warn_about_lost_models("forecast", results, errors, self.forecast_ensemble)
 
         return results
 

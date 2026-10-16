@@ -189,7 +189,16 @@ print("errors:", forecaster.evaluate_errors)
 
 A model in an ensemble's `rejected_models` fit successfully but was not
 admitted to the combination; a model in `evaluate_errors` failed outright. The
-two are never conflated, and neither raises unless *every* model fails.
+two are never conflated, and neither raises unless *every* model fails. Both
+are warned about: `evaluate()` and `forecast()` name any model that failed
+(with the cause), any rule that lost a requested model, and any rule that
+formed no ensemble at all. A model that returns NaN or infinite predictions
+counts as failed.
+
+A model that cannot handle the data is left out before anything runs, with a
+warning, and listed in `forecaster.skipped_models`: SARIMAX fits in log space,
+so it is skipped when the target has a negative value (and refused if it is
+the only model requested).
 
 ## 4. Forecast the future
 

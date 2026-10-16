@@ -47,7 +47,7 @@ comparable.
 |---|---|---|---|
 | `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. Can emit negative point forecasts on a low-level series — no output clamp is applied. |
 | `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
-| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)` and the annual Fourier order come from the shared grid, joined by seasonal `(P, Q)` at daily frequency (weekly disables the seasonal order, since an s=52 term is prohibitively slow, and leans on the Fourier terms instead); only `d` is derived from the data by an ADF test inside the wrapper. |
+| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)` and the annual Fourier order come from the shared grid, joined by seasonal `(P, Q)` at daily frequency (weekly disables the seasonal order, since an s=52 term is prohibitively slow, and leans on the Fourier terms instead); only `d` is derived from the data by an ADF test inside the wrapper. Left out, with a warning, when the target has negative values (see `skipped_models`). |
 | `neuralprophet` | NeuralProphet (torch) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
 | `bayesianpymc` | PyMC (NUTS/MCMC) | yes | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 

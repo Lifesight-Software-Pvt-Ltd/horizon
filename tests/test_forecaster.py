@@ -2098,3 +2098,145 @@ def test_forecast_rejects_a_horizon_past_the_last_representable_date():
     forecaster = _construct(make_raw_df())
     with pytest.raises(InvalidConfigError, match="past 2262-04-11"):
         forecaster.forecast(horizon=10**7)
+
+
+# ---------- models that drop out, and ensembles that lose members ----------
+#
+# Each of these used to be visible only by reading evaluate_errors /
+# forecast_errors or the EnsembleResult fields.
+
+_QUICK = {"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50, "depth": 3}}
+
+
+def _two_model_forecaster(**kwargs):
+    args = dict(
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        validation_size=16,
+        test_size=8,
+        models=["prophet", "catboost"],
+        model_params=dict(_QUICK),
+    )
+    args.update(kwargs)
+    return HorizonForecaster(make_noisy_raw_df(), **args)
+
+
+def _messages(caught):
+    return [str(w.message) for w in caught]
+
+
+def test_a_failed_model_and_the_thinner_ensemble_are_both_warned_about():
+    forecaster = _two_model_forecaster(
+        model_params={"prophet": _QUICK["prophet"], "catboost": {"depth": 20}}
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.evaluate()
+        forecaster.forecast(horizon=5)
+    messages = _messages(caught)
+    for stage in ("evaluate", "forecast"):
+        failed = [
+            m for m in messages if m.startswith(f"1 of the 2 requested models failed in {stage}()")
+        ]
+        assert failed and "catboost (ModelConvergenceError" in failed[0]
+        assert "Maximum tree depth" in failed[0]  # the cause, not just "failed to fit"
+        assert (
+            f"The {stage}() ensemble lost models: 'trimmed' is just prophet (catboost failed)."
+            in messages
+        )
+
+
+def test_an_ensemble_with_no_members_gets_its_own_warning():
+    forecaster = _two_model_forecaster(mape_threshold=0.01)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.evaluate()
+    empty = [
+        m for m in _messages(caught) if m.startswith("No ensemble could be formed in evaluate()")
+    ]
+    assert empty
+    assert "every model's validation MAPE is above mape_threshold 0.01: prophet" in empty[0]
+    assert forecaster.evaluate_ensemble["trimmed"].combined is None
+
+
+def test_a_model_left_out_by_the_threshold_is_named_with_its_score():
+    forecaster = _two_model_forecaster(ensemble_method="inverse_mape")
+    scores = {m: r.validation_mape.value for m, r in forecaster.evaluate().items()}
+    worse = max(scores, key=scores.get)
+    threshold = (min(scores.values()) + max(scores.values())) / 2
+    forecaster = _two_model_forecaster(ensemble_method="inverse_mape", mape_threshold=threshold)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.evaluate()
+    lost = [m for m in _messages(caught) if m.startswith("The evaluate() ensemble lost models")]
+    assert (
+        lost and f"{worse}'s validation MAPE {scores[worse]:.2f} is above mape_threshold" in lost[0]
+    )
+
+
+def test_no_dropout_warning_when_every_requested_model_is_in_the_ensemble():
+    # Two models always give a plain mean instead of a trimmed one: that is
+    # what was asked for, not a loss, so it does not warn.
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.evaluate()
+        forecaster.forecast(horizon=5)
+    assert forecaster.evaluate_ensemble["trimmed"].degraded
+    noisy = [
+        m for m in _messages(caught) if "failed in" in m or "lost models" in m or "No ensemble" in m
+    ]
+    assert noisy == []
+
+
+def test_a_model_that_predicts_nan_is_treated_as_failed(monkeypatch):
+    from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
+
+    real_predict = CatBoostWrapper.predict
+
+    def nan_predict(self, horizon, future_exog=None):
+        out = real_predict(self, horizon, future_exog)
+        out["yhat"] = float("nan")
+        return out
+
+    monkeypatch.setattr(CatBoostWrapper, "predict", nan_predict)
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        results = forecaster.evaluate()
+        forecaster.forecast(horizon=5)
+    assert "catboost" not in results
+    assert isinstance(forecaster.evaluate_errors["catboost"], ModelPredictionError)
+    assert "not finite numbers (NaN or inf)" in str(forecaster.evaluate_errors["catboost"])
+    assert "catboost" in forecaster.forecast_errors
+    assert forecaster.evaluate_ensemble["trimmed"].members == ["prophet"]
+
+
+def test_sarimax_is_left_out_with_a_warning_when_the_target_goes_negative():
+    df = make_raw_df()
+    df.loc[[5, 6, 7], "orders"] = -20
+    with pytest.warns(
+        UserWarning,
+        match="SARIMAX is left out of this run: the target 'orders' is negative in 3 of 60 rows",
+    ):
+        forecaster = _construct(df, models=["sarimax", "catboost"])
+    assert forecaster.models == ["catboost"]
+    assert "negative in 3 of 60 rows" in forecaster.skipped_models["sarimax"]
+
+
+def test_sarimax_alone_on_a_negative_target_is_refused():
+    df = make_raw_df()
+    df["orders"] = -df["orders"]
+    with pytest.raises(InvalidConfigError, match="SARIMAX cannot forecast this series"):
+        _construct(df, models=["sarimax"])
+
+
+def test_skipped_models_is_empty_when_nothing_is_skipped():
+    assert _construct(make_raw_df(), models=["sarimax"]).skipped_models == {}
+
+
+@pytest.mark.parametrize("settings", [{"epochs": 20}, {"learning_rate": 0.03}, {}])
+def test_neuralprophet_model_params_must_pin_learning_rate_and_epochs(settings):
+    with pytest.raises(InvalidConfigError, match="must set both learning_rate and epochs"):
+        _construct(make_raw_df(), model_params={"neuralprophet": settings})
