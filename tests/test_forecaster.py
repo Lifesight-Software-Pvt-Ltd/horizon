@@ -1843,3 +1843,258 @@ def test_forecast_warns_when_carry_forward_holds_a_last_day_spike():
     )
     with pytest.warns(UserWarning, match="last day of history .* looks unusual"):
         forecaster.forecast(horizon=5)
+
+
+# ---------- input checks: values, column roles and arguments ----------
+#
+# Each case here used to run to completion with a meaningless result, or
+# fail as a raw Python error deep inside the models. All are constructor
+# checks, so no model is fitted.
+
+
+def _construct(df, **kwargs):
+    args = dict(
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        validation_size=16,
+        test_size=8,
+        models=["sarimax"],
+    )
+    args.update(kwargs)
+    return HorizonForecaster(df, **args)
+
+
+@pytest.mark.parametrize("bad", [math.inf, -math.inf])
+def test_constructor_rejects_infinite_target_naming_the_date(bad):
+    df = make_raw_df(with_spend=True)
+    df["orders"] = df["orders"].astype(float)
+    df.loc[10, "orders"] = bad
+    with pytest.raises(InvalidConfigError, match="'orders' is infinite for 2026-01-11") as info:
+        _construct(df, independent_columns=["spend"])
+    assert info.value.provided_value == {"orders": 1}
+
+
+@pytest.mark.parametrize("bad", [math.inf, "inf", "-Infinity"])
+def test_constructor_rejects_infinite_driver(bad):
+    df = make_raw_df(with_spend=True)
+    df["spend"] = df["spend"].astype(object)
+    df.loc[10, "spend"] = bad
+    with pytest.raises(InvalidConfigError, match="'spend' is infinite for 2026-01-11"):
+        _construct(df, independent_columns=["spend"])
+
+
+def test_constructor_rejects_a_driver_that_is_infinite_everywhere():
+    # Used to be dropped as "zero variance" without a word.
+    df = make_raw_df(with_spend=True)
+    df["spend"] = math.inf
+    with pytest.raises(InvalidConfigError, match="'spend' is infinite in every row"):
+        _construct(df, independent_columns=["spend"])
+
+
+@pytest.mark.parametrize("blank", [float("nan"), None, ""])
+def test_constructor_rejects_an_all_blank_driver_like_a_single_blank(blank):
+    # A single blank always raised; an all-blank driver used to count as
+    # "constant" and vanish from the run.
+    df = make_raw_df(with_spend=True)
+    df["spend"] = blank
+    with pytest.raises(InvalidConfigError, match="'spend' is blank in every row"):
+        _construct(df, independent_columns=["spend"])
+
+
+def test_missing_value_message_names_the_first_dates_and_counts_the_rest():
+    df = make_raw_df(with_spend=True)
+    df.loc[[3, 4, 5, 6, 7], "spend"] = None
+    df.loc[20, "orders"] = None
+    with pytest.raises(InvalidConfigError) as info:
+        _construct(df, independent_columns=["spend"])
+    message = str(info.value)
+    assert "'orders' is blank for 2026-01-21" in message
+    assert "'spend' is blank for 2026-01-04, 2026-01-05, 2026-01-06 and 2 more" in message
+    assert info.value.provided_value == {"orders": 1, "spend": 5}
+
+
+def test_constructor_warns_when_a_declared_driver_never_changes():
+    df = make_raw_df(with_spend=True)
+    df["promo"] = 0
+    with pytest.warns(UserWarning, match=r"\['promo'\] never change.*'promo' is always 0"):
+        forecaster = _construct(df, independent_columns=["spend", "promo"])
+    assert forecaster.dropped_zero_variance_columns == ["promo"]
+    assert forecaster.independent_columns == ["spend"]
+
+
+def test_constant_or_blank_columns_that_are_not_drivers_are_left_alone():
+    df = make_raw_df(with_spend=True)
+    df["notes"] = None
+    df["const"] = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "never change" warning for unused columns
+        forecaster = _construct(df, independent_columns=["spend"])
+    assert forecaster.dropped_zero_variance_columns == []
+
+
+def test_constructor_reads_a_target_written_as_text_numbers():
+    df = make_raw_df()
+    df["orders"] = df["orders"].astype(str)
+    forecaster = _construct(df)
+    assert forecaster.raw_df["orders"].dtype.kind in "if"
+
+
+def test_constructor_names_thousands_separators_in_the_target():
+    df = make_raw_df()
+    df["orders"] = [f"{1000 + i:,}" for i in range(len(df))]
+    with pytest.raises(InvalidConfigError, match=r"target column 'orders'.*'1,000'.*2026-01-01"):
+        _construct(df)
+
+
+def test_constructor_rejects_a_complex_target():
+    df = make_raw_df()
+    df["orders"] = df["orders"].astype(complex)
+    with pytest.raises(InvalidConfigError, match="complex numbers"):
+        _construct(df)
+
+
+def test_constructor_rejects_a_driver_holding_dates():
+    df = make_raw_df()
+    df["launch"] = df["date"]
+    with pytest.raises(InvalidConfigError, match="'launch' holds dates"):
+        _construct(df, independent_columns=["launch"])
+
+
+def test_constructor_rejects_the_date_as_target():
+    with pytest.raises(InvalidConfigError, match="target_column and date_column are both"):
+        _construct(make_raw_df(), target_column="date")
+
+
+def test_constructor_rejects_the_target_as_a_driver():
+    with pytest.raises(InvalidConfigError, match="'orders' is the target column"):
+        _construct(make_raw_df(), independent_columns=["orders"])
+
+
+def test_constructor_rejects_the_date_as_a_driver():
+    with pytest.raises(InvalidConfigError, match="'date' is the date column"):
+        _construct(make_raw_df(), independent_columns=["date"])
+
+
+def test_constructor_rejects_a_driver_listed_twice():
+    with pytest.raises(InvalidConfigError, match=r"lists \['spend'\] more than once"):
+        _construct(make_raw_df(with_spend=True), independent_columns=["spend", "spend"])
+
+
+def test_constructor_rejects_a_used_column_name_that_appears_twice():
+    df = make_raw_df(with_spend=True)
+    df = pd.concat([df, df[["spend"]]], axis=1)
+    with pytest.raises(InvalidConfigError, match=r"more than one column named \['spend'\]"):
+        _construct(df, independent_columns=["spend"])
+
+
+def test_constructor_rejects_multi_level_column_headers():
+    df = make_raw_df()
+    df.columns = pd.MultiIndex.from_tuples([(c, "x") for c in df.columns])
+    with pytest.raises(InvalidConfigError, match="2 levels of column headers"):
+        _construct(df)
+
+
+@pytest.mark.parametrize("raw", [[1, 2, 3], make_raw_df().to_numpy(), make_raw_df()["orders"]])
+def test_constructor_rejects_a_raw_df_that_is_not_a_dataframe(raw):
+    with pytest.raises(InvalidConfigError, match="raw_df must be a pandas DataFrame"):
+        _construct(raw)
+
+
+def test_constructor_rejects_an_empty_raw_df():
+    with pytest.raises(InvalidConfigError, match="raw_df has no rows"):
+        _construct(make_raw_df().iloc[:0])
+
+
+@pytest.mark.parametrize("freq", [None, 7])
+def test_constructor_rejects_a_non_text_frequency(freq):
+    with pytest.raises(UnsupportedFrequencyError, match="frequency must be one of"):
+        _construct(make_raw_df(), frequency=freq)
+
+
+def test_constructor_rejects_a_text_mape_threshold():
+    with pytest.raises(InvalidConfigError, match="mape_threshold must be a number"):
+        _construct(make_raw_df(), mape_threshold="40")
+
+
+def test_constructor_rejects_a_non_text_date_format():
+    with pytest.raises(InvalidConfigError, match="date_format must be a strptime format"):
+        _construct(make_raw_df(), date_format=5)
+
+
+def test_single_names_are_read_as_one_item_lists():
+    df = make_raw_df(with_spend=True)
+    df["promo"] = [i % 7 == 0 for i in range(len(df))]
+    forecaster = _construct(df, models="sarimax", independent_columns="spend", event_columns=None)
+    assert forecaster.models == ["sarimax"]
+    assert forecaster.independent_columns == ["spend"]
+    forecaster = _construct(df, independent_columns=["spend", "promo"], event_columns="promo")
+    assert forecaster.event_columns == ["promo"]
+
+
+def test_a_model_listed_twice_is_run_once():
+    assert _construct(make_raw_df(), models=["sarimax", "sarimax"]).models == ["sarimax"]
+
+
+@pytest.mark.parametrize(
+    "params, match",
+    [
+        (["prophet"], "model_params must be a dict"),
+        ({"sarimax": 3}, r"model_params\['sarimax'\] must be a dict"),
+        ({"neural_prophet": {"epochs": 3}}, "did you mean 'neuralprophet'"),
+        ({"sarimax": {"seasonal_periods": 7}}, "did you mean 'seasonal_period'"),
+        ({"bayesianpymc": {"draw": 10}}, "did you mean 'draws'"),
+    ],
+)
+def test_constructor_rejects_bad_model_params(params, match):
+    with pytest.raises(InvalidConfigError, match=match):
+        _construct(make_raw_df(), model_params=params)
+
+
+def test_model_params_for_a_known_model_that_was_not_requested_are_allowed():
+    _construct(make_raw_df(), model_params={"prophet": {"seasonality_mode": "additive"}})
+
+
+@pytest.mark.parametrize("model_name", ["sarimax", "bayesianpymc"])
+def test_accepted_params_match_what_the_wrapper_reads(model_name):
+    """
+    accepted_params is the list the constructor checks model_params against,
+    so it must name exactly the keys the wrapper's __init__ reads: a key read
+    but not listed would be rejected, a key listed but not read would be
+    accepted and ignored.
+    """
+
+    class _Recorder(dict):
+        def __init__(self):
+            super().__init__()
+            self.read = set()
+
+        def __bool__(self):  # BaseModel keeps `params or {}`; stay truthy
+            return True
+
+        def get(self, key, default=None):
+            self.read.add(key)
+            return default
+
+    wrapper_cls = MODEL_REGISTRY[model_name]["wrapper"]
+    recorder = _Recorder()
+    wrapper_cls(frequency="daily", params=recorder)
+    assert recorder.read == set(wrapper_cls.accepted_params)
+
+
+@pytest.mark.parametrize("model_name", ["sarimax", "bayesianpymc"])
+def test_default_config_only_uses_accepted_params(model_name):
+    from horizon_forecaster.forecaster import _default_params
+
+    accepted = MODEL_REGISTRY[model_name]["wrapper"].accepted_params
+    for frequency, config in _default_params()[model_name].items():
+        keys = set(config.get("base_hyperparameters", {}))
+        for candidate in config.get("hyperparameter_grid", []):
+            keys |= set(candidate)
+        assert keys <= accepted, (frequency, keys - accepted)
+
+
+def test_forecast_rejects_a_horizon_past_the_last_representable_date():
+    forecaster = _construct(make_raw_df())
+    with pytest.raises(InvalidConfigError, match="past 2262-04-11"):
+        forecaster.forecast(horizon=10**7)

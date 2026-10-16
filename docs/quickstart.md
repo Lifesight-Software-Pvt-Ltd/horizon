@@ -3,7 +3,9 @@
 A minimal end-to-end run: evaluate every model on a held-out split, build a
 forecast, and export the results. For the ensemble specifics see
 [`ensemble_methods.md`](ensemble_methods.md); for per-model behaviour see
-[`supported_models.md`](supported_models.md).
+[`supported_models.md`](supported_models.md). For two complete runs with their
+outputs saved, one daily and one weekly, see the
+[example notebooks](../examples/).
 
 ## 1. Your data
 
@@ -12,13 +14,20 @@ numeric target column, and (optionally) one or more numeric independent
 columns. Rows should be one-per-period at a regular `daily` or `weekly`
 spacing.
 
-**The data must be complete.** A single missing or non-numeric cell in any
-column used for training/testing — the date, the target, or an independent
-column — raises `InvalidConfigError` at construction. (Driver columns may
-also use on/off words such as `yes/no`; see 4b.) Missing values are never
-silently dropped or imputed: clean or impute your data first. (Columns in the
-DataFrame that you do not use are ignored, and a fully-constant column is
-dropped automatically with a report in `dropped_zero_variance_columns`.)
+**The data must be complete.** A single missing, non-numeric or infinite
+(`inf`, `-inf`) cell in any column used for training/testing — the date, the
+target, or an independent column — raises `InvalidConfigError` at
+construction, naming the column and the dates. (Numbers stored as text are
+read as numbers, and driver columns may also use on/off words such as
+`yes/no`; see 4b.) Missing values are never silently dropped or imputed:
+clean or impute your data first. Columns in the DataFrame that you do not use
+are ignored. A declared driver with the same value in every row cannot be
+learned, so it is dropped with a warning and listed in
+`dropped_zero_variance_columns`.
+
+Each column plays one role: the target and the date column cannot also be
+drivers, and each name may appear once in `independent_columns` and once in
+the DataFrame.
 
 A driver that changes over the full history but never changes inside one fit
 window — a price change or a new promotion that first appears in the
@@ -113,7 +122,10 @@ forecaster = HorizonForecaster(
 
 Models you do not name are still tuned normally. This is the fast path when you
 already know what works for your series — and it is what the test suite uses to
-keep runs short.
+keep runs short. A model name that does not exist, or a setting SARIMAX or
+Bayesian PyMC does not use, raises `InvalidConfigError` with the closest valid
+name, since a typo would otherwise switch the grid search off and change the
+result without a word.
 
 ### Sizing the split
 
@@ -376,7 +388,7 @@ always a dict, even for a single rule, and keyed `"models"` when no ensemble
 was given. Overlaying several rules on one time axis would bury the per-model
 lines the chart exists to show, which is why they are separate charts rather
 than one crowded one. Passing `ax=` is therefore only valid when a single rule
-will be drawn; supplying it for several raises `ValueError` rather than
+will be drawn; supplying it for several raises `InvalidConfigError` rather than
 silently dropping the rest.
 
 `plot_model_comparison` is the exception: comparing rules head-to-head is

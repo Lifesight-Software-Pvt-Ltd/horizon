@@ -50,6 +50,8 @@ from typing import TYPE_CHECKING, Dict, Optional
 import matplotlib.pyplot as plt
 
 from horizon_forecaster.evaluation.ensemble import as_ensemble_dict
+from horizon_forecaster.exceptions import InvalidConfigError
+from horizon_forecaster.utils import check_history, check_results_dict
 
 if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy stack)
     import pandas as pd
@@ -136,7 +138,7 @@ def _reject_shared_ax(caller: str, ax: "Optional[Axes]", n_charts: int) -> None:
     the caller can act on rather than a surprise in the output.
     """
     if ax is not None and n_charts > 1:
-        raise ValueError(
+        raise InvalidConfigError(
             f"{caller}: `ax` cannot be used when several combination methods were "
             f"built ({n_charts} here) -- each rule is drawn on its own Axes. Omit "
             f"`ax` to let each chart create its own figure, or pass a single "
@@ -243,11 +245,12 @@ def plot_evaluation(
         shown -- the caller decides.
 
     Raises:
-        ValueError: if evaluation_results is empty (nothing to plot), or
+        InvalidConfigError (a ValueError): if evaluation_results is empty (nothing to plot), or
             if `ax` is supplied for more than one combination method.
     """
+    check_results_dict(evaluation_results, "evaluation", "plot_evaluation")
     if not evaluation_results:
-        raise ValueError("plot_evaluation: evaluation_results is empty, nothing to plot.")
+        raise InvalidConfigError("plot_evaluation: evaluation_results is empty, nothing to plot.")
 
     charts = _charts_for(ensemble)
     _reject_shared_ax("plot_evaluation", ax, len(charts))
@@ -332,11 +335,13 @@ def plot_forecast(
         "models" when no ensemble was given. Always a dict.
 
     Raises:
-        ValueError: if forecast_results is empty (nothing to plot), or if
+        InvalidConfigError (a ValueError): if forecast_results is empty (nothing to plot), or if
             `ax` is supplied for more than one combination method.
     """
+    check_results_dict(forecast_results, "forecast", "plot_forecast")
+    check_history(history, date_column, target_column, "plot_forecast")
     if not forecast_results:
-        raise ValueError("plot_forecast: forecast_results is empty, nothing to plot.")
+        raise InvalidConfigError("plot_forecast: forecast_results is empty, nothing to plot.")
 
     charts = _charts_for(ensemble)
     _reject_shared_ax("plot_forecast", ax, len(charts))
@@ -409,10 +414,13 @@ def plot_model_comparison(
         The Axes drawn on (never shown).
 
     Raises:
-        ValueError: if evaluation_results is empty.
+        InvalidConfigError (a ValueError): if evaluation_results is empty.
     """
+    check_results_dict(evaluation_results, "evaluation", "plot_model_comparison")
     if not evaluation_results:
-        raise ValueError("plot_model_comparison: evaluation_results is empty, nothing to plot.")
+        raise InvalidConfigError(
+            "plot_model_comparison: evaluation_results is empty, nothing to plot."
+        )
 
     names = list(evaluation_results.keys())
     values = [evaluation_results[n].mape.value for n in names]
@@ -482,10 +490,13 @@ def plot_evaluation_per_model(
         caller decides.
 
     Raises:
-        ValueError: if evaluation_results is empty.
+        InvalidConfigError (a ValueError): if evaluation_results is empty.
     """
+    check_results_dict(evaluation_results, "evaluation", "plot_evaluation_per_model")
     if not evaluation_results:
-        raise ValueError("plot_evaluation_per_model: evaluation_results is empty, nothing to plot.")
+        raise InvalidConfigError(
+            "plot_evaluation_per_model: evaluation_results is empty, nothing to plot."
+        )
 
     ensembles = as_ensemble_dict(ensemble)
     actual = next(iter(evaluation_results.values())).test_predictions[["ds", "y"]]
@@ -553,10 +564,14 @@ def plot_forecast_per_model(
     keyed "ensemble_<method>".
 
     Raises:
-        ValueError: if forecast_results is empty.
+        InvalidConfigError (a ValueError): if forecast_results is empty.
     """
+    check_results_dict(forecast_results, "forecast", "plot_forecast_per_model")
+    check_history(history, date_column, target_column, "plot_forecast_per_model")
     if not forecast_results:
-        raise ValueError("plot_forecast_per_model: forecast_results is empty, nothing to plot.")
+        raise InvalidConfigError(
+            "plot_forecast_per_model: forecast_results is empty, nothing to plot."
+        )
 
     ensembles = as_ensemble_dict(ensemble)
     unformed = _no_ensemble_marker(ensembles)
@@ -628,10 +643,13 @@ def save_evaluation_plots(
         "ensemble_<method>".
 
     Raises:
-        ValueError: if evaluation_results is empty.
+        InvalidConfigError (a ValueError): if evaluation_results is empty.
     """
+    check_results_dict(evaluation_results, "evaluation", "save_evaluation_plots")
     if not evaluation_results:
-        raise ValueError("save_evaluation_plots: evaluation_results is empty, nothing to save.")
+        raise InvalidConfigError(
+            "save_evaluation_plots: evaluation_results is empty, nothing to save."
+        )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -675,10 +693,12 @@ def save_forecast_plots(
         {key: path} using the same keys as the plotting functions.
 
     Raises:
-        ValueError: if forecast_results is empty.
+        InvalidConfigError (a ValueError): if forecast_results is empty.
     """
+    check_results_dict(forecast_results, "forecast", "save_forecast_plots")
+    check_history(history, date_column, target_column, "save_forecast_plots")
     if not forecast_results:
-        raise ValueError("save_forecast_plots: forecast_results is empty, nothing to save.")
+        raise InvalidConfigError("save_forecast_plots: forecast_results is empty, nothing to save.")
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

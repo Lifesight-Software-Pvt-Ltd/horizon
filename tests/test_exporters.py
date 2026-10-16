@@ -17,7 +17,7 @@ from horizon_forecaster.exporters import (
     export_forecast_csvs,
 )
 from horizon_forecaster.evaluation.ensemble import EnsembleResult
-from horizon_forecaster.exceptions import ThresholdRejectionError
+from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejectionError
 
 
 def _ds(n=3):
@@ -552,3 +552,62 @@ def test_export_applies_both_best_model_checks_with_the_given_threshold(tmp_path
     summary = pd.read_csv(written["model_summary"]).drop_duplicates("model").set_index("model")
     assert summary.loc["prophet", "best_model_check"] == "not chosen: test MAPE 35.00 > 30"
     assert summary.loc["catboost", "best_model_check"].startswith("exported as best")
+
+
+# ---------- argument checks ----------
+#
+# A wrong argument used to surface as a raw AttributeError/KeyError deep
+# inside, or -- for the scores -- as Python reprs written into the CSV.
+
+
+def _evaluation_like():
+    return {"prophet": SimpleNamespace(test_predictions=pd.DataFrame(), mape=None)}
+
+
+def test_export_names_the_expected_results_when_given_evaluate_output(tmp_path):
+    with pytest.raises(
+        InvalidConfigError,
+        match=r"forecaster\.forecast.*look like the results of forecaster\.evaluate",
+    ):
+        export_forecast(_evaluation_like(), output_dir=str(tmp_path), save_plots=False)
+
+
+def test_export_rejects_a_list_of_results(tmp_path):
+    with pytest.raises(InvalidConfigError, match="got list"):
+        export_forecast_csvs(list(_two_models().values()), output_dir=str(tmp_path))
+
+
+def test_export_rejects_an_ensemble_that_is_not_an_ensemble_result(tmp_path):
+    with pytest.raises(InvalidConfigError, match="ensemble must be"):
+        export_forecast_csvs(_two_models(), "trimmed", output_dir=str(tmp_path))
+    with pytest.raises(InvalidConfigError, match="are not EnsembleResults"):
+        export_forecast_csvs(_two_models(), {"trimmed": "x"}, output_dir=str(tmp_path))
+
+
+def test_export_rejects_scores_that_are_not_numbers(tmp_path):
+    with pytest.raises(InvalidConfigError, match="per_model_mape must map each model to a number"):
+        export_forecast_csvs(
+            _two_models(),
+            make_ensemble(),
+            per_model_mape={"prophet": SimpleNamespace(value=1.0), "catboost": 2.0},
+            output_dir=str(tmp_path),
+        )
+    with pytest.raises(InvalidConfigError, match="ensemble_mape must be a number"):
+        export_forecast_csvs(
+            _two_models(), make_ensemble(), ensemble_mape="5", output_dir=str(tmp_path)
+        )
+
+
+def test_export_rejects_a_text_mape_threshold(tmp_path):
+    # Used to write a model_summary.csv with no model rows.
+    with pytest.raises(InvalidConfigError, match="mape_threshold must be a number"):
+        export_forecast_csvs(
+            _two_models(), make_ensemble(), mape_threshold="40", output_dir=str(tmp_path)
+        )
+
+
+def test_export_checks_history_columns_before_writing_anything(tmp_path):
+    history = pd.DataFrame({"date": _ds(3), "orders": [1.0, 2.0, 3.0]})
+    with pytest.raises(InvalidConfigError, match=r"history has no column\(s\) \['ds', 'y'\]"):
+        export_forecast(_two_models(), make_ensemble(), history=history, output_dir=str(tmp_path))
+    assert list(tmp_path.iterdir()) == []

@@ -108,3 +108,12 @@ def test_invalid_config_error_carries_param_context():
 def test_unsupported_frequency_error_carries_provided_value():
     err = UnsupportedFrequencyError("only daily/weekly supported", provided_frequency="monthly")
     assert err.provided_frequency == "monthly"
+
+
+def test_invalid_config_error_is_also_a_value_error():
+    # The metrics, ensemble builders and plotting helpers raised plain
+    # ValueErrors in 1.0.0; code catching ValueError around them still works.
+    err = InvalidConfigError("bad argument", param_name="x")
+    assert isinstance(err, ValueError)
+    assert isinstance(err, HorizonForecasterError)
+    assert str(err) == "bad argument"
