@@ -74,7 +74,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from horizon_forecaster.evaluation.metrics import MapeResult, mape
+from horizon_forecaster.evaluation.metrics import MapeResult, mape, wape
 from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejectionError
 
 # Every combination rule this module can apply. Order matters only for
@@ -147,6 +147,9 @@ class EnsembleResult:
             given `actuals` (the evaluate() context, where held-out
             actuals exist) -- always None in the forecast() context, where
             no ground truth for the future exists yet.
+        wape: the ensemble's own WAPE on the same window, set exactly when
+            `mape` is. WAPE counts every row, so it stays meaningful where
+            MAPE skips zero actuals.
     """
 
     combined: Optional[pd.DataFrame]
@@ -158,6 +161,7 @@ class EnsembleResult:
     trim_shares: Optional[pd.DataFrame] = None
     rejected_models: Dict[str, ThresholdRejectionError] = field(default_factory=dict)
     mape: Optional[MapeResult] = None
+    wape: Optional[float] = None
 
 
 def as_ensemble_dict(
@@ -362,6 +366,7 @@ def _screen(
     per_model_selection_mape: Dict[str, float],
     mape_threshold: Optional[float],
     method: str,
+    metric: str = "MAPE",
 ) -> "tuple[List[str], Dict[str, float], Dict[str, ThresholdRejectionError]]":
     """
     Decide which models are admitted to the combination.
@@ -403,11 +408,11 @@ def _screen(
 
         if is_nan and method in WEIGHTING_STRATEGIES:
             rejected[model_name] = ThresholdRejectionError(
-                f"{model_name}'s validation MAPE is NaN (likely every actual in the "
+                f"{model_name}'s validation {metric} is NaN (likely every actual in the "
                 f"validation window was zero), so it was never screened and the "
                 f"'{method}' rule cannot admit it to a full, untrimmed share of the "
                 f"result. It would still be usable by the 'trimmed' rule, which needs "
-                f"no MAPE and bounds any single member's influence itself.",
+                f"no score and bounds any single member's influence itself.",
                 model_name=model_name,
                 mape_value=mape_value,
                 # Deliberately not passing allowed_max: this rejection is not a
@@ -418,7 +423,7 @@ def _screen(
 
         if mape_threshold is not None and not is_nan and mape_value > mape_threshold:
             rejected[model_name] = ThresholdRejectionError(
-                f"{model_name}'s validation MAPE ({mape_value:.2f}%) exceeds the "
+                f"{model_name}'s validation {metric} ({mape_value:.2f}%) exceeds the "
                 f"mape_threshold of {mape_threshold}%.",
                 model_name=model_name,
                 mape_value=mape_value,
@@ -438,6 +443,7 @@ def build_ensemble(
     mape_threshold: Optional[float] = None,
     method: str = DEFAULT_ENSEMBLE_METHOD,
     actuals: Optional[pd.DataFrame] = None,
+    metric: str = "MAPE",
 ) -> EnsembleResult:
     """
     Combine multiple models' predictions using one rule.
@@ -456,8 +462,12 @@ def build_ensemble(
             None to admit every model. See _screen().
         method: "trimmed" (default), "inverse_mape" or "equal".
         actuals: optional DataFrame with ["ds", "y"] real actual values,
-            used to score the combined result's own MAPE (the evaluate()
-            context). None in the forecast() context.
+            used to score the combined result's own MAPE and WAPE (the
+            evaluate() context). None in the forecast() context.
+        metric: the name of the selection score in `per_model_selection_mape`
+            ("MAPE" or "WAPE", see HorizonForecaster's selection_metric),
+            used only in the rejection messages. The screening and weighting
+            arithmetic is the same for both.
 
     Returns:
         EnsembleResult. Never raises for "no model was admitted" -- it
@@ -472,7 +482,9 @@ def build_ensemble(
             f"Unknown ensemble method: '{method}'. Expected one of {ENSEMBLE_METHODS}."
         )
 
-    members, member_mapes, rejected = _screen(per_model_selection_mape, mape_threshold, method)
+    members, member_mapes, rejected = _screen(
+        per_model_selection_mape, mape_threshold, method, metric=metric
+    )
 
     if not members:
         return EnsembleResult(
@@ -492,6 +504,7 @@ def build_ensemble(
     )
 
     ensemble_mape: Optional[MapeResult] = None
+    ensemble_wape: Optional[float] = None
     if actuals is not None:
         merged_actuals = combined_df.merge(actuals[["ds", "y"]], on="ds", how="inner")
         if len(merged_actuals) != len(combined_df):
@@ -501,6 +514,7 @@ def build_ensemble(
                 f"vs. {len(combined_df)} expected)."
             )
         ensemble_mape = mape(merged_actuals["y"].values, merged_actuals["yhat"].values)
+        ensemble_wape = wape(merged_actuals["y"].values, merged_actuals["yhat"].values)
 
     return EnsembleResult(
         combined=combined_df,
@@ -512,6 +526,7 @@ def build_ensemble(
         trim_shares=trim_shares,
         rejected_models=rejected,
         mape=ensemble_mape,
+        wape=ensemble_wape,
     )
 
 
@@ -521,6 +536,7 @@ def build_ensembles(
     per_model_predictions: Dict[str, pd.DataFrame],
     mape_threshold: Optional[float] = None,
     actuals: Optional[pd.DataFrame] = None,
+    metric: str = "MAPE",
 ) -> Dict[str, EnsembleResult]:
     """
     Build one EnsembleResult per requested rule, keyed by rule name.
@@ -543,6 +559,7 @@ def build_ensembles(
             mape_threshold=mape_threshold,
             method=method,
             actuals=actuals,
+            metric=metric,
         )
         for method in methods
     }

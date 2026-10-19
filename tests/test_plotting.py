@@ -598,3 +598,51 @@ def test_plot_forecast_reads_text_dates_in_history():
         target_column="orders",
     )
     assert len(axes) == 1
+
+
+# ---------- WAPE and the seasonal-naive baseline ----------
+
+
+def _scored(mape_value, wape_value):
+    result = make_eval_result(mape_value)
+    result.wape = wape_value
+    return result
+
+
+def test_line_labels_give_wape_next_to_mape():
+    ax = _only(plot_evaluation({"prophet": _scored(5.0, 7.5)}))
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert "prophet predicted (MAPE 5.00%, WAPE 7.50%)" in labels
+
+
+def test_comparison_chart_draws_the_chosen_metric_and_the_baseline():
+    results = {"prophet": _scored(5.0, 30.0), "catboost": _scored(10.0, 20.0)}
+    baseline = _scored(8.0, 25.0)
+    ax = plot_model_comparison(results, metric="wape", baseline=baseline)
+    heights = [round(p.get_height(), 2) for p in ax.patches]
+    assert heights == [30.0, 20.0, 25.0]
+    assert [t.get_text() for t in ax.get_xticklabels()][-1] == "seasonal naive"
+    assert ax.get_ylabel() == "WAPE (%)"
+    assert "WAPE" in ax.get_title()
+
+
+def test_comparison_chart_rejects_an_unknown_metric():
+    with pytest.raises(InvalidConfigError, match="metric must be one of"):
+        plot_model_comparison({"prophet": _scored(5.0, 7.5)}, metric="rmse")
+
+
+def test_save_evaluation_plots_names_the_comparison_by_metric(tmp_path):
+    written = save_evaluation_plots(
+        {"prophet": _scored(5.0, 7.5)}, output_dir=str(tmp_path), metric="wape"
+    )
+    assert Path(written["wape_comparison"]).name == "evaluation_wape_comparison.png"
+    assert "mape_comparison" not in written
+
+
+def test_comparison_metric_accepts_any_case(tmp_path):
+    ax = plot_model_comparison({"prophet": _scored(5.0, 7.5)}, metric="WAPE")
+    assert ax.get_ylabel() == "WAPE (%)"
+    written = save_evaluation_plots(
+        {"prophet": _scored(5.0, 7.5)}, output_dir=str(tmp_path), metric="Wape"
+    )
+    assert Path(written["wape_comparison"]).name == "evaluation_wape_comparison.png"

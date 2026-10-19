@@ -45,7 +45,13 @@ from horizon_forecaster.evaluation.ensemble import (
     EnsembleResult,
     build_ensembles,
 )
-from horizon_forecaster.evaluation.metrics import MapeResult, mape
+from horizon_forecaster.evaluation.metrics import (
+    MapeResult,
+    error_correlation,
+    mape,
+    seasonal_naive,
+    wape,
+)
 from horizon_forecaster.future_exog import (
     check_future_table,
     describe_generation_risks,
@@ -112,6 +118,17 @@ def _default_params() -> dict:
 # implausible real-world forecast. Forecasting more than half your history
 # ahead is already a stretch and deserves a flag.
 _HORIZON_WARNING_FRACTION = 0.5
+
+# How a run is scored when deciding. MAPE is the default metric; "auto"
+# keeps it unless the target makes MAPE meaningless, see
+# HorizonForecaster._resolve_selection_metric().
+SELECTION_METRICS = ("auto", "mape", "wape")
+# "auto" switches to WAPE when at least this share of the target is 0
+# (MAPE skips every zero actual) or when the target has any negative value.
+_WAPE_ZERO_SHARE = 0.10
+# At or above this share of zero targets the data is refused: on the series
+# tested, every model then did worse than forecasting 0 every day.
+_SPARSE_TARGET_ZERO_SHARE = 0.50
 
 # Forecasts are flagged when they peak more than this far above (or bottom
 # this far below) anything ever observed in the target. A trending series
@@ -351,6 +368,7 @@ class _Selection:
     params: dict
     validation_mape: MapeResult
     grid_search_summary: Optional[List[dict]] = None
+    validation_wape: float = float("nan")
 
 
 @dataclass
@@ -395,10 +413,17 @@ class EvaluationResult:
             train-only fit used during selection: refitting on everything
             available before scoring test is what makes the reported MAPE
             an estimate of the procedure that produces the real forecast.
+        wape: WAPE on the TEST window, next to `mape`. WAPE divides the total
+            absolute error by the total actual, so unlike MAPE it counts the
+            rows whose actual is 0.
+        validation_wape: WAPE on the VALIDATION window, next to
+            `validation_mape`. Which of the two drove the decisions is the
+            forecaster's `selection_metric`.
         grid_search_summary: if hyperparameters were selected via grid
             search (no explicit model_params override given), a list of
-            every candidate tried, each as {"params": {...}, "mape": float}
-            where that mape is the VALIDATION score, sorted best-to-worst.
+            every candidate tried, each as {"params": {...}, "mape": float,
+            "wape": float} where both are VALIDATION scores, sorted
+            best-to-worst on the forecaster's selection_metric.
             None if an explicit override was used -- and also None when a
             grid search WAS attempted but every candidate failed on the
             training window, so the first configured candidate was used
@@ -415,6 +440,8 @@ class EvaluationResult:
     test_predictions: pd.DataFrame
     fitted_model: BaseModel
     grid_search_summary: Optional[List[dict]] = None
+    wape: float = float("nan")
+    validation_wape: float = float("nan")
 
 
 @dataclass
@@ -537,6 +564,18 @@ class HorizonForecaster:
             either day-first or month-first raises InvalidConfigError
             rather than being guessed; pass date_format to settle it, or
             for any format outside that list.
+        selection_metric: the score every decision is made on -- the grid
+            search, the mape_threshold screen, the inverse weights and the
+            exported best model, in any case ("MAPE" works). "mape" or
+            "wape" forces one; "auto" (the
+            default) uses MAPE unless the target is 0 on at least 10% of its
+            rows or has a negative value, where MAPE stops meaning anything
+            (it skips zero actuals, and explodes near zero), and then uses
+            WAPE, with a warning. Both are always reported. mape_threshold
+            applies to whichever is used; the two are on the same scale for
+            ordinary series. The resolved metric is `self.selection_metric`.
+            A target that is 0 on half its rows or more is refused whatever
+            this is set to: see _resolve_selection_metric().
 
     Dates are parsed BEFORE the data is sorted or split, so text dates sort
     by time rather than alphabetically. The date column must then meet the
@@ -603,6 +642,7 @@ class HorizonForecaster:
         future_exog_aggregator: str = "mean",
         recent_average_window: int = 28,
         date_format: Optional[str] = None,
+        selection_metric: str = "auto",
     ):
         self.frequency = validate_frequency(frequency)
         self.date_column = date_column
@@ -610,6 +650,17 @@ class HorizonForecaster:
 
         self.mape_threshold = validate_mape_threshold(mape_threshold)
         self.ensemble_methods = self._validate_ensemble_methods(ensemble_method)
+        # Abbreviations, so "MAPE" or " Wape " are accepted too, as frequency
+        # is; the stored value is always lowercase.
+        if isinstance(selection_metric, str):
+            selection_metric = selection_metric.strip().lower()
+        if selection_metric not in SELECTION_METRICS:
+            raise InvalidConfigError(
+                f"selection_metric must be one of {list(SELECTION_METRICS)} "
+                f"(got {selection_metric!r}).",
+                param_name="selection_metric",
+                provided_value=selection_metric,
+            )
 
         # Future-exogenous-data strategy (how forecast() generates future
         # driver values when they aren't supplied). Validated here like
@@ -710,6 +761,9 @@ class HorizonForecaster:
         # reason, rather than run to a misleading result. {model: reason}.
         self.skipped_models: Dict[str, str] = {}
         self._skip_models_that_cannot_fit(raw_df[target_column])
+        self.selection_metric = self._resolve_selection_metric(
+            raw_df[target_column], raw_df[date_column], selection_metric
+        )
 
         # Kept for forecast(): a future table may name a declared driver that
         # was dropped below, which warns rather than errors.
@@ -830,6 +884,12 @@ class HorizonForecaster:
         self.future_exog_used: Optional[pd.DataFrame] = None
 
         self.evaluate_errors: Dict[str, HorizonForecasterError] = {}
+        # Set by evaluate(): the per-model results it returned, the
+        # seasonal-naive baseline scored on the same windows, and the
+        # correlation of the models' test errors (None with one model).
+        self.evaluation_results: Optional[Dict[str, EvaluationResult]] = None
+        self.naive_baseline: Optional[EvaluationResult] = None
+        self.test_error_correlation: Optional[pd.DataFrame] = None
         self.forecast_errors: Dict[str, HorizonForecasterError] = {}
 
         # Ensemble side-channel state. evaluate_ensemble/forecast_ensemble
@@ -877,6 +937,180 @@ class HorizonForecaster:
 
         # De-duplicate while preserving the caller's order.
         return list(dict.fromkeys(requested))
+
+    def _resolve_selection_metric(self, target: pd.Series, dates: pd.Series, requested: str) -> str:
+        """
+        Decide which score drives selection, and refuse a target that is
+        mostly zeros.
+
+        At or above _SPARSE_TARGET_ZERO_SHARE (50%) zero targets the data is
+        refused, whatever selection_metric says: forecasting 0 every day has a
+        WAPE of exactly 100%, and on the series tested above this share
+        (70% and 53% zeros) every model scored 103-129%, worse than that. For
+        daily data the error says how often the WEEKLY totals are 0, since
+        aggregating is usually the fix (those two series: 9% and 6%).
+
+        Otherwise "auto" keeps MAPE, the default metric, unless MAPE stops
+        meaning anything: when at least _WAPE_ZERO_SHARE (10%) of the target is
+        0 (MAPE skips every zero actual -- on one real series the models' test
+        MAPE was 238-420% while their WAPE was 34-41%), or when the target has
+        a negative value (MAPE explodes as actuals cross zero). Then WAPE is
+        used, with a warning.
+        """
+        values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+        n = len(values)
+        zero_share = float((values == 0).mean()) if n else 0.0
+        if zero_share >= _SPARSE_TARGET_ZERO_SHARE:
+            unit = "days" if self.frequency == "daily" else "weeks"
+            hint = (
+                "Horizon has nothing coarser than weekly, so this series cannot be forecast "
+                "as it stands."
+            )
+            if self.frequency == "daily":
+                weeks = (
+                    pd.DataFrame({"week": pd.to_datetime(dates).dt.to_period("W"), "y": values})
+                    .groupby("week")["y"]
+                    .sum()
+                    .sort_index()
+                )
+                # Every calendar week inside the data's range, so the first
+                # and last (usually partial) weeks are left out -- but a week
+                # is not required to have 7 rows, since a business closed at
+                # weekends never has them.
+                complete = weeks.iloc[1:-1]
+                if len(complete):
+                    weekly_zero = float((complete == 0).mean())
+                    hint = (
+                        f"Summed to weekly totals it is 0 in {weekly_zero:.0%} of "
+                        f"{len(complete)} complete weeks: aggregate the data to weeks (sum "
+                        f"the target and any spend columns; average prices and indices) and "
+                        f"run with frequency='weekly'."
+                    )
+            raise InvalidConfigError(
+                f"The target '{self.target_column}' is 0 on {zero_share:.0%} of {unit} "
+                f"({int((values == 0).sum())} of {n}). At "
+                f"{_SPARSE_TARGET_ZERO_SHARE:.0%} or more, every model tested did worse than "
+                f"forecasting 0 every period. {hint} Series that are mostly zeros need a "
+                f"method built for intermittent demand, which Horizon does not include.",
+                param_name="raw_df",
+                provided_value=round(zero_share, 4),
+            )
+        if requested != "auto":
+            return requested
+        reasons = []
+        if zero_share >= _WAPE_ZERO_SHARE:
+            unit = "days" if self.frequency == "daily" else "weeks"
+            reasons.append(f"is 0 on {zero_share:.0%} of {unit} (MAPE skips every zero actual)")
+        n_negative = int((values < 0).sum())
+        if n_negative:
+            reasons.append(
+                f"is negative in {n_negative} of {n} rows (MAPE is meaningless as actuals "
+                f"cross zero)"
+            )
+        if not reasons:
+            return "mape"
+        warnings.warn(
+            f"The target '{self.target_column}' {' and '.join(reasons)}, so model selection, "
+            f"the mape_threshold screen, ensemble weights and the best-model choice use WAPE "
+            f"instead of MAPE. Both are still reported. Pass selection_metric='mape' to keep "
+            f"MAPE.",
+            stacklevel=3,
+        )
+        return "wape"
+
+    @property
+    def _metric_label(self) -> str:
+        return self.selection_metric.upper()
+
+    def _selection_score(self, selection: "_Selection") -> float:
+        """The validation score decisions are made on, by selection_metric."""
+        if self.selection_metric == "wape":
+            return selection.validation_wape
+        return selection.validation_mape.value
+
+    @property
+    def _naive_season_days(self) -> int:
+        """A week for daily data, 52 weeks for weekly data."""
+        return 7 if self.frequency == "daily" else 364
+
+    def _naive_description(self, history_length: int) -> str:
+        if self.frequency == "daily":
+            return "the same weekday last week" if history_length >= 7 else "the last value"
+        return "the same week last year" if history_length >= 52 else "the last value"
+
+    def _seasonal_naive_baseline(self) -> EvaluationResult:
+        """
+        The seasonal-naive forecast scored on the same windows as the models:
+        validation predicted from the training rows, test from training +
+        validation, exactly the history each model's fit had. Daily data
+        repeats the same weekday last week; weekly data the same week last
+        year (the last value when there is less than a year of history).
+        """
+        y = pd.to_numeric(self.raw_df[self.target_column]).to_numpy(dtype=float)
+        ds = pd.to_datetime(self.raw_df[self.date_column]).to_numpy()
+        n_train, n_val, n_test = self._n_train, self._n_validation, self._n_test
+        val_end = n_train + n_val
+        val_y, test_y = y[n_train:val_end], y[val_end:]
+        season = self._naive_season_days
+        # Matched by date, so data with closed days or gaps still repeats the
+        # same weekday (or week of the year) rather than whatever row is 7 back.
+        val_pred = seasonal_naive(ds[:n_train], y[:n_train], ds[n_train:val_end], season)
+        test_pred = seasonal_naive(ds[:val_end], y[:val_end], ds[val_end:], season)
+        test_predictions = pd.DataFrame(
+            {
+                "ds": ds[val_end:],
+                "y": test_y,
+                "yhat": test_pred,
+            }
+        )
+        return EvaluationResult(
+            model_name="seasonal_naive",
+            mape=mape(test_y, test_pred),
+            validation_mape=mape(val_y, val_pred),
+            n_train=n_train,
+            n_validation=n_val,
+            n_test=n_test,
+            test_predictions=test_predictions,
+            fitted_model=None,
+            grid_search_summary=None,
+            wape=wape(test_y, test_pred),
+            validation_wape=wape(val_y, val_pred),
+        )
+
+    def _warn_about_results_worse_than_naive(self, results) -> None:
+        """
+        Name every model and ensemble rule whose test WAPE is worse than the
+        seasonal-naive baseline's. Compared on WAPE whatever selection_metric
+        is, because WAPE counts every row. On 42 test series the default
+        trimmed ensemble lost to this baseline in 13 of the 35 that formed one,
+        and some single model did in 32 -- something no score on its own
+        reveals.
+        """
+        base = self.naive_baseline.wape
+        if base != base:  # all-zero test window: no baseline to compare with
+            return
+        worse = [
+            f"{name} {r.wape:.2f}"
+            for name, r in results.items()
+            if r.wape == r.wape and r.wape > base
+        ]
+        for method, ensemble in (self.evaluate_ensemble or {}).items():
+            if (
+                ensemble.wape is not None
+                and ensemble.wape == ensemble.wape
+                and ensemble.wape > base
+            ):
+                worse.append(f"the '{method}' ensemble {ensemble.wape:.2f}")
+        if not worse:
+            return
+        description = self._naive_description(self._n_train + self._n_validation)
+        warnings.warn(
+            f"On the test window these do worse than the seasonal-naive baseline, which "
+            f"repeats {description} (test WAPE {base:.2f}): {', '.join(worse)}. A forecast "
+            f"that cannot beat that adds nothing over it; compare before relying on it. The "
+            f"baseline is forecaster.naive_baseline.",
+            stacklevel=3,
+        )
 
     def _skip_models_that_cannot_fit(self, target: pd.Series) -> None:
         """
@@ -940,11 +1174,11 @@ class HorizonForecaster:
             rejection = ensemble.rejected_models.get(model)
             if rejection is not None and rejection.allowed_max is not None:
                 return (
-                    f"{model}'s validation MAPE {rejection.mape_value:.2f} is above "
-                    f"mape_threshold {rejection.allowed_max:g}"
+                    f"{model}'s validation {self._metric_label} {rejection.mape_value:.2f} is "
+                    f"above mape_threshold {rejection.allowed_max:g}"
                 )
             if rejection is not None:
-                return f"{model} has no validation MAPE"
+                return f"{model} has no validation {self._metric_label}"
             return f"{model} was not used"
 
         def names(models) -> str:
@@ -966,7 +1200,8 @@ class HorizonForecaster:
                     limit = next(iter(over.values())).allowed_max
                     scores = ", ".join(f"{m} {r.mape_value:.2f}" for m, r in over.items())
                     reasons = (
-                        f"every model's validation MAPE is above mape_threshold {limit:g}: {scores}"
+                        f"every model's validation {self._metric_label} is above "
+                        f"mape_threshold {limit:g}: {scores}"
                     )
                 else:
                     reasons = "; ".join(why(m, ensemble) for m in ran)
@@ -1448,7 +1683,15 @@ class HorizonForecaster:
                 failures[str(grid_entry)] = f"{type(e).__name__}: {e}"
                 failure_exceptions.append(e)
                 continue
-            candidates.append((full_params, model, forecast_df, mape_result))
+            candidates.append(
+                (
+                    full_params,
+                    model,
+                    forecast_df,
+                    mape_result,
+                    wape(y_validation, forecast_df["yhat"].values),
+                )
+            )
 
         if not candidates and all(isinstance(e, InsufficientDataError) for e in failure_exceptions):
             # Every candidate failed because the TRAINING WINDOW is below
@@ -1525,24 +1768,27 @@ class HorizonForecaster:
             )
 
         def sort_key(candidate):
-            val = candidate[3].value
+            val = candidate[4] if self.selection_metric == "wape" else candidate[3].value
             return float("inf") if val != val else val
 
         candidates.sort(key=sort_key)
-        best_params, _best_model, _best_forecast_df, best_mape = candidates[0]
+        best_params, _best_model, _best_forecast_df, best_mape, best_wape = candidates[0]
 
         # The candidates' own fitted models are deliberately discarded. Each
         # was fitted on TRAIN only, and every window that gets reported is
         # produced by a later refit on train+validation -- keeping the
         # train-only fits around would just invite something downstream to
         # report from the wrong model.
-        grid_search_summary = [{"params": p, "mape": m.value} for p, _, _, m in candidates]
+        grid_search_summary = [
+            {"params": p, "mape": m.value, "wape": w} for p, _, _, m, w in candidates
+        ]
 
         self._selected_hyperparameters[model_name] = best_params
         return _Selection(
             params=best_params,
             validation_mape=best_mape,
             grid_search_summary=grid_search_summary,
+            validation_wape=best_wape,
         )
 
     def _select(self, model_name: str) -> _Selection:
@@ -1581,6 +1827,7 @@ class HorizonForecaster:
                     adapted_validation_features,
                     y_validation,
                 )
+                validation_wape = wape(y_validation, _forecast_df["yhat"].values)
             except HorizonForecasterError as e:
                 # With explicit params there is nothing to SELECT -- this fit
                 # exists only to produce a validation score. If it fails (a
@@ -1604,10 +1851,12 @@ class HorizonForecaster:
                 validation_mape = MapeResult(
                     value=float("nan"), excluded_zero_actual_count=0, total_count=0
                 )
+                validation_wape = float("nan")
             selection = _Selection(
                 params=explicit_params,
                 validation_mape=validation_mape,
                 grid_search_summary=None,
+                validation_wape=validation_wape,
             )
 
         self._selection_cache[model_name] = selection
@@ -1632,6 +1881,7 @@ class HorizonForecaster:
             y_test,
         )
         test_predictions = self._build_test_predictions(adapted_test_features, y_test, forecast_df)
+        test_wape = wape(y_test, forecast_df["yhat"].values)
 
         result = EvaluationResult(
             model_name=model.model_name,
@@ -1643,6 +1893,8 @@ class HorizonForecaster:
             test_predictions=test_predictions,
             fitted_model=model,
             grid_search_summary=selection.grid_search_summary,
+            wape=test_wape,
+            validation_wape=selection.validation_wape,
         )
         self._evaluation_cache[model_name] = result
         return result
@@ -1673,6 +1925,12 @@ class HorizonForecaster:
         """
         results: Dict[str, EvaluationResult] = {}
         errors: Dict[str, HorizonForecasterError] = {}
+        # Cleared first, as forecast() clears its own state, so a call that
+        # raises cannot leave an earlier call's results looking like its own
+        # (the exports read these through forecaster=).
+        self.evaluation_results = None
+        self.naive_baseline = None
+        self.test_error_correlation = None
 
         for model_name in self.models:
             try:
@@ -1708,12 +1966,20 @@ class HorizonForecaster:
         first_result = next(iter(results.values()))
         self.evaluate_ensemble = build_ensembles(
             methods=self.ensemble_methods,
-            per_model_selection_mape={name: r.validation_mape.value for name, r in results.items()},
+            per_model_selection_mape={
+                name: self._selection_score(self._selection_cache[name]) for name in results
+            },
             per_model_predictions={name: r.test_predictions for name, r in results.items()},
             mape_threshold=self.mape_threshold,
             actuals=first_result.test_predictions[["ds", "y"]],
+            metric=self._metric_label,
         )
         self._warn_about_lost_models("evaluate", results, errors, self.evaluate_ensemble)
+
+        self.evaluation_results = results
+        self.naive_baseline = self._seasonal_naive_baseline()
+        self.test_error_correlation = error_correlation(results) if len(results) > 1 else None
+        self._warn_about_results_worse_than_naive(results)
 
         return results
 
@@ -2009,7 +2275,7 @@ class HorizonForecaster:
         # already cached. `actuals=None` because no ground truth for the
         # future exists yet, so no ensemble MAPE is computed.
         selection_mape = {
-            name: self._selection_cache[name].validation_mape.value for name in results
+            name: self._selection_score(self._selection_cache[name]) for name in results
         }
         self.forecast_ensemble = build_ensembles(
             methods=self.ensemble_methods,
@@ -2017,6 +2283,7 @@ class HorizonForecaster:
             per_model_predictions={name: results[name].forecast for name in selection_mape},
             mape_threshold=self.mape_threshold,
             actuals=None,
+            metric=self._metric_label,
         )
         self._warn_about_lost_models("forecast", results, errors, self.forecast_ensemble)
 

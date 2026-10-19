@@ -236,14 +236,16 @@ anything in `forecaster.py` or `evaluation/ensemble.py`:
   window only; the test window is reported and never read by a selection path.
   Any new feature that wants an accuracy number has to choose which of the two
   it is entitled to — if it influences a decision, it gets the validation
-  score.
+  score. That score is MAPE or WAPE depending on `selection_metric`, so read it
+  through `HorizonForecaster._selection_score()` rather than
+  `validation_mape` directly.
 - **The default combination rule is a trimmed mean**, which has no weights at
   all. Code that assumes `EnsembleResult.weights` is a populated dict will
   break: it is `Optional` and is `None` for weightless rules.
 
 Known gaps — rolling-origin backtesting, benchmark-relative metrics
-(RelMAE/MASE), family de-duplication of Prophet and NeuralProphet, and an
-error-diversity diagnostic — are listed with their reasoning under "Still
+(RelMAE/MASE), family de-duplication of Prophet and NeuralProphet, and using
+error diversity in the ensemble (it is reported, not acted on) — are listed with their reasoning under "Still
 deferred" in [`CHANGELOG.md`](CHANGELOG.md) and in
 [`docs/design_notes.md`](docs/design_notes.md) §9. They are open to
 contribution, but each is a design conversation first.

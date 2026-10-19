@@ -76,7 +76,13 @@ behaviour.
   once on the test window, which no selection path ever reads. The reported
   `mape` is therefore an out-of-sample number rather than the score a model was
   chosen for, and the selection score is kept alongside it as
-  `validation_mape` (with explicit zero-actual handling in both).
+  `validation_mape` (with explicit zero-actual handling in both). WAPE is
+  reported next to MAPE, and replaces it for every decision when the target
+  is 0 in 10% or more of periods or goes negative (`selection_metric`).
+- **A baseline to beat.** `evaluate()` scores a seasonal-naive forecast (same
+  weekday last week, or same week last year) on the same windows and warns
+  about any model or ensemble rule that does worse, and reports how alike the
+  models' test errors are.
 - **Robust combination rules.** Models at or below a configurable
   `mape_threshold` are combined by a **trimmed mean** (the default: discard the
   highest and lowest member each period, average the rest), or by
@@ -95,8 +101,9 @@ behaviour.
   (`carry_forward`, `recent_average`, season-aware `historical_average`,
   `seasonal_naive` with drift, `linear_trend`, or `cycle`), with type-aware
   handling of event flags and partial fill for the columns you *do* know.
-- **Ready-to-use outputs.** Overlay and per-model charts, a MAPE comparison bar
-  chart, and a one-call export of the run's CSVs plus PNGs.
+- **Ready-to-use outputs.** Overlay and per-model charts, a comparison bar
+  chart (test MAPE or WAPE, with the seasonal-naive baseline), and a one-call
+  export of the run's CSVs plus PNGs.
 - **Input checks that fail loudly.** Dates are parsed before anything is
   sorted and must meet an explicit contract (format, duplicates, spacing,
   gaps); a supplied future driver table must match the forecast exactly;
@@ -220,10 +227,12 @@ run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
 
 - **CSVs** — one `final_ensemble_<method>` per combination rule, plus
   `final_best_model`, `per_model`, `rejected_models` (per model *and* method), and
-  `model_summary` (validation MAPE, test MAPE, method, rule applied, weight,
-  status, and why each model was or was not exported as the best single
-  model). The best single model is the lowest validation MAPE among the models
-  within `mape_threshold` on both validation and test.
+  `model_summary` (validation and test MAPE and WAPE, method, rule applied,
+  weight, status, why each model was or was not exported as the best single
+  model, and whether it beats the seasonal-naive baseline, which has a row of
+  its own), plus `error_correlation` when `forecaster=` is passed. The best
+  single model is the lowest validation score among the models within
+  `mape_threshold` on both validation and test.
 - **Plots** (unless disabled) — one overlay per combination rule (every
   model against that rule), one dedicated figure per model, and one per rule.
   Five models and three rules give three overlays and eight individual
@@ -269,14 +278,14 @@ Known gaps, deliberately **not** in 1.0 and all candidates for future work:
 - **Rolling-origin backtesting.** Every score here comes from a single test
   window, so it reflects one particular stretch of history rather than an
   average over several origins.
-- **Benchmark-relative metrics** (RelMAE / MASE). MAPE alone says nothing about
-  whether a model beats a seasonal naive baseline, and is unusable on series
-  with zero actuals.
+- **Benchmark-relative metrics** (RelMAE / MASE). The seasonal-naive baseline
+  is now reported and warned about, but nothing is selected or weighted on a
+  score relative to it.
 - **Family de-duplication.** Prophet and NeuralProphet are close relatives, so a
   combination containing both is less diverse than its member count suggests;
   nothing currently accounts for that.
-- **An error-diversity diagnostic.** The value of combining depends on members
-  making *different* errors, which the library does not yet measure or report.
+- **Acting on error diversity.** The correlation of the models' test errors is
+  now reported, but the ensemble does not use it to choose or weight members.
 
 The reasoning behind the design — the contracts, the per-model decisions, and
 the failure modes that produced them — is in

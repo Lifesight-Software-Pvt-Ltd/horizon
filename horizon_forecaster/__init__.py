@@ -24,7 +24,15 @@ from horizon_forecaster.evaluation.ensemble import (
     build_ensemble,
     build_ensembles,
 )
-from horizon_forecaster.evaluation.metrics import MapeResult, mae, mape, rmse, wape
+from horizon_forecaster.evaluation.metrics import (
+    MapeResult,
+    error_correlation,
+    mae,
+    mape,
+    rmse,
+    seasonal_naive,
+    wape,
+)
 from horizon_forecaster.exceptions import (
     AllModelsRejectedError,
     HorizonForecasterError,
@@ -64,6 +72,8 @@ __all__ = [
     "wape",
     "rmse",
     "mae",
+    "seasonal_naive",
+    "error_correlation",
     # configuration
     "SUPPORTED_FREQUENCIES",
     "DEFAULT_EVALUATION_WINDOWS",

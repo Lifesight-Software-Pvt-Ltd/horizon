@@ -143,6 +143,32 @@ passing both raises `InvalidConfigError` rather than letting one silently win.
 On a short series the defaults are scaled down (with a warning) rather than
 leaving nothing to train on.
 
+### Which score drives the decisions: MAPE or WAPE
+
+Every decision — the grid search, the `mape_threshold` screen, inverse-MAPE
+weights and the exported best model — is made on one validation score, set by
+`selection_metric`:
+
+- `"auto"` (the default) uses **MAPE**, unless MAPE stops meaning anything on
+  your target: when 10% or more of its values are 0 (MAPE leaves out every
+  zero actual, so it scores a model on the days it finds easiest), or when any
+  value is negative (MAPE explodes as actuals cross zero). Then it uses
+  **WAPE**, `sum|actual - forecast| / sum|actual| × 100`, which counts every
+  period, and warns that it did.
+- `"mape"` or `"wape"` fixes the choice. Any case works (`"MAPE"`,
+  `"Wape"`); the resolved one is `forecaster.selection_metric`, always
+  lowercase.
+
+Both scores are reported either way, and `mape_threshold` applies to
+whichever is selected. On 42 test series the two picked the same models on
+35; where they disagreed, WAPE's pick did better on test in 6 of 7.
+
+A target that is 0 in **50% or more** of its periods is refused with
+`InvalidConfigError`, whatever `selection_metric` says: on the series tested
+above that share, every model did worse than forecasting 0 every period. For
+daily data the error says how often the weekly totals are 0, since summing to
+weeks and running with `frequency="weekly"` is usually the fix.
+
 ## 3. Evaluate on the held-out split
 
 `evaluate()` splits chronologically into **train / validation / test**. Each
@@ -155,9 +181,11 @@ every result carries two MAPEs, and they are not interchangeable:
 |---|---|---|
 | `res.validation_mape` | validation | the score every DECISION was made on. Optimistic by construction, since candidates were chosen to minimise it. |
 | `res.mape` | test | the score REPORTED — the honest out-of-sample estimate. |
+| `res.validation_wape`, `res.wape` | validation, test | the same two windows scored as WAPE, which counts the zero actuals MAPE leaves out (`res.mape.excluded_zero_actual_count`). |
 
 A large gap between them means the grid search found a candidate that suited
-the validation window specifically rather than the series generally.
+the validation window specifically rather than the series generally. When
+`selection_metric` is WAPE, read the WAPE pair the same way.
 
 `evaluate()` returns a dict keyed by model name (always a dict, even for one
 model).
@@ -185,7 +213,25 @@ for method, ens in forecaster.evaluate_ensemble.items():
 
 # Models that failed to fit/predict at all are recorded separately:
 print("errors:", forecaster.evaluate_errors)
+
+# The bar every forecast has to clear, and how alike the models' mistakes are:
+print("seasonal naive test WAPE:", forecaster.naive_baseline.wape)
+print(forecaster.test_error_correlation)
 ```
+
+**The seasonal-naive baseline.** `evaluate()` also scores the simplest
+possible forecast on the same windows: the same weekday last week for daily
+data, the same week last year for weekly, matched by date so closed days and
+missing dates don't shift it. `forecaster.naive_baseline` is an
+`EvaluationResult` like the models'. Any model or ensemble rule whose test
+WAPE is worse than the baseline's is named in a warning — on 42 test series
+the default trimmed ensemble lost to it in 13 of the 35 where it formed,
+which no score on its own reveals.
+
+**Error correlation.** `forecaster.test_error_correlation` is the correlation
+of each pair of models' signed test errors. An ensemble gains only from
+members that are wrong in different ways: two models correlating near 1 make
+the same mistakes, so averaging them adds little.
 
 A model in an ensemble's `rejected_models` fit successfully but was not
 admitted to the combination; a model in `evaluate_errors` failed outright. The
@@ -308,22 +354,11 @@ to use it.
 ## 5. Export CSVs and plots
 
 ```python
-from horizon_forecaster import DEFAULT_ENSEMBLE_METHOD
 from horizon_forecaster.exporters import export_forecast
-
-default_eval_ensemble = (forecaster.evaluate_ensemble or {}).get(DEFAULT_ENSEMBLE_METHOD)
 
 paths = export_forecast(
     forecasts,
-    forecaster.forecast_ensemble,   # the whole {method: EnsembleResult} dict
-    per_model_mape={m: r.mape.value for m, r in results.items()},
-    per_model_validation_mape={m: r.validation_mape.value for m, r in results.items()},
-    ensemble_mape=(
-        default_eval_ensemble.mape.value
-        if default_eval_ensemble is not None and default_eval_ensemble.mape is not None
-        else None
-    ),
-    mape_threshold=forecaster.mape_threshold,   # the best-model file's two checks use it
+    forecaster=forecaster,   # after evaluate() and forecast()
     history=df, date_column="date", target_column="orders",
     output_dir="output", prefix="forecast",
     save_plots=True,     # set False for CSVs only
@@ -331,9 +366,17 @@ paths = export_forecast(
 print(paths)
 ```
 
+`forecaster=` fills in everything the files need: the ensembles, each
+model's and each rule's scores, `mape_threshold`, the selection metric and
+the seasonal-naive baseline. Any of `ensemble`, `per_model_mape`,
+`per_model_validation_mape`, `ensemble_mape` and `mape_threshold` passed
+explicitly still wins, and the export works without `forecaster=` as before,
+just without the WAPE columns, the baseline row and the error correlation.
+
 This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
-`per_model`, `rejected_models` and `model_summary`.
+`per_model`, `rejected_models` and `model_summary`, and, with `forecaster=`
+and two or more models, `error_correlation`.
 
 **How the best single model is chosen.** `final_best_model` is the model with
 the lowest **validation** MAPE among those within `mape_threshold` on
@@ -344,8 +387,10 @@ test. Because test helped decide, that model's test MAPE is slightly
 optimistic, and `model_summary`'s `best_model_check` column says so, along
 with why every other model was not chosen. If no model passes, the file is
 written empty with a warning naming each model's scores; the ensemble files
-are unaffected. Pass `per_model_validation_mape` (required for the choice)
-and your forecaster's `mape_threshold`.
+are unaffected. When the forecaster selected on WAPE, the best model is
+chosen on WAPE too, so it agrees with the models the ensemble screened.
+Without `forecaster=`, pass `per_model_validation_mape` (required for the
+choice) and your forecaster's `mape_threshold`.
 
 Unless `save_plots=False`, it also writes, **per combination rule**, an
 overlay (`forecast_overlay_<method>.png`: every model, the history, and that
@@ -356,12 +401,21 @@ suffix is present even for a single rule, so a downstream job can glob a
 stable pattern.
 
 `model_summary` carries `validation_mape` and `mape` side by side, so the
-selection-vs-reported gap is visible per model, plus `best_model_check`. Its `ensemble_weight` column
+selection-vs-reported gap is visible per model, plus `best_model_check`.
+After those, in this order: `validation_wape` and `wape`;
+`zero_actuals_excluded`, the test rows MAPE left out; `beats_naive`, whether
+the row's test WAPE is lower than the seasonal-naive baseline's; and
+`selection_metric`. The baseline itself is the last row, `seasonal_naive`,
+with status `baseline`. In `rejected_models`, the `mape` column holds the
+score the model was screened on, so its WAPE when `selection_metric` is
+`"wape"`; the added `selection_metric` column and the `reason` text say
+which. Its `ensemble_weight` column
 is deliberately blank for weightless rules such as the default trimmed mean —
 there is no weight, and filling in an equal share would imply an averaging
-that did not happen. Note `ensemble_mape` is only a fallback for the combined
-row and is used only when a single method was requested; with several methods
-the forecast-context rows are left blank rather than repeating one score
+that did not happen. The combined rows take each rule's test scores from
+`evaluate()`. Without `forecaster=`, `ensemble_mape` is the fallback for the
+combined row and is used only when a single method was requested; with
+several methods those rows are left blank rather than repeating one score
 against three different series.
 
 ## Plotting directly
@@ -387,8 +441,14 @@ figures = plot_evaluation_per_model(results, forecaster.evaluate_ensemble)
 figures["sarimax"]
 figures["ensemble_trimmed"]
 
-# All rules on one Axes -- comparing them is what a bar chart is for.
-plot_model_comparison(results, forecaster.evaluate_ensemble)
+# All rules on one Axes -- comparing them is what a bar chart is for. Drawn on the
+# metric the run selected with, next to the seasonal-naive baseline.
+plot_model_comparison(
+    results,
+    forecaster.evaluate_ensemble,
+    metric=forecaster.selection_metric,
+    baseline=forecaster.naive_baseline,
+)
 ```
 
 `plot_evaluation` and `plot_forecast` draw **one chart per combination rule**,
@@ -402,8 +462,12 @@ silently dropping the rest.
 
 `plot_model_comparison` is the exception: comparing rules head-to-head is
 exactly what a bar chart is for, so every rule shares one Axes. Its bars are
-**test-window** MAPEs, not the validation scores the models were selected
-on.
+**test-window** scores, not the validation scores the models were selected
+on: MAPE by default, or WAPE with `metric="wape"`. Pass
+`forecaster.selection_metric` so the bars rank the models on the score the run
+used, and `baseline=forecaster.naive_baseline` for a grey seasonal-naive bar.
+`save_evaluation_plots()` takes the same two arguments. The other charts label
+each line with both MAPE and WAPE.
 
 ## Important: the ensemble is not guaranteed to win
 
