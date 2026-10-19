@@ -19,8 +19,9 @@ the `models=` constructor argument, or pass `models=None` to run them all.
 | `neuralprophet` | NeuralProphet (torch / PyTorch Lightning) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
 | `bayesianpymc` | PyMC (NUTS / MCMC) | yes (posterior credible band) | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
-All five are selected the same way — a hyperparameter grid search scored by
-MAPE on the **validation** window — and all five are then refit on
+All five are selected the same way — a hyperparameter grid search scored on
+the **validation** window by `selection_metric` (MAPE, or WAPE when the target
+has many zeros or goes negative) — and all five are then refit on
 train + validation and reported on the test window, which no selection path
 reads. So their reported numbers are directly comparable and feed the
 ensemble on equal footing.

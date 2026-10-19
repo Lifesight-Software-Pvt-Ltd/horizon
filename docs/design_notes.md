@@ -80,22 +80,24 @@ with a 0.67% MAPE and a daily-dated forecast; duplicate dates crashed
 dates first, on a copy, and enforces an explicit contract (the table in
 [`quickstart.md`](quickstart.md)): one of six text formats or a datetime,
 each date once, weekly dates on one weekday, more than half the steps
-exactly one period, and no more than 28 days missing in a row.
+exactly one period, and no date missing between the first and the last.
 
-Three choices in it are worth recording:
+Two choices in it are worth recording:
 
 - **Ambiguous dates raise rather than being guessed.** A column whose every
   value reads equally well day-first or month-first (`03/04/2024`) has no
   safe default, and real exports had been read month-first silently.
   `date_format` settles it.
-- **The gap limit is absolute, not a share of the history.** A hole of
-  three months removes the same stretch of trend and seasonality from four
-  years of data as from two, and SARIMAX treats the dates either side of it
-  as neighbours. Four weeks is the line; anything longer raises.
-- **Shorter, scattered gaps only warn.** They are common (weekday-only
-  sales, an occasional missing day), the models still run, and Robyn —
-  the MMM reference this library sits next to — does not reject them
-  either. The warning says what they cost; Horizon never fills them.
+- **Any missing date raises.** This first allowed scattered gaps with a
+  warning and raised only past four weeks in a row. It was tightened to
+  reject every missing date: the models count rows, not dates, so a
+  missing day shifts every weekly cycle after it and makes the
+  train/validation/test windows cover more time than their size says, and
+  SARIMAX treats the dates either side of a gap as neighbours. Horizon
+  still never fills a gap itself — only the user knows whether a missing
+  day was a closed day (0) or lost data — so the error lists the dates and
+  says what to add. A weekday that never appears in daily data is named,
+  because that is almost always a closed day left out of the export.
 
 ### Three windows, not two
 
@@ -193,10 +195,10 @@ window.
 
 ### Selection by MAPE, and its limits
 
-Candidates are scored by validation MAPE rather than an information
-criterion. AIC rewards in-sample fit, not out-of-sample accuracy, and
-selecting SARIMAX orders by AIC was a direct cause of occasional very high
-MAPE in the pre-library version of that model.
+Candidates are scored by validation MAPE (or WAPE, see `selection_metric`)
+rather than an information criterion. AIC rewards in-sample fit, not
+out-of-sample accuracy, and selecting SARIMAX orders by AIC was a direct cause
+of occasional very high MAPE in the pre-library version of that model.
 
 MAPE is undefined against zero actuals, so `mape()` leaves those rows out and
 returns a `MapeResult` saying how many. On a series with many zeros that
@@ -245,8 +247,8 @@ only documented.
 ## 3. The ensemble
 
 `build_ensembles()` combines the point forecasts of every model whose
-validation MAPE is at or below `mape_threshold`, under one or more rules,
-returning one `EnsembleResult` per rule.
+validation score (MAPE or WAPE) is at or below `mape_threshold`, under one
+or more rules, returning one `EnsembleResult` per rule.
 
 ### Why a trimmed mean is the default
 
@@ -283,7 +285,7 @@ first-class `degraded` field, and `rule_applied` names what actually ran:
 over exactly four members, trimming leaves two values whose mean *is* the
 median, and it says `"median"`. It also warns, but only when the fallback
 comes from losing models the caller asked for (a failure, the threshold, no
-validation MAPE): asking for two models and getting their mean is not a
+validation score): asking for two models and getting their mean is not a
 loss. A rule left with no members at all gets its own, louder warning,
 since its `combined` is `None` and there is no ensemble forecast.
 
@@ -311,10 +313,10 @@ so a trimmed ensemble returning an empty dict would have been
 indistinguishable from total rejection. Code that assumes a populated dict
 will break.
 
-A model whose validation MAPE is NaN is kept by the trimmed rule and excluded
+A model whose validation score is NaN is kept by the trimmed rule and excluded
 by the weighted ones. For `inverse_mape` that is arithmetic — there is no
 `1 / NaN`. `equal` reads only the member count and could weight such a model,
-but a model with no validation MAPE was never screened against
+but a model with no validation score was never screened against
 `mape_threshold` either, and the weighted rules are where an unscreened
 member does the most damage.
 
@@ -725,7 +727,7 @@ a first faceted-grid attempt made each panel too small to read.
   writes every file. A run where everything was rejected produces predictable
   header-only CSVs rather than a crash or a missing file.
 - **Both a `final_ensemble_<method>` and a `final_best_model` CSV are
-  written**, always, with `model_summary` carrying validation MAPE, test
+  written**, always, with `model_summary` carrying validation and test
   MAPE, method, rule applied, weight, status and `best_model_check`. The
   export deliberately does not bake in the choice between them.
 - **New summary columns go after the existing ones.** `validation_wape`,
@@ -743,12 +745,12 @@ a first faceted-grid attempt made each panel too small to read.
   It used to be the lowest test MAPE with no threshold, so the export was
   selected on the window that is meant only to be reported, and in one real
   run a model the ensemble had rejected was exported at 103% error. It is
-  now the lowest validation MAPE among the models within `mape_threshold` on
-  validation *and* on test. Ranking on test was measured and picked worse
+  now the lowest validation score (MAPE or WAPE) among the models within
+  `mape_threshold` on validation *and* on test. Ranking on test was measured and picked worse
   (§2, "Window sizes"), but as a veto it carries signal: in the same
   comparison, models that passed validation and then scored above 40% on
   test had a median error of 24.8% over the periods that followed, against
-  5.6% for the rest. The cost is that the chosen model's test MAPE is
+  5.6% for the rest. The cost is that the chosen model's test score is
   slightly optimistic — test helped choose it — which `best_model_check`
   states. When no model passes, the file is empty and a warning lists each
   model's scores, consistent with "exporters never raise on empty input".

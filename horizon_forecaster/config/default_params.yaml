@@ -5,7 +5,8 @@
 #                        explicit model_params override is given by the
 #                        caller, Horizon fits EVERY candidate on the
 #                        training window and selects whichever achieves the
-#                        lowest MAPE on the VALIDATION window.
+#                        lowest score on the VALIDATION window (MAPE, or WAPE
+#                        when the forecaster's selection_metric is "wape").
 #
 #                        Note "validation", not "test". Candidates are
 #                        chosen on a window that exists only for choosing;
@@ -456,7 +457,7 @@ sarimax:
 # more changepoints (n_changepoints), while changepoints_range stays at its
 # 0.8 default -- see the
 # inline note below for the 0.9 experiment that regressed and was reverted. The
-# grid selects the best by validation MAPE, so a setting
+# grid selects the best by validation score, so a setting
 # that overfits a given dataset simply won't be chosen. n_lags stays 0 (the
 # fit-once/predict-any-horizon comparability constraint -- see the wrapper).
 neuralprophet:
@@ -560,9 +561,9 @@ neuralprophet:
 #       one preserves strong, well-supported seasonality. Which wins is
 #       data-dependent -- neither is universally better -- so, exactly like
 #       n_fourier and Prophet's yearly_seasonality, it belongs in the grid and
-#       the grid picks it per dataset on validation MAPE. (Weekly leaves it at the
+#       the grid picks it per dataset on validation score. (Weekly leaves it at the
 #       wrapper's 1.0 default; it samples cheaply and had no ridge problem.)
-# cores=1 keeps runs reproducible and avoids multiprocessing issues under CI.
+# cores=1 keeps runs reproducible and avoids multiprocessing issues in the test suite.
 bayesianpymc:
   daily:
     base_hyperparameters:
@@ -576,7 +577,7 @@ bayesianpymc:
       ci_lower_pct: 3
       ci_upper_pct: 97
     # beta_fourier_sigma is grid-selected here (0.3 tight vs 1.0 loose) -- the
-    # data decides via validation MAPE; see note (c) above.
+    # data decides via validation score; see note (c) above.
     hyperparameter_grid:
       - {n_fourier: 3, beta_fourier_sigma: 0.3, target_accept: 0.95}
       - {n_fourier: 4, beta_fourier_sigma: 0.3, target_accept: 0.95}
