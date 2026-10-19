@@ -92,10 +92,41 @@ Three choices in it are worth recording:
   three months removes the same stretch of trend and seasonality from four
   years of data as from two, and SARIMAX treats the dates either side of it
   as neighbours. Four weeks is the line; anything longer raises.
-- **Shorter, scattered gaps only warn.** They are common (weekday-only
-  sales, an occasional missing day), the models still run, and Robyn —
+- **Shorter, scattered gaps only warn.** They are common (an occasional
+  missing day, a holiday on an open day), the models still run, and Robyn —
   the MMM reference this library sits next to — does not reject them
   either. The warning says what they cost; Horizon never fills them.
+
+### Closed weekdays are an operating calendar, not gaps
+
+Daily data with no weekend rows used to pass as "daily with gaps", and the
+damage showed up later. `forecast(10)` produced Saturday and Sunday dates at
+weekday levels (4 of the 10 rows), and NeuralProphet's were nonsense (Saturday
+1,770, Sunday 2,614 on a series around 2,000), since it had never seen a
+weekend. SARIMAX counted 7 rows as a week, so its Friday peak
+drifted onto other days and its test WAPE went from 5.03 to 9.56 (Mon–Fri) and
+from 5.77 to 14.85 (Mon–Sat). The gap warning told people to "add the missing
+periods", which is wrong for days the business is shut.
+
+A weekday that never appears, in data spanning at least four weeks, is now a
+closed day (`utils.find_closed_weekdays`). Periods become open days:
+`describe_date_spacing` steps over closed days, forecast dates come from a
+`CustomBusinessDay` on the open weekdays, SARIMAX's `seasonal_period` is the
+number of open days, and the 4-week gap limit is 4 weeks of open days. The
+models that work from dates (Prophet, NeuralProphet, CatBoost, Bayesian PyMC)
+need no change: their test scores on Mon–Fri data were within a point of the
+7-day ones, and once the forecast dates are open days only, nothing is asked
+of them about a weekend. The seasonal-naive baseline already
+matches by date.
+
+Adding the closed days as 0 was measured as the alternative and lost: it
+forces the models to learn an on/off pattern, Prophet and NeuralProphet then
+forecast about 300 a day for closed days, and their weekday WAPE rose (4.74 to
+6.23, and 4.43 to 5.48). The rule is strict — one Sunday in the data makes
+Sunday an open day — because guessing "mostly closed" would drop real
+observations; that case falls back to ordinary gaps. The accepted cost is that
+holidays on open days are still gaps, which SARIMAX handles worst (9.2 against
+5.0 WAPE with about 3% of weekdays missing); Horizon still does not fill them.
 
 ### Three windows, not two
 

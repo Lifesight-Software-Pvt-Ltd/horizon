@@ -51,7 +51,7 @@ rather than running on data that would give a confident but wrong result.
 | 4 | Each date appears once | `InvalidConfigError` naming the dates |
 | 5 | Every step between dates is a whole number of periods — weekly dates all on the same weekday | `InvalidConfigError` |
 | 6 | More than half of the steps are exactly one period — the data really is daily or weekly | `InvalidConfigError` if it looks like the other frequency (e.g. weekly data declared daily); `UnsupportedFrequencyError` for any other spacing (every 2 days, fortnightly, monthly) |
-| 7 | No more than 4 weeks (28 days) of dates missing in a row | `InvalidConfigError` naming the gap |
+| 7 | No more than 4 weeks (28 days) of dates missing in a row — on an operating calendar, 4 weeks of open days (20 for Mon–Fri) | `InvalidConfigError` naming the gap |
 
 Dates are parsed before anything is sorted or split, and your DataFrame is
 never modified. If every value could be read either way — `03/04/2024` is
@@ -59,12 +59,35 @@ never modified. If every value could be read either way — `03/04/2024` is
 `date_format="%d/%m/%Y"` (or `"%m/%d/%Y"`) to say which. `date_format` also
 accepts any other strftime pattern, e.g. `"%d.%m.%Y"`.
 
+**Days the business is closed.** Daily data in which a weekday never appears
+— no Saturday or Sunday rows for a business closed at weekends, or no Sundays
+for a store shut on Sundays — is read as an operating calendar. Those weekdays
+are closed days, named in a warning and in `forecaster.closed_weekdays`, and
+everything that counts periods counts open days instead:
+
+- `forecast(10)` gives the next 10 open days, so a Mon–Fri series is never
+  forecast for a weekend;
+- SARIMAX's weekly cycle is the number of open days (5 for Mon–Fri) unless
+  `model_params` sets `seasonal_period`;
+- a weekend is not a gap, and the gap rules below count open days.
+
+This is the standard way to forecast such data — Prophet's own documentation
+recommends forecasting only the days that have history. Adding the closed days
+back as 0 instead was tested and did worse: Prophet and NeuralProphet cannot
+predict an exact 0, so they forecast a few hundred sales for days the business
+is shut, and their weekday accuracy dropped (Prophet's WAPE 4.74 → 6.23). A
+weekday that appears even once is an open day, and the data must span at least
+four weeks before a weekday counts as closed. The validation and test windows
+are still counted in rows, so 84 rows of Mon–Fri data cover about 17 weeks.
+
 **Shorter gaps warn.** Data that meets all seven rules can still have missing
-periods — weekday-only sales, an occasional missing day. You get a warning with
-the share of periods present and the longest gap, and the run continues.
-Horizon never fills gaps, and accuracy suffers — SARIMAX most, since it treats
-consecutive rows as consecutive periods — so fill them if you can. If the
-business was closed on those dates, add them with a value of 0.
+periods — an occasional missing day, a public holiday on an open day. You get a
+warning with the share of periods present and the longest gap, and the run
+continues. Horizon never fills gaps, and accuracy suffers — SARIMAX most, since
+it treats consecutive rows as consecutive periods (on Mon–Fri data with about 3%
+of weekdays also missing, its WAPE was 9.2 against 5.0 without them) — so fill
+them if you can. If the business was closed on those dates, add them with a
+value of 0.
 
 ```python
 import pandas as pd

@@ -52,6 +52,10 @@ matrix, and returns raw-unit `yhat`. Differencing order `d` is ADF-derived
 from the data; `(p, q)`, seasonal `(P, Q)`, and `fourier_order_annual` are
 grid-searched. Design points worth knowing:
 
+- **The weekly cycle is counted in rows**, so on daily data with closed
+  weekdays its `seasonal_period` is the number of open days (5 for Mon–Fri,
+  6 when only Sunday is closed) rather than 7. Set `seasonal_period` in
+  `model_params` to override it.
 - **Prediction interval is a constant-variance band** (`mean ± z·σ` in log
   space), not `conf_int()`'s horizon-growing variance, which blows the raw
   upper bound up over long horizons.

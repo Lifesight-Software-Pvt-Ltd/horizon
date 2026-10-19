@@ -9,7 +9,7 @@ import datetime
 import numbers
 import warnings
 from collections.abc import Iterable, Mapping
-from typing import List, NamedTuple, Optional, Tuple, Union
+from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -291,8 +291,72 @@ def find_duplicate_dates(dates: pd.Series) -> List[pd.Timestamp]:
 MAX_CONTINUOUS_GAP_DAYS = 28
 
 
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# A weekday is only treated as a closed day once the dates span this many
+# days: four weeks, so a weekday that never appears has been absent at
+# least four times rather than once by chance.
+_MIN_DAYS_TO_FIND_CLOSED_WEEKDAYS = 28
+
+# A Monday, so open-day positions count whole weeks from a week boundary.
+_MONDAY = pd.Timestamp("1970-01-05")
+
+
+def find_closed_weekdays(sorted_dates: pd.Series) -> Tuple[int, ...]:
+    """
+    The weekdays (0 = Monday) that never appear in a daily date column -- the
+    days a business is closed, such as Saturday and Sunday for a Mon-Fri
+    operation. Empty when every weekday appears, when the dates span less
+    than four weeks (too short to tell a closed day from chance), or when
+    they all fall on one weekday (that is weekly data).
+
+    Strict on purpose: a weekday that appears even once (a store open on a
+    few Sundays) is an open day, and its missing dates are ordinary gaps.
+    """
+    dates = pd.to_datetime(pd.Series(sorted_dates)).reset_index(drop=True)
+    if len(dates) < 2:
+        return ()
+    if (dates.iloc[-1] - dates.iloc[0]).days + 1 < _MIN_DAYS_TO_FIND_CLOSED_WEEKDAYS:
+        return ()
+    present = set(dates.dt.dayofweek.unique().tolist())
+    if len(present) < 2:
+        # Every date on one weekday is weekly data, not a business open one day
+        # a week: the frequency check reports it as such.
+        return ()
+    return tuple(d for d in range(7) if d not in present)
+
+
+def open_day_positions(dates, closed_weekdays: Tuple[int, ...]) -> np.ndarray:
+    """
+    Each date's position on the calendar of open days: consecutive open days
+    are one apart, so Friday to Monday is one step on a Mon-Fri calendar.
+    Dates must fall on open days.
+    """
+    dates = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    open_days = [d for d in range(7) if d not in closed_weekdays]
+    rank = {d: i for i, d in enumerate(open_days)}
+    days = (dates.dt.normalize() - _MONDAY).dt.days.to_numpy()
+    weeks = np.floor_divide(days, 7)
+    return weeks * len(open_days) + dates.dt.dayofweek.map(rank).to_numpy()
+
+
+def describe_weekdays(
+    weekdays: Sequence[int], conjunction: str = "and", plural: bool = False
+) -> str:
+    """'Saturday and Sunday', 'Sunday', 'Monday, Wednesday and Friday', or with
+    conjunction="or" and plural=True, 'Saturdays or Sundays'."""
+    names = [WEEKDAY_NAMES[d] + ("s" if plural else "") for d in weekdays]
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + f" {conjunction} " + names[-1]
+
+
 class DateSpacing(NamedTuple):
-    """How a sorted, de-duplicated date column departs from one row per period."""
+    """
+    How a sorted, de-duplicated date column departs from one row per period.
+    With closed weekdays, a period is one OPEN day: Friday to Monday is one
+    step on a Mon-Fri calendar, not a gap.
+    """
 
     one_period_share: float  # share of steps that are exactly one period
     typical_step: pd.Timedelta  # the most common step
@@ -305,38 +369,49 @@ class DateSpacing(NamedTuple):
     coverage: float  # rows present / periods spanned
 
 
-def describe_date_spacing(sorted_dates: pd.Series, frequency: str) -> DateSpacing:
+def describe_date_spacing(
+    sorted_dates: pd.Series, frequency: str, closed_weekdays: Tuple[int, ...] = ()
+) -> DateSpacing:
     """
     Measure the spacing of a sorted, unique date column with at least two
     dates. A step of exactly one period is regular; several whole periods
     means periods are missing; a step that is not a whole number of periods
     (6 or 8 days on weekly data) is irregular.
-    """
-    period = pd.Timedelta(days=_PERIOD_DAYS[frequency])
-    dates = pd.Series(sorted_dates).reset_index(drop=True)
-    steps = dates.diff().iloc[1:]
 
-    whole = (steps % period) == pd.Timedelta(0)
-    gaps = steps[whole & (steps > period)]
+    With `closed_weekdays` (daily data only, see find_closed_weekdays()),
+    steps are counted in open days, so the closed days are not gaps.
+    """
+    dates = pd.Series(sorted_dates).reset_index(drop=True)
+    if closed_weekdays and frequency == "daily":
+        position = pd.Series(open_day_positions(dates, closed_weekdays), dtype=float)
+    else:
+        position = (dates - dates.iloc[0]) / pd.Timedelta(days=_PERIOD_DAYS[frequency])
+    steps = position.diff().iloc[1:]
+
+    whole = steps == np.round(steps)
+    if closed_weekdays and frequency == "daily":
+        # Open-day positions ignore the time of day, so check it directly.
+        whole &= (dates.diff().iloc[1:] % pd.Timedelta(days=1)) == pd.Timedelta(0)
+    gaps = steps[whole & (steps > 1)]
     irregular = steps[~whole]
 
     longest_gap, longest_gap_periods = None, 0
     if not gaps.empty:
         i = gaps.idxmax()
         longest_gap = (dates[i - 1], dates[i])
-        longest_gap_periods = int(gaps[i] / period) - 1
+        longest_gap_periods = int(gaps[i]) - 1
     irregular_example = None
     if not irregular.empty:
         i = irregular.index[0]
         irregular_example = (dates[i - 1], dates[i])
 
-    spanned = (dates.iloc[-1] - dates.iloc[0]) / period + 1
+    spanned = position.iloc[-1] - position.iloc[0] + 1
     return DateSpacing(
-        one_period_share=float((steps == period).mean()),
-        typical_step=steps.mode().iloc[0],
+        one_period_share=float((steps == 1).mean()),
+        typical_step=dates.diff().iloc[1:].mode().iloc[0],
         irregular_steps=len(irregular),
         irregular_example=irregular_example,
-        missing_periods=int(sum(int(g / period) - 1 for g in gaps)),
+        missing_periods=int(sum(int(g) - 1 for g in gaps)),
         gap_count=len(gaps),
         longest_gap=longest_gap,
         longest_gap_periods=longest_gap_periods,
@@ -594,41 +669,6 @@ def clean_zero_variance(
 
     cleaned = cleaned.drop(columns=dropped)
     return cleaned, dropped
-
-
-def infer_frequency(date_series: pd.Series) -> str:
-    """
-    Infer whether a date series represents daily or weekly granularity,
-    based on the most common gap between consecutive sorted dates.
-
-    Raises:
-        InvalidConfigError: if fewer than 2 distinct dates are provided
-            (too few to infer any spacing).
-        UnsupportedFrequencyError: if the inferred gap doesn't cleanly
-            match daily (1 day) or weekly (7 days) spacing.
-    """
-    sorted_dates = pd.to_datetime(date_series).sort_values().drop_duplicates()
-
-    if len(sorted_dates) < 2:
-        raise InvalidConfigError(
-            "Need at least 2 distinct dates to infer frequency.",
-            param_name="date_column",
-            provided_value=len(sorted_dates),
-        )
-
-    diffs = sorted_dates.diff().dropna()
-    most_common_gap = diffs.mode()[0]
-
-    if most_common_gap == pd.Timedelta(days=1):
-        return "daily"
-    elif most_common_gap == pd.Timedelta(days=7):
-        return "weekly"
-    else:
-        raise UnsupportedFrequencyError(
-            f"Detected date spacing of {most_common_gap}, which does not match "
-            f"a supported frequency ({', '.join(SUPPORTED_FREQUENCIES)}).",
-            provided_frequency=str(most_common_gap),
-        )
 
 
 def validate_frequency(freq: str) -> str:

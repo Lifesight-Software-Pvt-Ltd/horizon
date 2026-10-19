@@ -328,10 +328,15 @@ def test_constructor_warns_on_scattered_missing_dates_with_the_share_present():
     assert len(forecaster.raw_df) == 300
 
 
-def test_constructor_accepts_weekday_only_daily_data_with_a_warning():
+def test_constructor_treats_weekdays_that_never_appear_as_closed_days():
     weekdays = _DAILY[_DAILY.dayofweek < 5]
-    with pytest.warns(UserWarning, match="has gaps"):
-        _build(_spacing_df(weekdays), "daily")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster = _build(_spacing_df(weekdays), "daily")
+    messages = _messages(caught)
+    assert forecaster.closed_weekdays == ["Saturday", "Sunday"]
+    assert any("never fall on a Saturday or Sunday" in m for m in messages)
+    assert not any("has gaps" in m for m in messages)  # a weekend is not a gap
 
 
 def test_constructor_raises_immediately_when_training_size_leaves_no_test_rows():
@@ -2484,3 +2489,115 @@ def test_a_failed_evaluate_clears_the_previous_results(monkeypatch):
 @pytest.mark.parametrize("given, stored", [("MAPE", "mape"), ("Wape", "wape"), (" AUTO ", "mape")])
 def test_selection_metric_accepts_any_case(given, stored):
     assert _construct(make_noisy_raw_df(), selection_metric=given).selection_metric == stored
+
+
+# ---------- operating calendars: weekdays the business is closed ----------
+
+
+def _mon_fri(n=150):
+    df = make_noisy_raw_df(n=n)
+    return df[df["date"].dt.dayofweek < 5].reset_index(drop=True)
+
+
+def test_full_week_data_has_no_closed_weekdays():
+    assert _construct(make_noisy_raw_df()).closed_weekdays == []
+    weekly = make_raw_df(n=60, freq="W-MON")
+    assert (
+        _construct(weekly, frequency="weekly", validation_size=8, test_size=4).closed_weekdays == []
+    )
+
+
+def test_forecast_dates_skip_the_closed_days():
+    forecaster = _construct(_mon_fri(), models=["catboost"], model_params=dict(_QUICK))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecast = forecaster.forecast(horizon=10)["catboost"].forecast
+    days = pd.to_datetime(forecast["ds"])
+    assert len(days) == 10
+    assert (days.dt.dayofweek < 5).all()
+    assert days.iloc[0] > forecaster.raw_df["date"].max()
+
+
+def test_a_store_closed_on_sundays_forecasts_six_days_a_week():
+    df = make_noisy_raw_df(n=150)
+    df = df[df["date"].dt.dayofweek != 6].reset_index(drop=True)
+    with pytest.warns(
+        UserWarning, match="never fall on a Sunday, so Horizon treats it as a closed"
+    ):
+        forecaster = _construct(df, models=["catboost"], model_params=dict(_QUICK))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        days = pd.to_datetime(forecaster.forecast(horizon=12)["catboost"].forecast["ds"])
+    assert set(days.dt.dayofweek) == {0, 1, 2, 3, 4, 5}
+
+
+def test_sarimax_weekly_cycle_is_the_number_of_open_days():
+    forecaster = _construct(_mon_fri(), models=["sarimax"], model_params={"sarimax": {}})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = forecaster.evaluate()["sarimax"]
+    assert result.fitted_model.seasonal_period == 5
+    # The cached default config is untouched for other forecasters.
+    assert (
+        _construct(make_noisy_raw_df())._load_config("sarimax")["base_hyperparameters"][
+            "seasonal_period"
+        ]
+        == 7
+    )
+
+
+def test_an_explicit_sarimax_seasonal_period_still_wins():
+    forecaster = _construct(
+        _mon_fri(), models=["sarimax"], model_params={"sarimax": {"seasonal_period": 7}}
+    )
+    assert forecaster._selected_hyperparameters["sarimax"]["seasonal_period"] == 7
+
+
+def test_missing_open_days_are_still_gaps():
+    df = _mon_fri().drop(index=[20, 40]).reset_index(drop=True)
+    with pytest.warns(UserWarning, match=r"2 open day\(s\) missing across 2 gap"):
+        _construct(df)
+
+
+def test_a_long_hole_is_measured_in_open_days():
+    df = _mon_fri(n=200)
+    df = df.drop(index=range(30, 51)).reset_index(drop=True)  # 21 open days in a row
+    with pytest.raises(
+        InvalidConfigError, match=r"21 open day\(s\) missing in a row.*20 open days"
+    ):
+        _construct(df)
+
+
+def test_a_three_day_week_is_accepted_rather_than_called_every_other_day():
+    df = make_noisy_raw_df(n=210)
+    df = df[df["date"].dt.dayofweek.isin([0, 2, 4])].reset_index(drop=True)
+    forecaster = _construct(df, models=["catboost"], model_params=dict(_QUICK))
+    assert forecaster.closed_weekdays == ["Tuesday", "Thursday", "Saturday", "Sunday"]
+
+
+def test_a_future_driver_table_dated_on_open_days_is_accepted():
+    df = _mon_fri()
+    df["spend"] = range(len(df))
+    forecaster = _construct(
+        df, models=["catboost"], independent_columns=["spend"], model_params=dict(_QUICK)
+    )
+    future = forecaster._future_dates(5)
+    table = pd.DataFrame({"date": future, "spend": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = forecaster.forecast(horizon=5, future_independent_data=table)
+    assert list(pd.to_datetime(result["catboost"].forecast["ds"])) == list(future)
+
+
+def test_a_future_driver_table_with_a_closed_day_is_refused_and_says_why():
+    df = _mon_fri()
+    df["spend"] = range(len(df))
+    forecaster = _construct(
+        df, models=["catboost"], independent_columns=["spend"], model_params=dict(_QUICK)
+    )
+    last = forecaster.raw_df["date"].max()
+    table = pd.DataFrame(
+        {"date": pd.date_range(last + pd.Timedelta(days=1), periods=5), "spend": [1.0] * 5}
+    )
+    with pytest.raises(InvalidConfigError, match="skipping the closed days"):
+        forecaster.forecast(horizon=5, future_independent_data=table)

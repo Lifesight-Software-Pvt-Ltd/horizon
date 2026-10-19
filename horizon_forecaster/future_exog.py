@@ -491,6 +491,14 @@ def _unknown_column_hint(col, declared: Sequence[str], history_columns) -> str:
     return f"'{name}'"
 
 
+def _skips_days(last_date, future_dates: pd.Series, frequency: str) -> bool:
+    """True when daily forecast dates skip days: an operating calendar."""
+    if frequency != "daily":
+        return False
+    dates = pd.to_datetime(pd.Series([last_date, *list(future_dates)]))
+    return bool((dates.diff().dropna() > pd.Timedelta(days=1)).any())
+
+
 def check_future_table(
     table,
     *,
@@ -617,17 +625,21 @@ def check_future_table(
                     param_name=_PARAM,
                 )
             last = history_df[date_column].max()
-            unit = "day" if frequency == "daily" else "week"
             row = int(
                 np.flatnonzero(
                     given.to_numpy("datetime64[ns]") != future_dates.to_numpy("datetime64[ns]")
                 )[0]
             )
+            skipping = (
+                " and skipping the closed days"
+                if _skips_days(last, future_dates, frequency)
+                else ""
+            )
             raise InvalidConfigError(
                 f"Row {row + 1} of {_PARAM} is dated {given.iloc[row]:%Y-%m-%d}, but forecast "
-                f"period {row + 1} is {future_dates.iloc[row]:%Y-%m-%d}. The forecast starts "
-                f"one {unit} after the last date in your data ({last:%Y-%m-%d}) and runs "
-                f"{span}.",
+                f"period {row + 1} is {future_dates.iloc[row]:%Y-%m-%d}. The forecast runs "
+                f"{span}, starting the period after the last date in your data "
+                f"({last:%Y-%m-%d}){skipping}.",
                 param_name=_PARAM,
                 provided_value=str(given.iloc[row]),
             )

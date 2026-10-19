@@ -109,6 +109,9 @@ behaviour.
   gaps); a supplied future driver table must match the forecast exactly;
   on/off text such as `yes/no` is read as 1/0, and other text is rejected
   with the reason. See [`docs/quickstart.md`](docs/quickstart.md).
+- **Operating calendars.** Daily data with a weekday that never appears (a
+  business closed at weekends, or on Sundays) is forecast for open days only,
+  with SARIMAX's weekly cycle set to the open days.
 - **Built-in safety warnings** for scattered missing dates, over-long
   horizons, auto-generated future driver values, a last period that
   `carry_forward` would hold (a promotion week), events from last year

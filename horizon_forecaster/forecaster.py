@@ -78,7 +78,10 @@ from horizon_forecaster.utils import (
     MAX_CONTINUOUS_GAP_DAYS,
     as_name_list,
     clean_zero_variance,
+    WEEKDAY_NAMES,
     describe_date_spacing,
+    describe_weekdays,
+    find_closed_weekdays,
     find_duplicate_dates,
     parse_date_column,
     parse_driver_column,
@@ -583,6 +586,13 @@ class HorizonForecaster:
     every step a whole number of periods, more than half of the steps
     exactly one period, and no run of missing dates longer than
     MAX_CONTINUOUS_GAP_DAYS. Anything else raises; shorter gaps only warn.
+
+    Daily data on an operating calendar -- a weekday that never appears,
+    such as Saturday and Sunday for a business closed at weekends -- is
+    treated as closed on those days, with a warning naming them
+    (`self.closed_weekdays`). Periods are then open days: forecast() dates
+    skip the closed days, SARIMAX's weekly cycle is the number of open days,
+    and gaps are counted in open days, so a weekend is not a gap.
 
     evaluate()/forecast() ALWAYS return a dict keyed by model name, even
     when only one model is requested -- deliberate, so the return shape
@@ -1265,7 +1275,7 @@ class HorizonForecaster:
         """
         full_config = _default_params()
         try:
-            return full_config[model_name][self.frequency]
+            config = full_config[model_name][self.frequency]
         except KeyError as e:
             raise InvalidConfigError(
                 f"No config found for model '{model_name}' at frequency "
@@ -1273,6 +1283,18 @@ class HorizonForecaster:
                 param_name="models",
                 provided_value=model_name,
             ) from e
+        if model_name == "sarimax" and self._closed_weekdays:
+            # SARIMAX counts rows, so its weekly cycle on a Mon-Fri series is 5
+            # rows, not 7: with 7 its Friday peak drifted to other days and its
+            # test WAPE nearly doubled (9.56 against 5.03 with 5). A copy, so
+            # the cached config is not changed; a seasonal_period passed in
+            # model_params still wins, as it is merged on top.
+            config = dict(config)
+            config["base_hyperparameters"] = {
+                **config.get("base_hyperparameters", {}),
+                "seasonal_period": 7 - len(self._closed_weekdays),
+            }
+        return config
 
     def _validate_train_size_against_model_floors(self) -> None:
         """
@@ -1374,11 +1396,19 @@ class HorizonForecaster:
         what they affect. Horizon never fills gaps itself.
         """
         dates = self.raw_df[self.date_column]
+        self._closed_weekdays: tuple = ()
+        self.closed_weekdays: List[str] = []
         if len(dates) < 2:
             return  # resolve_split() reports a series this short
 
-        spacing = describe_date_spacing(dates, self.frequency)
-        unit = "day" if self.frequency == "daily" else "week"
+        if self.frequency == "daily":
+            self._closed_weekdays = find_closed_weekdays(dates)
+            self.closed_weekdays = [WEEKDAY_NAMES[d] for d in self._closed_weekdays]
+        spacing = describe_date_spacing(dates, self.frequency, self._closed_weekdays)
+        if self._closed_weekdays:
+            unit = "open day"
+        else:
+            unit = "day" if self.frequency == "daily" else "week"
 
         if spacing.one_period_share <= 0.5:
             typical_days = spacing.typical_step / pd.Timedelta(days=1)
@@ -1414,20 +1444,44 @@ class HorizonForecaster:
                 provided_value=[str(start), str(end)],
             )
 
-        period_days = 1 if self.frequency == "daily" else 7
-        longest_days = spacing.longest_gap_periods * period_days
-        if longest_days > MAX_CONTINUOUS_GAP_DAYS:
+        # Four weeks' worth of periods: 28 days, 4 weeks, or 4 x the open days
+        # per week on an operating calendar (20 open days for Mon-Fri).
+        weeks = MAX_CONTINUOUS_GAP_DAYS // 7
+        if self.frequency == "weekly":
+            limit, limit_text = weeks, f"{MAX_CONTINUOUS_GAP_DAYS} days"
+        elif self._closed_weekdays:
+            limit = weeks * (7 - len(self._closed_weekdays))
+            limit_text = f"{limit} open days"
+        else:
+            limit, limit_text = MAX_CONTINUOUS_GAP_DAYS, f"{MAX_CONTINUOUS_GAP_DAYS} days"
+        if spacing.longest_gap_periods > limit:
             start, end = spacing.longest_gap
             raise InvalidConfigError(
                 f"No data in '{self.date_column}' between {start:%Y-%m-%d} and "
                 f"{end:%Y-%m-%d}: {spacing.longest_gap_periods} {unit}(s) missing in a row. "
-                f"The limit is 4 weeks ({MAX_CONTINUOUS_GAP_DAYS} days) -- a longer hole "
+                f"The limit is 4 weeks ({limit_text}) -- a longer hole "
                 f"removes a whole stretch of trend and seasonality, and SARIMAX treats the "
                 f"dates either side of it as neighbours. If the business was closed then, "
                 f"add those dates with a value of 0; otherwise fill the gap, or start the "
                 f"data after it.",
                 param_name="date_column",
                 provided_value=[str(start), str(end)],
+            )
+
+        if self._closed_weekdays:
+            closed = describe_weekdays(self._closed_weekdays, "or")
+            closed_plural = describe_weekdays(self._closed_weekdays, "or", plural=True)
+            n_open = 7 - len(self._closed_weekdays)
+            treated = (
+                "it as a closed day" if len(self._closed_weekdays) == 1 else "those as closed days"
+            )
+            warnings.warn(
+                f"The dates in '{self.date_column}' never fall on a {closed}, so Horizon "
+                f"treats {treated}: forecast() covers the {n_open} open days of each week "
+                f"only, SARIMAX's weekly cycle is {n_open} rows, and missing dates are counted "
+                f"in open days. If the business does open on {closed_plural}, add those dates "
+                f"to the data (with 0 where nothing was sold). See forecaster.closed_weekdays.",
+                stacklevel=3,
             )
 
         if spacing.missing_periods:
@@ -1440,7 +1494,8 @@ class HorizonForecaster:
                 f"lower accuracy: the train/validation/test windows are counted in rows, so "
                 f"they cover more time than their size suggests, and SARIMAX treats "
                 f"consecutive rows as consecutive periods, so it is affected most. Horizon "
-                f"does not fill gaps -- add the missing periods to your data if you can.",
+                f"does not fill gaps -- add the missing dates to your data if you can, with "
+                f"0 on any day the business was closed (a public holiday, say).",
                 stacklevel=3,
             )
 
@@ -1984,12 +2039,22 @@ class HorizonForecaster:
         return results
 
     def _future_dates(self, horizon: int) -> pd.Series:
-        """The horizon's future dates, one step past the last observed date."""
+        """
+        The horizon's future dates, one step past the last observed date. On
+        an operating calendar the steps are open days, so a Mon-Fri series
+        is forecast for Mondays to Fridays only.
+        """
         last_date = self.raw_df[self.date_column].max()
         offset = _FREQUENCY_OFFSETS[self.frequency]
+        if self._closed_weekdays:
+            offset = pd.offsets.CustomBusinessDay(
+                weekmask=" ".join(
+                    WEEKDAY_NAMES[d][:3] for d in range(7) if d not in self._closed_weekdays
+                )
+            )
         return pd.Series(
             pd.date_range(
-                start=pd.to_datetime(last_date) + pd.tseries.frequencies.to_offset(offset),
+                start=pd.Timestamp(last_date) + pd.tseries.frequencies.to_offset(offset),
                 periods=horizon,
                 freq=offset,
             )
@@ -2169,8 +2234,12 @@ class HorizonForecaster:
         # pandas cannot represent dates after 2262-04-11; a horizon reaching
         # past it used to fail with a raw OutOfBoundsDatetime.
         last_date = pd.Timestamp(self.raw_df[self.date_column].max())
-        days_per_period = 7 if self.frequency == "weekly" else 1
-        if horizon * days_per_period > (pd.Timestamp.max - last_date).days:
+        days_per_period, margin = (7 if self.frequency == "weekly" else 1), 0
+        if self._closed_weekdays:
+            # Each open day spans 7 / (open days) calendar days on average,
+            # plus up to a week where the closed days fall.
+            days_per_period, margin = 7 / (7 - len(self._closed_weekdays)), 7
+        if horizon * days_per_period + margin > (pd.Timestamp.max - last_date).days:
             raise InvalidConfigError(
                 f"horizon={horizon} would run the forecast past {pd.Timestamp.max:%Y-%m-%d}, "
                 f"the last date pandas can represent.",

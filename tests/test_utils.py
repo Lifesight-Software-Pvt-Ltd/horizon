@@ -8,12 +8,14 @@ from horizon_forecaster.utils import (
     ACCEPTED_DATE_FORMATS,
     as_name_list,
     describe_date_spacing,
+    describe_weekdays,
+    find_closed_weekdays,
+    open_day_positions,
     find_duplicate_dates,
     parse_date_column,
     parse_driver_column,
     resolve_split,
     clean_zero_variance,
-    infer_frequency,
     validate_frequency,
     validate_no_missing_values,
     validate_training_size,
@@ -150,29 +152,49 @@ def test_clean_zero_variance_all_nan_column_is_dropped():
     assert "organic" in dropped
 
 
-# ---------- infer_frequency ----------
+# ---------- closed weekdays and open-day spacing ----------
 
 
-def test_infer_frequency_detects_daily():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=10, freq="D"))
-    assert infer_frequency(dates) == "daily"
+def test_find_closed_weekdays_names_the_weekdays_that_never_appear():
+    weekdays = pd.Series(pd.bdate_range("2024-01-01", periods=40))
+    assert find_closed_weekdays(weekdays) == (5, 6)
+    no_sundays = pd.Series([d for d in pd.date_range("2024-01-01", periods=60) if d.dayofweek != 6])
+    assert find_closed_weekdays(no_sundays) == (6,)
 
 
-def test_infer_frequency_detects_weekly():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=10, freq="7D"))
-    assert infer_frequency(dates) == "weekly"
+def test_find_closed_weekdays_finds_none_in_a_full_week_or_a_short_span():
+    assert find_closed_weekdays(pd.Series(pd.date_range("2024-01-01", periods=60))) == ()
+    assert find_closed_weekdays(pd.Series(pd.bdate_range("2024-01-01", periods=15))) == ()
 
 
-def test_infer_frequency_rejects_monthly():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=6, freq="30D"))
-    with pytest.raises(UnsupportedFrequencyError):
-        infer_frequency(dates)
+def test_dates_all_on_one_weekday_are_weekly_data_not_a_one_day_week():
+    assert find_closed_weekdays(pd.Series(pd.date_range("2024-01-07", periods=30, freq="7D"))) == ()
 
 
-def test_infer_frequency_raises_on_insufficient_dates():
-    dates = pd.Series(pd.to_datetime(["2026-01-01"]))
-    with pytest.raises(InvalidConfigError):
-        infer_frequency(dates)
+def test_a_weekday_that_appears_once_is_not_closed():
+    dates = list(pd.bdate_range("2024-01-01", periods=40)) + [pd.Timestamp("2024-01-06")]
+    assert find_closed_weekdays(pd.Series(sorted(dates))) == (6,)
+
+
+def test_open_day_positions_step_over_closed_days():
+    dates = pd.Series(pd.to_datetime(["2024-01-04", "2024-01-05", "2024-01-08"]))  # Thu, Fri, Mon
+    assert list(np.diff(open_day_positions(dates, (5, 6)))) == [1, 1]
+
+
+def test_weekends_are_not_gaps_on_a_weekday_calendar():
+    dates = pd.Series(pd.bdate_range("2024-01-01", periods=40))
+    spacing = describe_date_spacing(dates, "daily", (5, 6))
+    assert spacing.missing_periods == 0 and spacing.coverage == 1.0
+    missing_wednesday = dates.drop(index=7).reset_index(drop=True)
+    spacing = describe_date_spacing(missing_wednesday, "daily", (5, 6))
+    assert spacing.missing_periods == 1 and spacing.gap_count == 1
+
+
+def test_describe_weekdays_reads_naturally():
+    assert describe_weekdays([6]) == "Sunday"
+    assert describe_weekdays([5, 6]) == "Saturday and Sunday"
+    assert describe_weekdays([0, 2, 4]) == "Monday, Wednesday and Friday"
+    assert describe_weekdays([5, 6], "or", plural=True) == "Saturdays or Sundays"
 
 
 # ---------- validate_frequency ----------
