@@ -17,6 +17,7 @@ from horizon_forecaster.exporters import (
     export_forecast_csvs,
 )
 from horizon_forecaster.evaluation.ensemble import EnsembleResult
+from horizon_forecaster.evaluation.metrics import MapeResult
 from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejectionError
 
 
@@ -626,3 +627,219 @@ def test_export_forecast_plots_a_history_with_text_dates(tmp_path):
         output_dir=str(tmp_path),
     )
     assert any(k.startswith("plot_") for k in written)
+
+
+# ---------- WAPE, the seasonal-naive baseline and forecaster= ----------
+
+
+def _score(value, excluded=0, total=3):
+    return MapeResult(value=value, excluded_zero_actual_count=excluded, total_count=total)
+
+
+def _eval(mape, val_mape, wape, val_wape, excluded=0):
+    return SimpleNamespace(
+        mape=_score(mape, excluded),
+        validation_mape=_score(val_mape),
+        wape=wape,
+        validation_wape=val_wape,
+    )
+
+
+def _fake_forecaster(selection_metric="mape", evaluated=True, mape_threshold=40.0):
+    """The public attributes the exports read, as evaluate() + forecast() leave them."""
+    ensemble = make_ensemble()
+    ensemble.method = "trimmed"
+    scored = EnsembleResult(
+        combined=ensemble.combined,
+        method="trimmed",
+        rule_applied="inverse_mape",
+        members=["prophet"],
+        weights={"prophet": 1.0},
+        rejected_models={},
+        mape=_score(12.0, excluded=1),
+        wape=15.0,
+    )
+    results = {
+        # catboost wins on MAPE, prophet on WAPE: the choice follows the metric.
+        "prophet": _eval(20.0, 12.0, 18.0, 10.0, excluded=1),
+        "catboost": _eval(10.0, 5.0, 30.0, 25.0, excluded=1),
+    }
+    baseline = SimpleNamespace(
+        model_name="seasonal_naive",
+        mape=_score(22.0, excluded=1),
+        validation_mape=_score(21.0),
+        wape=25.0,
+        validation_wape=24.0,
+    )
+    corr = pd.DataFrame(
+        [[1.0, 0.4], [0.4, 1.0]], index=["prophet", "catboost"], columns=["prophet", "catboost"]
+    )
+    return SimpleNamespace(
+        forecast_ensemble={"trimmed": ensemble},
+        evaluate_ensemble={"trimmed": scored} if evaluated else None,
+        evaluation_results=results if evaluated else None,
+        naive_baseline=baseline if evaluated else None,
+        test_error_correlation=corr if evaluated else None,
+        mape_threshold=mape_threshold,
+        selection_metric=selection_metric,
+    )
+
+
+def _two_forecasts():
+    return {
+        "prophet": make_forecast_result([1.0, 2.0, 3.0]),
+        "catboost": make_forecast_result([4.0, 5.0, 6.0]),
+    }
+
+
+def test_summary_keeps_the_original_columns_first():
+    assert _SUMMARY_COLUMNS[:8] == [
+        "model",
+        "validation_mape",
+        "mape",
+        "ensemble_method",
+        "rule_applied",
+        "ensemble_weight",
+        "status",
+        "best_model_check",
+    ]
+    assert _SUMMARY_COLUMNS[8:] == [
+        "validation_wape",
+        "wape",
+        "zero_actuals_excluded",
+        "beats_naive",
+        "selection_metric",
+    ]
+
+
+def test_export_with_forecaster_fills_every_score_and_the_baseline(tmp_path):
+    forecaster = _fake_forecaster()
+    written = export_forecast_csvs(_two_forecasts(), forecaster=forecaster, output_dir=tmp_path)
+    summary = pd.read_csv(written["model_summary"]).set_index("model")
+    assert summary.loc["prophet", "wape"] == 18.0
+    assert summary.loc["prophet", "validation_wape"] == 10.0
+    assert summary.loc["catboost", "mape"] == 10.0
+    assert summary.loc["catboost", "zero_actuals_excluded"] == 1
+    # The ensemble row takes evaluate()'s test scores for the same rule.
+    assert summary.loc["ensemble", "mape"] == 12.0
+    assert summary.loc["ensemble", "wape"] == 15.0
+    # Baseline row, and beats_naive against its test WAPE of 25.
+    assert summary.loc["seasonal_naive", "status"] == "baseline"
+    assert summary.loc["seasonal_naive", "wape"] == 25.0
+    assert bool(summary.loc["prophet", "beats_naive"]) is True
+    assert bool(summary.loc["catboost", "beats_naive"]) is False
+    assert bool(summary.loc["ensemble", "beats_naive"]) is True
+    assert set(summary["selection_metric"]) == {"mape"}
+
+
+def test_export_with_forecaster_chooses_the_best_model_on_mape_by_default(tmp_path):
+    written = export_forecast_csvs(
+        _two_forecasts(), forecaster=_fake_forecaster(), output_dir=tmp_path
+    )
+    assert set(pd.read_csv(written["final_best_model"])["model"]) == {"catboost"}
+
+
+def test_export_with_a_wape_forecaster_chooses_the_best_model_on_wape(tmp_path):
+    written = export_forecast_csvs(
+        _two_forecasts(), forecaster=_fake_forecaster("wape"), output_dir=tmp_path
+    )
+    assert set(pd.read_csv(written["final_best_model"])["model"]) == {"prophet"}
+    summary = pd.read_csv(written["model_summary"]).set_index("model")
+    assert "lowest validation WAPE" in summary.loc["prophet", "best_model_check"]
+    assert set(summary["selection_metric"]) == {"wape"}
+
+
+def test_export_uses_the_forecasters_threshold_unless_one_is_given(tmp_path):
+    # Both models' validation MAPE (12, 5) is above 4: nobody qualifies.
+    with pytest.warns(UserWarning, match="No model qualifies"):
+        written = export_forecast_csvs(
+            _two_forecasts(),
+            forecaster=_fake_forecaster(mape_threshold=4.0),
+            output_dir=tmp_path,
+        )
+    assert pd.read_csv(written["final_best_model"]).empty
+    written = export_forecast_csvs(
+        _two_forecasts(),
+        forecaster=_fake_forecaster(mape_threshold=4.0),
+        mape_threshold=40.0,
+        output_dir=tmp_path,
+    )
+    assert not pd.read_csv(written["final_best_model"]).empty
+
+
+def test_explicit_scores_win_over_the_forecasters(tmp_path):
+    written = export_forecast_csvs(
+        _two_forecasts(),
+        forecaster=_fake_forecaster(),
+        per_model_mape={"prophet": 1.0, "catboost": 2.0},
+        per_model_validation_mape={"prophet": 1.0, "catboost": 2.0},
+        output_dir=tmp_path,
+    )
+    summary = pd.read_csv(written["model_summary"]).set_index("model")
+    assert summary.loc["prophet", "mape"] == 1.0
+    assert set(pd.read_csv(written["final_best_model"])["model"]) == {"prophet"}
+
+
+def test_export_writes_the_error_correlation(tmp_path):
+    written = export_forecast_csvs(
+        _two_forecasts(), forecaster=_fake_forecaster(), output_dir=tmp_path
+    )
+    corr = pd.read_csv(written["error_correlation"], index_col="model")
+    assert corr.loc["prophet", "catboost"] == 0.4
+
+
+def test_export_without_forecaster_writes_no_error_correlation(tmp_path):
+    with pytest.warns(UserWarning, match="per_model_validation_mape was not given"):
+        written = export_forecast_csvs(_two_forecasts(), make_ensemble(), output_dir=tmp_path)
+    assert "error_correlation" not in written
+    summary = pd.read_csv(written["model_summary"])
+    assert "seasonal_naive" not in set(summary["model"])
+    assert summary["beats_naive"].isna().all()
+
+
+def test_export_before_evaluate_warns_and_still_writes(tmp_path):
+    with pytest.warns(UserWarning, match=r"forecaster.evaluate\(\) has not run"):
+        written = export_forecast_csvs(
+            _two_forecasts(), forecaster=_fake_forecaster(evaluated=False), output_dir=tmp_path
+        )
+    assert "error_correlation" not in written
+    assert (tmp_path / "forecast_final_ensemble_trimmed.csv").exists()
+
+
+def test_export_rejects_something_that_is_not_a_forecaster(tmp_path):
+    with pytest.raises(InvalidConfigError, match="forecaster= must be the HorizonForecaster"):
+        export_forecast_csvs(_two_forecasts(), forecaster={"a": 1}, output_dir=tmp_path)
+
+
+def test_rejected_table_names_the_selection_metric(tmp_path):
+    forecaster = _fake_forecaster("wape")
+    forecaster.forecast_ensemble["trimmed"].rejected_models = {
+        "catboost": ThresholdRejectionError(
+            "catboost's validation WAPE 45.00 is above 40",
+            model_name="catboost",
+            mape_value=45.0,
+            allowed_max=40.0,
+        )
+    }
+    written = export_forecast_csvs(_two_forecasts(), forecaster=forecaster, output_dir=tmp_path)
+    rejected = pd.read_csv(written["rejected"])
+    assert list(rejected.columns) == _REJECTED_COLUMNS
+    assert rejected.loc[0, "selection_metric"] == "wape"
+
+
+def test_export_forecast_passes_the_forecaster_through(tmp_path):
+    written = export_forecast(
+        _two_forecasts(), forecaster=_fake_forecaster(), output_dir=tmp_path, save_plots=False
+    )
+    assert "error_correlation" in written
+    assert "final_ensemble_trimmed" in written
+
+
+def test_explicit_validation_mapes_choose_the_best_model_even_under_wape(tmp_path):
+    written = export_forecast_csvs(
+        _two_forecasts(),
+        forecaster=_fake_forecaster("wape"),  # on WAPE alone prophet would be chosen
+        per_model_validation_mape={"prophet": 9.0, "catboost": 1.0},
+        output_dir=tmp_path,
+    )
+    assert set(pd.read_csv(written["final_best_model"])["model"]) == {"catboost"}

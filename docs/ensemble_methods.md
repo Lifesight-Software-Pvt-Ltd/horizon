@@ -121,7 +121,10 @@ rule:
 1. **`mape_threshold`**, when set. Applies to every rule.
 2. **A NaN validation MAPE** — typically because every actual in the
    validation window was zero (sparse conversions, installs), or because the
-   model could not be scored on that window at all. This excludes the model
+   model could not be scored on that window at all. (When the forecaster
+   selects on WAPE, read "MAPE" here and below as WAPE: everything that
+   screens, weights or ranks uses `selection_metric`, and WAPE is NaN only
+   when the whole window is zero.) This excludes the model
    from both **weighted** rules, `inverse_mape` and `equal`. `inverse_mape`
    literally cannot compute `1 / NaN`; `equal` could, but a model with no
    validation MAPE was never screened against `mape_threshold` either, and the

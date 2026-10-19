@@ -2240,3 +2240,247 @@ def test_skipped_models_is_empty_when_nothing_is_skipped():
 def test_neuralprophet_model_params_must_pin_learning_rate_and_epochs(settings):
     with pytest.raises(InvalidConfigError, match="must set both learning_rate and epochs"):
         _construct(make_raw_df(), model_params={"neuralprophet": settings})
+
+
+# ---------- selection metric, seasonal-naive baseline, error correlation ----------
+
+
+def _with_zeros(share, n=90, seed=3):
+    """make_noisy_raw_df() with `share` of its days set to 0, spread at random."""
+    import numpy as np
+
+    df = make_noisy_raw_df(n=n)
+    rng = np.random.default_rng(seed)
+    zero_rows = rng.choice(n, size=int(round(share * n)), replace=False)
+    df.loc[zero_rows, "orders"] = 0.0
+    return df
+
+
+def test_constructor_rejects_an_unknown_selection_metric():
+    with pytest.raises(InvalidConfigError, match="selection_metric must be one of"):
+        _construct(make_raw_df(), selection_metric="rmse")
+
+
+def test_selection_metric_stays_mape_on_an_ordinary_series_without_a_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster = _construct(make_noisy_raw_df())
+    assert forecaster.selection_metric == "mape"
+    assert not [m for m in _messages(caught) if "use WAPE instead of MAPE" in m]
+
+
+def test_selection_metric_switches_to_wape_at_ten_percent_zeros_with_a_warning():
+    with pytest.warns(UserWarning, match=r"is 0 on 20% of days \(MAPE skips every zero actual\)"):
+        forecaster = _construct(_with_zeros(0.2))
+    assert forecaster.selection_metric == "wape"
+
+
+def test_selection_metric_stays_mape_just_under_ten_percent_zeros():
+    assert _construct(_with_zeros(0.09)).selection_metric == "mape"
+
+
+def test_selection_metric_switches_to_wape_on_a_negative_target():
+    df = make_noisy_raw_df()
+    df.loc[[3, 4], "orders"] = -5.0
+    with pytest.warns(UserWarning, match="is negative in 2 of 90 rows"):
+        forecaster = _construct(df, models=["catboost"])
+    assert forecaster.selection_metric == "wape"
+
+
+def test_an_explicit_selection_metric_is_kept_without_a_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        kept = _construct(_with_zeros(0.2), selection_metric="mape")
+        forced = _construct(make_noisy_raw_df(), selection_metric="wape")
+    assert kept.selection_metric == "mape"
+    assert forced.selection_metric == "wape"
+    assert not [m for m in _messages(caught) if "use WAPE instead of MAPE" in m]
+
+
+def test_a_daily_target_that_is_mostly_zero_is_refused_with_the_weekly_share():
+    df = make_noisy_raw_df(n=84)  # 2026-01-01 is a Thursday: 11 complete Mon-Sun weeks
+    df.loc[df.index % 7 != 0, "orders"] = 0.0
+    with pytest.raises(InvalidConfigError) as caught:
+        _construct(df, selection_metric="mape")
+    message = str(caught.value)
+    assert "is 0 on 86% of days (72 of 84)" in message
+    assert "0 in 0% of 11 complete weeks" in message
+    assert "frequency='weekly'" in message
+
+
+def test_a_weekly_target_that_is_mostly_zero_is_refused_without_the_weekly_hint():
+    df = make_noisy_raw_df(n=60, freq="W-MON")
+    df.loc[df.index % 2 == 0, "orders"] = 0.0
+    with pytest.raises(InvalidConfigError, match="is 0 on 50% of weeks") as caught:
+        _construct(df, frequency="weekly", validation_size=8, test_size=4)
+    assert "nothing coarser than weekly" in str(caught.value)
+
+
+def test_selection_on_wape_drives_the_grid_search_and_the_screen():
+    forecaster = HorizonForecaster(
+        _with_zeros(0.2),
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        validation_size=16,
+        test_size=8,
+        models=["prophet"],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = forecaster.evaluate()["prophet"]
+    summary = result.grid_search_summary
+    assert all({"params", "mape", "wape"} <= set(c) for c in summary)
+    finite = [c["wape"] for c in summary if c["wape"] == c["wape"]]
+    assert finite == sorted(finite)  # ranked on WAPE, the selection metric
+    assert math.isclose(result.validation_wape, finite[0])
+    assert result.wape == result.wape and result.validation_wape == result.validation_wape
+
+
+def test_evaluate_reports_wape_alongside_mape():
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        results = forecaster.evaluate()
+    for result in results.values():
+        y, yhat = result.test_predictions["y"], result.test_predictions["yhat"]
+        expected = (y - yhat).abs().sum() / y.abs().sum() * 100
+        assert math.isclose(result.wape, expected, rel_tol=1e-9)
+        assert result.validation_wape > 0
+    assert forecaster.evaluate_ensemble["trimmed"].wape is not None
+
+
+def test_evaluate_builds_the_seasonal_naive_baseline_on_the_test_window():
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecaster.evaluate()
+    base = forecaster.naive_baseline
+    y = forecaster.raw_df["orders"].to_numpy()
+    origin = len(y) - base.n_test  # the last row the test forecast may see is origin - 1
+    # The same weekday in the last observed week, repeated past day 7.
+    expected = [y[origin - 7 + (step % 7)] for step in range(base.n_test)]
+    assert base.model_name == "seasonal_naive"
+    assert list(base.test_predictions["yhat"]) == list(expected)
+    assert base.wape == base.wape and base.mape.value == base.mape.value
+
+
+def test_models_worse_than_the_seasonal_naive_baseline_are_named():
+    import numpy as np
+
+    # A strong weekly cycle the badly-tuned catboost cannot follow.
+    df = make_noisy_raw_df()
+    df["orders"] = 100 + 60 * (np.arange(len(df)) % 7 == 0) + df["orders"] * 0.01
+    forecaster = _construct(
+        df,
+        models=["catboost"],
+        model_params={"catboost": {"iterations": 2, "depth": 1}},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        forecaster.evaluate()
+    worse = [m for m in _messages(caught) if "do worse than the seasonal-naive baseline" in m]
+    assert worse
+    assert "the same weekday last week" in worse[0]
+    assert "catboost" in worse[0]
+    assert "forecaster.naive_baseline" in worse[0]
+
+
+def test_evaluate_reports_the_correlation_of_the_models_test_errors():
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecaster.evaluate()
+    corr = forecaster.test_error_correlation
+    assert list(corr.index) == list(corr.columns) == ["prophet", "catboost"]
+    assert math.isclose(corr.loc["prophet", "prophet"], 1.0)
+    assert -1.0 <= corr.loc["prophet", "catboost"] <= 1.0
+
+
+def test_results_attributes_are_none_before_evaluate():
+    forecaster = _construct(make_raw_df())
+    assert forecaster.evaluation_results is None
+    assert forecaster.naive_baseline is None
+    assert forecaster.test_error_correlation is None
+
+
+def test_an_all_zero_validation_window_runs_end_to_end():
+    # 16 zero days in a 90-day series: 18% zeros, so selection is on WAPE,
+    # and every validation score is NaN (nothing to divide by). evaluate()
+    # and forecast() must still finish; the trimmed ensemble needs no score.
+    df = make_noisy_raw_df()
+    df.loc[66:81, "orders"] = 0.0
+    forecaster = HorizonForecaster(
+        df,
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        validation_size=16,
+        test_size=8,
+        models=["prophet", "catboost"],
+        model_params=dict(_QUICK),
+    )
+    assert forecaster.selection_metric == "wape"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        results = forecaster.evaluate()
+        forecast = forecaster.forecast(horizon=5)
+    for result in results.values():
+        assert math.isnan(result.validation_wape)
+        assert math.isnan(result.validation_mape.value)
+        assert result.wape == result.wape  # the test window has real values
+    assert forecaster.evaluate_ensemble["trimmed"].combined is not None
+    assert set(forecast) == {"prophet", "catboost"}
+
+
+def _weekdays_only(df):
+    return df[pd.to_datetime(df["date"]).dt.dayofweek < 5].reset_index(drop=True)
+
+
+def test_the_seasonal_naive_baseline_repeats_the_same_weekday_on_weekday_only_data():
+    df = _weekdays_only(make_noisy_raw_df(n=120))
+    forecaster = _construct(df, models=["catboost"], model_params={"catboost": _QUICK["catboost"]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecaster.evaluate()
+    base = forecaster.naive_baseline.test_predictions
+    history = forecaster.raw_df.iloc[: len(forecaster.raw_df) - len(base)]
+    last_week = history[history["date"] > history["date"].iloc[-1] - pd.Timedelta(days=7)]
+    by_weekday = dict(zip(last_week["date"].dt.dayofweek, last_week["orders"]))
+    expected = [by_weekday[d.dayofweek] for d in pd.to_datetime(base["ds"])]
+    assert list(base["yhat"]) == expected
+
+
+def test_a_mostly_zero_weekday_only_series_still_gets_the_weekly_suggestion():
+    df = _weekdays_only(make_noisy_raw_df(n=120))
+    df.loc[df.index % 5 != 0, "orders"] = 0.0  # sales on one day a week
+    with pytest.raises(InvalidConfigError) as caught:
+        _construct(df, selection_metric="mape")
+    message = str(caught.value)
+    assert "complete weeks" in message
+    assert "frequency='weekly'" in message
+
+
+def test_a_failed_evaluate_clears_the_previous_results(monkeypatch):
+    forecaster = _two_model_forecaster()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        forecaster.evaluate()
+    assert forecaster.naive_baseline is not None
+
+    def fail(model_name):
+        raise ModelConvergenceError(f"{model_name} failed", model_name=model_name)
+
+    monkeypatch.setattr(forecaster, "_evaluate_single_model", fail)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(AllModelsRejectedError):
+            forecaster.evaluate()
+    assert forecaster.evaluation_results is None
+    assert forecaster.naive_baseline is None
+    assert forecaster.test_error_correlation is None
+
+
+@pytest.mark.parametrize("given, stored", [("MAPE", "mape"), ("Wape", "wape"), (" AUTO ", "mape")])
+def test_selection_metric_accepts_any_case(given, stored):
+    assert _construct(make_noisy_raw_df(), selection_metric=given).selection_metric == stored

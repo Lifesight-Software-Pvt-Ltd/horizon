@@ -1,9 +1,20 @@
 import math
 
+from types import SimpleNamespace
+
 import numpy as np
+import pandas as pd
 import pytest
 
-from horizon_forecaster.evaluation.metrics import mape, wape, rmse, mae, MapeResult
+from horizon_forecaster.evaluation.metrics import (
+    MapeResult,
+    error_correlation,
+    mae,
+    mape,
+    rmse,
+    seasonal_naive,
+    wape,
+)
 
 # ---------- mape: basic correctness ----------
 
@@ -145,3 +156,67 @@ def test_mae_basic_correctness():
 def test_mae_raises_on_mismatched_shapes():
     with pytest.raises(ValueError):
         mae([1, 2, 3], [1, 2])
+
+
+# ---------- seasonal_naive ----------
+
+
+def test_seasonal_naive_repeats_the_same_weekday_last_week():
+    dates = pd.date_range("2024-01-01", periods=14)  # Mon 1 Jan .. Sun 14 Jan
+    future = pd.date_range("2024-01-15", periods=9)
+    pred = seasonal_naive(dates, np.arange(14.0), future, 7)
+    assert list(pred) == [7, 8, 9, 10, 11, 12, 13, 7, 8]
+
+
+def test_seasonal_naive_matches_by_date_on_weekday_only_data():
+    # Mon-Fri only: "7 rows back" would be a different weekday.
+    dates = pd.bdate_range("2024-01-01", periods=10)  # two weeks, Mon..Fri
+    values = np.arange(10.0)
+    future = pd.bdate_range("2024-01-15", periods=5)
+    assert list(seasonal_naive(dates, values, future, 7)) == [5, 6, 7, 8, 9]
+
+
+def test_seasonal_naive_repeats_the_same_week_last_year():
+    dates = pd.date_range("2023-01-02", periods=60, freq="W-MON")
+    future = pd.date_range(dates[-1] + pd.Timedelta(days=7), periods=3, freq="W-MON")
+    pred = seasonal_naive(dates, np.arange(60.0), future, 364)
+    assert list(pred) == [8, 9, 10]  # 52 weeks before each future week
+
+
+def test_seasonal_naive_falls_back_to_the_last_value_without_a_season_of_history():
+    dates = pd.date_range("2024-01-01", periods=2)
+    future = pd.date_range("2024-01-03", periods=3)
+    assert list(seasonal_naive(dates, [4.0, 5.0], future, 7)) == [5, 5, 5]
+
+
+def test_seasonal_naive_refuses_an_empty_history():
+    with pytest.raises(ValueError):
+        seasonal_naive([], [], pd.date_range("2024-01-01", periods=3), 7)
+
+
+# ---------- error_correlation ----------
+
+
+def _eval_result(errors):
+    ds = pd.date_range("2024-01-01", periods=len(errors))
+    y = np.full(len(errors), 100.0)
+    return SimpleNamespace(
+        test_predictions=pd.DataFrame({"ds": ds, "y": y, "yhat": y - np.asarray(errors)})
+    )
+
+
+def test_error_correlation_compares_signed_errors():
+    corr = error_correlation(
+        {
+            "a": _eval_result([1, -2, 3, -4]),
+            "b": _eval_result([2, -4, 6, -8]),  # the same mistakes, larger
+            "c": _eval_result([-1, 2, -3, 4]),  # the opposite mistakes
+        }
+    )
+    assert list(corr.columns) == ["a", "b", "c"]
+    assert math.isclose(corr.loc["a", "b"], 1.0)
+    assert math.isclose(corr.loc["a", "c"], -1.0)
+
+
+def test_error_correlation_is_empty_for_a_single_model():
+    assert error_correlation({"a": _eval_result([1, 2, 3])}).empty

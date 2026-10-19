@@ -408,3 +408,40 @@ def test_as_ensemble_dict_keys_a_bare_result_by_the_REQUESTED_method():
     assert degraded.rule_applied == "mean" and degraded.degraded is True
     assert list(as_ensemble_dict(degraded)) == ["trimmed"]
     assert as_ensemble_dict(degraded)["trimmed"] is degraded
+
+
+# ---------- the selection metric's name, and the ensemble's WAPE ----------
+
+
+def test_rejection_reasons_name_the_selection_metric():
+    result = build_ensemble(
+        per_model_selection_mape={"a": 10.0, "b": 90.0},
+        per_model_predictions=_preds({"a": [1.0, 1.0], "b": [2.0, 2.0]}),
+        mape_threshold=40,
+        method="inverse_mape",
+        metric="WAPE",
+    )
+    assert "validation WAPE" in str(result.rejected_models["b"])
+    assert "MAPE" not in str(result.rejected_models["b"])
+
+
+def test_ensemble_is_scored_on_wape_as_well_as_mape():
+    actuals = pd.DataFrame({"ds": _ds(2), "y": [0.0, 10.0]})
+    result = build_ensemble(
+        per_model_selection_mape={"a": 10.0, "b": 10.0},
+        per_model_predictions=_preds({"a": [2.0, 8.0], "b": [2.0, 8.0]}),
+        method="equal",
+        actuals=actuals,
+    )
+    # MAPE skips the zero actual; WAPE counts it: (2 + 2) / 10.
+    assert result.mape.value == pytest.approx(20.0)
+    assert result.mape.excluded_zero_actual_count == 1
+    assert result.wape == pytest.approx(40.0)
+
+
+def test_ensemble_wape_is_none_without_actuals():
+    result = build_ensemble(
+        per_model_selection_mape={"a": 10.0},
+        per_model_predictions=_preds({"a": [1.0, 1.0]}),
+    )
+    assert result.wape is None

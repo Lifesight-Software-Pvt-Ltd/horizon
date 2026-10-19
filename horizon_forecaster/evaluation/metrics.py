@@ -1,20 +1,24 @@
 """
 Evaluation metrics for horizon_forecaster.
 
-MAPE is the canonical metric per project spec — every model is evaluated
-and every ensemble threshold decision is made using MAPE. WAPE, RMSE, and
-MAE are provided as supplementary metrics only (e.g. for future
-reporting), never used for threshold/ensemble decisions.
+MAPE is the default selection metric: the grid search, the mape_threshold
+screen, the inverse-MAPE weights and the exported best model are decided
+on it. WAPE is reported next to it everywhere and replaces it for those
+decisions when the forecaster's selection_metric resolves to "wape" (a
+target with many zeros, or one that goes negative). RMSE and MAE are
+supplementary only.
 
-All functions are pure: they take numpy-array-like actuals/predictions
-and return plain floats -- or, for MAPE, a MapeResult dataclass carrying
-the zero-actual exclusion metadata alongside the value -- with no
-dependency on any model class.
+The scores are pure functions: they take numpy-array-like actuals and
+predictions and return plain floats -- or, for MAPE, a MapeResult
+dataclass carrying the zero-actual exclusion metadata alongside the
+value -- with no dependency on any model class. seasonal_naive() and
+error_correlation() work on dates, so they take pandas objects.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 
 from horizon_forecaster.exceptions import InvalidConfigError
 
@@ -174,3 +178,66 @@ def mae(y_true, y_pred) -> float:
         )
 
     return float(np.mean(np.abs(y_true - y_pred)))
+
+
+def seasonal_naive(history_dates, history_values, future_dates, season_days: int):
+    """
+    The seasonal-naive forecast: each future date repeats the most recent
+    value from a whole number of seasons earlier -- the same weekday last
+    week for season_days=7, the same week last year for season_days=364. A
+    model that cannot beat this adds nothing, which makes it the baseline
+    every model and ensemble is compared with.
+
+    Matched by date, not by row, so a series with closed days or missing
+    dates still compares Monday with Monday: on Mon-Fri data, "7 rows back"
+    is a different weekday, and that baseline scored 10.40 WAPE against 5.90
+    for the same weekday. A future date with no such value in the history
+    (less than one season of it) repeats the last value instead.
+    """
+    hist = pd.Series(
+        np.asarray(history_values, dtype=float), index=pd.to_datetime(pd.Index(history_dates))
+    ).sort_index()
+    if hist.empty:
+        raise InvalidConfigError("seasonal_naive needs at least one past value.")
+    if season_days < 1:
+        raise InvalidConfigError(f"seasonal_naive needs season_days >= 1 (got {season_days}).")
+    # Dates a whole number of seasons apart share the same day number modulo
+    # the season; the last value seen for each one is "a season earlier".
+    latest = hist.groupby(_day_number(hist.index) % season_days).last()
+    future = pd.to_datetime(pd.Index(future_dates))
+    found = latest.reindex(_day_number(future) % season_days).to_numpy()
+    return np.where(np.isnan(found), hist.iloc[-1], found)
+
+
+def _day_number(dates: "pd.DatetimeIndex") -> np.ndarray:
+    """Whole days since the epoch, for comparing dates a season apart."""
+    return (dates.normalize() - pd.Timestamp(0)).days.to_numpy()
+
+
+def error_correlation(evaluation_results) -> "pd.DataFrame":
+    """
+    Pairwise correlation of the models' signed errors (actual - forecast) on
+    the test window, from the dict evaluate() returns.
+
+    An ensemble only gains from members that are wrong in different ways.
+    Two models whose errors correlate near 1 are making the same mistakes,
+    so averaging them adds little; a member with low or negative correlation
+    to the rest is the one that actually diversifies the combination. On a
+    real daily series Prophet and NeuralProphet correlated at 1.00 while
+    SARIMAX sat at 0.73 against both.
+
+    Returns a symmetric DataFrame indexed and columned by model name (empty
+    when fewer than two models are given). A model whose errors never vary
+    has an undefined correlation (NaN).
+    """
+    errors = {}
+    for name, result in evaluation_results.items():
+        tp = result.test_predictions
+        errors[name] = pd.Series(
+            tp["y"].to_numpy(dtype=float) - tp["yhat"].to_numpy(dtype=float),
+            index=pd.to_datetime(tp["ds"]),
+        )
+    if len(errors) < 2:
+        return pd.DataFrame()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return pd.DataFrame(errors).corr()

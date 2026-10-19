@@ -14,10 +14,11 @@ matplotlib charts. Two families are provided at each stage:
   models there are. These return a {label: Figure} dict rather than a
   single Axes.
 
-plot_model_comparison sits alongside both as a one-number-per-model MAPE
-bar chart. Like evaluation/metrics.py and evaluation/ensemble.py,
-this is a pure, standalone module: it never imports forecaster.py or any
-model/adapter class, so importing it (e.g. just to draw a chart) does not
+plot_model_comparison sits alongside both as a one-number-per-model bar
+chart of test MAPE or WAPE, with an optional seasonal-naive bar. Like
+evaluation/metrics.py and evaluation/ensemble.py, this is a pure,
+standalone module: it never imports forecaster.py or any model/adapter
+class, so importing it (e.g. just to draw a chart) does not
 pull in the heavy Prophet/CatBoost stack. It reaches into the result
 objects only through their public attributes (test_predictions, forecast,
 mape.value, and the EnsembleResult fields), which is why the type hints
@@ -63,6 +64,7 @@ if TYPE_CHECKING:  # hints only; never imported at runtime (avoids the heavy sta
 
 _ENSEMBLE_COLOR = "tab:red"
 _ACTUAL_COLOR = "black"
+_BASELINE_COLOR = "tab:gray"
 _HISTORY_COLOR = "gray"
 _BOUND_ALPHA = 0.15
 
@@ -201,6 +203,29 @@ def _annotate_no_ensemble(ax: "Axes", ensemble: "Optional[EnsembleResult]") -> N
         )
 
 
+def _scores(mape_result, wape_value) -> str:
+    """'MAPE 4.93%, WAPE 5.01%' -- WAPE only where the result carries one."""
+    text = f"MAPE {mape_result.value:.2f}%"
+    if wape_value is not None and wape_value == wape_value:
+        text += f", WAPE {wape_value:.2f}%"
+    return text
+
+
+_COMPARISON_METRICS = ("mape", "wape")
+
+
+def _comparison_metric(metric, caller: str) -> str:
+    """'mape' or 'wape', in any case; anything else is an error."""
+    normalized = metric.strip().lower() if isinstance(metric, str) else metric
+    if normalized not in _COMPARISON_METRICS:
+        raise InvalidConfigError(
+            f"{caller}: metric must be one of {list(_COMPARISON_METRICS)} (got {metric!r}).",
+            param_name="metric",
+            provided_value=metric,
+        )
+    return normalized
+
+
 def plot_evaluation(
     evaluation_results: "Dict[str, EvaluationResult]",
     ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
@@ -270,16 +295,21 @@ def plot_evaluation(
 
         for name, model_result in evaluation_results.items():
             preds = model_result.test_predictions
+            scores = _scores(model_result.mape, getattr(model_result, "wape", None))
             (line,) = current.plot(
                 preds["ds"],
                 preds["yhat"],
-                label=f"{name} predicted (MAPE {model_result.mape.value:.2f}%)",
+                label=f"{name} predicted ({scores})",
                 marker="o",
             )
             _draw_bounds(current, preds, line.get_color())
 
         if result is not None and result.combined is not None:
-            mape_label = f" (MAPE {result.mape.value:.2f}%)" if result.mape is not None else ""
+            mape_label = (
+                f" ({_scores(result.mape, getattr(result, 'wape', None))})"
+                if result.mape is not None
+                else ""
+            )
             current.plot(
                 result.combined["ds"],
                 result.combined["yhat"],
@@ -385,10 +415,13 @@ def plot_model_comparison(
     ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]" = None,
     *,
     ax: "Optional[Axes]" = None,
-    title: str = "Model comparison: MAPE (lower is better)",
+    title: Optional[str] = None,
+    metric: str = "mape",
+    baseline=None,
 ) -> "Axes":
     """
-    Bar chart comparing each model's test-window MAPE, and the ensemble's.
+    Bar chart comparing each model's test-window MAPE (or WAPE), and the
+    ensemble's.
 
     These are the REPORTED scores, not the validation scores models were
     selected on -- so a model that looks strong here earned it on data no
@@ -408,7 +441,15 @@ def plot_model_comparison(
             EnsembleResult, or None. A rule's bar is shown only when its
             mape is not None.
         ax: existing Axes, or None to create one.
-        title: chart title.
+        title: chart title; defaults to "Model comparison: test MAPE (lower
+            is better)", naming the metric drawn.
+        metric: "mape" (default) or "wape", in any case. Pass forecaster.selection_metric
+            to draw the score the models were selected on: on a target with
+            many zeros MAPE leaves those days out, and its bars can rank the
+            models in a different order from the one the run used.
+        baseline: forecaster.naive_baseline, drawn as a grey
+            "seasonal naive" bar -- the score every model and rule has to
+            beat to add anything over repeating the past.
 
     Returns:
         The Axes drawn on (never shown).
@@ -422,8 +463,17 @@ def plot_model_comparison(
             "plot_model_comparison: evaluation_results is empty, nothing to plot."
         )
 
+    metric = _comparison_metric(metric, "plot_model_comparison")
+
+    def score(result):
+        if metric == "wape":
+            value = getattr(result, "wape", None)
+            return float("nan") if value is None else value
+        return result.mape.value
+
+    label = metric.upper()
     names = list(evaluation_results.keys())
-    values = [evaluation_results[n].mape.value for n in names]
+    values = [score(evaluation_results[n]) for n in names]
     colors = ["tab:blue"] * len(names)
 
     # One bar per combination method. Comparing rules head-to-head is
@@ -434,8 +484,12 @@ def plot_model_comparison(
         if result.mape is None:
             continue
         names.append(f"ensemble ({result.rule_applied})" if len(ensembles) > 1 else "ensemble")
-        values.append(result.mape.value)
+        values.append(score(result))
         colors.append(_ENSEMBLE_COLOR)
+    if baseline is not None:
+        names.append("seasonal naive")
+        values.append(score(baseline))
+        colors.append(_BASELINE_COLOR)
 
     # Widen with the bar count and rotate the labels. Ensemble labels
     # ("ensemble (inverse_mape)") are several times longer than a model
@@ -446,13 +500,13 @@ def plot_model_comparison(
     ax = _new_ax(ax, figsize=(max(8.0, 1.35 * len(names)), 5))
     bars = ax.bar(names, values, color=colors)
     ax.bar_label(bars, fmt="%.2f%%", padding=3)
-    ax.set_ylabel("MAPE (%)")
-    ax.set_title(title)
+    ax.set_ylabel(f"{label} (%)")
+    ax.set_title(title or f"Model comparison: test {label} (lower is better)")
     ax.set_xticks(range(len(names)))
     ax.set_xticklabels(names, rotation=30, ha="right")
     # Headroom for the value labels, which sit above the tallest bar. Only
     # finite values count: a model whose test window held nothing but zero
-    # actuals has a NaN MAPE (no bar), and a NaN limit makes matplotlib raise.
+    # actuals has a NaN score (no bar), and a NaN limit makes matplotlib raise.
     finite = [v for v in values if v == v and abs(v) != float("inf")]
     top = max(finite) if finite else 0.0
     ax.set_ylim(0, top * 1.15 if top > 0 else 1.0)
@@ -513,13 +567,20 @@ def plot_evaluation_per_model(
         )
         _draw_bounds(ax, result.test_predictions, line.get_color())
         _annotate_no_ensemble(ax, _no_ensemble_marker(ensembles))
-        _finalize(ax, f"Test set: actual vs {name} (MAPE {result.mape.value:.2f}%)")
+        _finalize(
+            ax,
+            f"Test set: actual vs {name} ({_scores(result.mape, getattr(result, 'wape', None))})",
+        )
         figures[name] = fig
 
     for method, result in ensembles.items():
         if result.combined is None:
             continue
-        mape_label = f" (MAPE {result.mape.value:.2f}%)" if result.mape is not None else ""
+        mape_label = (
+            f" ({_scores(result.mape, getattr(result, 'wape', None))})"
+            if result.mape is not None
+            else ""
+        )
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
         ax.plot(
@@ -617,6 +678,8 @@ def save_evaluation_plots(
     output_dir: str = ".",
     prefix: str = "evaluation",
     dpi: int = 100,
+    metric: str = "mape",
+    baseline=None,
 ) -> Dict[str, str]:
     """
     Render and save the evaluation charts to disk (PNG).
@@ -628,6 +691,8 @@ def save_evaluation_plots(
                                        ({prefix}_overlay_models.png when
                                        no ensemble was given)
       {prefix}_mape_comparison.png     every model and rule as bars
+                                       ({prefix}_wape_comparison.png
+                                       with metric="wape")
       {prefix}_{model}.png             one per model
       {prefix}_ensemble_{method}.png   one per rule that formed
 
@@ -637,10 +702,14 @@ def save_evaluation_plots(
     cannot be globbed by a downstream job. Each figure is closed after
     writing.
 
+    `metric` and `baseline` are passed to plot_model_comparison(): pass
+    forecaster.selection_metric and forecaster.naive_baseline to draw the
+    score the run selected on, with the seasonal-naive bar beside it.
+
     Returns:
         {key: path} using the same keys as the plotting functions --
-        "overlay_<method>", "mape_comparison", "<model>",
-        "ensemble_<method>".
+        "overlay_<method>", "mape_comparison" (or "wape_comparison"),
+        "<model>", "ensemble_<method>".
 
     Raises:
         InvalidConfigError (a ValueError): if evaluation_results is empty.
@@ -651,16 +720,18 @@ def save_evaluation_plots(
             "save_evaluation_plots: evaluation_results is empty, nothing to save."
         )
 
+    metric = _comparison_metric(metric, "save_evaluation_plots")
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     written: Dict[str, str] = {}
     for key, axes in plot_evaluation(evaluation_results, ensemble).items():
         written[f"overlay_{key}"] = _savefig(axes.figure, out / f"{prefix}_overlay_{key}.png", dpi)
-    written["mape_comparison"] = _savefig(
-        plot_model_comparison(evaluation_results, ensemble).figure,
-        out / f"{prefix}_mape_comparison.png",
-        dpi,
+    comparison = plot_model_comparison(
+        evaluation_results, ensemble, metric=metric, baseline=baseline
+    )
+    written[f"{metric}_comparison"] = _savefig(
+        comparison.figure, out / f"{prefix}_{metric}_comparison.png", dpi
     )
     for label, fig in plot_evaluation_per_model(evaluation_results, ensemble).items():
         written[label] = _savefig(fig, out / f"{prefix}_{label}.png", dpi)

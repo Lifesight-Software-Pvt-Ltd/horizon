@@ -198,15 +198,38 @@ criterion. AIC rewards in-sample fit, not out-of-sample accuracy, and
 selecting SARIMAX orders by AIC was a direct cause of occasional very high
 MAPE in the pre-library version of that model.
 
-MAPE's own weaknesses are known and unaddressed in 1.0: it is undefined
-against zero actuals (sparse conversion or install series were observed at
-43–68% "MAPE" purely from zero handling), and it says nothing about whether a
-model beats a seasonal-naive baseline. `mape()` returns a `MapeResult`
-carrying how many rows were excluded for zero actuals, so the data-quality
-problem is at least visible. A benchmark-relative metric (RelMAE) and MASE
-are the intended fix; they reach into selection, the threshold and the
-weighting at once, so they belong in their own design cycle rather than a
-late change to a release being frozen.
+MAPE is undefined against zero actuals, so `mape()` leaves those rows out and
+returns a `MapeResult` saying how many. On a series with many zeros that
+means scoring a model on the days it finds easiest: on one real daily series
+the models' test MAPE was 238–420% while their WAPE was 34–41%. MAPE also
+explodes as actuals cross zero.
+
+MAPE stays the default, because it is the metric the people reading these
+results use. `selection_metric="auto"` switches every decision to WAPE
+(`sum|y - yhat| / sum|y|`, which counts every row) only when the target is 0
+in at least 10% of periods or has a negative value, with a warning; both
+scores are always reported. The 10% line comes from 42 series (21 real retail
+series and 21 synthetic): the two metrics chose the same models on 35, and
+where they differed WAPE's choice did better on test in 6 of 7. The median
+WAPE/MAPE ratio was 1.02, so `mape_threshold` keeps its meaning on either.
+
+At 50% zeros or more the target is refused outright. Forecasting 0 every
+period has a WAPE of exactly 100%, and on the two series tested above that
+share (70% and 53% zeros) every model scored 103–129%. Daily data like that
+is usually fine summed to weeks — those two series were 0 in 9% and 6% of
+weeks — so the error gives that share and points to `frequency="weekly"`.
+Horizon does not aggregate on its own: summing spend is right but summing a
+price or an index is not, and only the caller knows which columns are which.
+The accepted cost is that a sparse daily series with a strong weekday
+pattern is refused even where a model could have forecast it.
+
+Neither metric says whether a model beats a naive forecast, so `evaluate()`
+scores one — the same weekday last week, or the same week last year — on the
+same windows (`naive_baseline`) and warns about anything that does worse on
+test WAPE. On the same 42 series the default trimmed ensemble lost to it in
+13 of the 35 where it formed. The baseline is reported, not used to select
+or weight; a benchmark-relative metric (RelMAE, MASE) that does that is still
+open (§9).
 
 ### Uncertainty bounds are per-model only
 
@@ -659,7 +682,8 @@ in the wrapper, mirroring that split.
 `plotting.py` offers two chart families at each stage: overlays
 (`plot_evaluation()`, `plot_forecast()`) and dedicated per-model figures
 (`plot_evaluation_per_model()`, `plot_forecast_per_model()`), plus
-`plot_model_comparison()`, a MAPE bar chart that makes "the ensemble is not
+`plot_model_comparison()`, a bar chart of test MAPE or WAPE (with an
+optional seasonal-naive bar) that makes "the ensemble is not
 automatically better" visible at a glance. The per-model figures exist
 because the overlay crowds at even two models when their lines coincide, and
 a first faceted-grid attempt made each panel too small to read.
@@ -704,6 +728,17 @@ a first faceted-grid attempt made each panel too small to read.
   written**, always, with `model_summary` carrying validation MAPE, test
   MAPE, method, rule applied, weight, status and `best_model_check`. The
   export deliberately does not bake in the choice between them.
+- **New summary columns go after the existing ones.** `validation_wape`,
+  `wape`, `zero_actuals_excluded`, `beats_naive` and `selection_metric` were
+  appended, and the baseline is an extra row, so a reader that selects
+  columns by name or position, or filters rows by status, is unaffected.
+  `rejected_models` keeps its `mape` column name even when it holds a WAPE;
+  the new `selection_metric` column says which.
+- **`forecaster=` on the exports.** Building the score dicts by hand was the
+  usual way to get a file subtly wrong (a forgotten threshold, the test MAPE
+  passed as validation). The exports read the forecaster's public attributes
+  only, so `exporters.py` still never imports `forecaster.py`, and explicit
+  arguments still win.
 - **The best single model is chosen on validation, with test as a check.**
   It used to be the lowest test MAPE with no threshold, so the export was
   selected on the window that is meant only to be reported, and in one real
@@ -824,22 +859,21 @@ None of these block a stable API; all are additive.
   window may favour candidates that suit it specifically. The per-window
   driver check (§2) is already written as one function per fit window, so a
   backtest can call it per fold.
-- **Benchmark-relative metrics (RelMAE) and MASE.** MAPE alone says nothing
-  about whether a model beats a seasonal-naive baseline and is unusable on
-  series with zero actuals. These reach into selection, the threshold and
-  the weighting together, and should be designed as one change. Sketch for
-  whoever implements it: a `mase()` + `MaseResult` in `evaluation/metrics.py`
-  (unlike `mape()` it needs the training series and the seasonal period), an
-  optional `mase` field on `EvaluationResult`, and metric-aware grid sorting,
-  rejection and weighting.
+- **Benchmark-relative metrics (RelMAE) and MASE.** The seasonal-naive
+  baseline is reported and warned about (§2), and selection can run on WAPE,
+  but nothing is selected or weighted relative to the baseline. The
+  metric-aware grid sorting, screen and weighting that WAPE needed are the
+  path for it: `seasonal_naive()` in `evaluation/metrics.py` already gives
+  the denominator, and `selection_metric` is where a third option would go.
 - **Family de-duplication.** Prophet and NeuralProphet share an
   additive-decomposition methodology (signed-error correlation 0.787, the
   highest of any pair involving either), so a blend containing both is less
   diverse than its member count suggests. Nothing accounts for that.
-- **An error-diversity diagnostic.** The value of combining depends on
-  members making *different* errors — pairwise signed-error correlation
-  across members would let users check whether there is anything to exploit
-  on their own series.
+- **Acting on error diversity.** `test_error_correlation` (and the
+  `error_correlation` export) reports the pairwise correlation of the
+  models' signed test errors, so a user can see whether there is anything to
+  exploit on their own series; the ensemble does not use it to choose or
+  weight members.
 - **Non-negativity is not enforced library-wide.** Prophet can emit negative
   point forecasts; SARIMAX is non-negative structurally via its `log1p` fit,
   which is also why it is left out of any run whose target goes negative;
