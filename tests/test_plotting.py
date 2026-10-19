@@ -584,3 +584,17 @@ def test_empty_results_raise_the_librarys_error_which_is_still_a_value_error():
     with pytest.raises(InvalidConfigError, match="nothing to plot"):
         plot_evaluation({})
     assert issubclass(InvalidConfigError, ValueError)
+
+
+def test_plot_forecast_reads_text_dates_in_history():
+    # Text dates straight from a CSV used to crash with a raw matplotlib TypeError.
+    history = pd.DataFrame(
+        {"date": ["2022-12-29", "2022-12-30", "2022-12-31"], "orders": [1, 2, 3]}
+    )
+    axes = plot_forecast(
+        {"prophet": make_forecast_result()},
+        history=history,
+        date_column="date",
+        target_column="orders",
+    )
+    assert len(axes) == 1

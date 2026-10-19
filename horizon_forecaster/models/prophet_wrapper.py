@@ -108,7 +108,7 @@ class ProphetWrapper(BaseModel):
             model.fit(train_df)
         except Exception as e:
             raise ModelConvergenceError(
-                "Prophet failed to fit.",
+                f"Prophet failed to fit ({type(e).__name__}: {e}).",
                 model_name=self.model_name,
                 original_exception=e,
             )
@@ -172,7 +172,7 @@ class ProphetWrapper(BaseModel):
             forecast = self._fitted_model.predict(future_exog)
         except Exception as e:
             raise ModelPredictionError(
-                "Prophet failed during prediction.",
+                f"Prophet failed during prediction ({type(e).__name__}: {e}).",
                 model_name=self.model_name,
                 original_exception=e,
             )

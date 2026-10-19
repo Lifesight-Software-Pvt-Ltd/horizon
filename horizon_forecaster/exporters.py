@@ -588,7 +588,7 @@ def export_forecast(
     if save_plots:
         # Before any file is written, so a bad history doesn't leave the
         # CSVs on disk without their charts.
-        check_history(history, date_column, target_column, "export_forecast")
+        history = check_history(history, date_column, target_column, "export_forecast")
     written = export_forecast_csvs(
         forecast_results,
         ensemble,

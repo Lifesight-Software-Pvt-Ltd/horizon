@@ -156,12 +156,22 @@ class CatBoostWrapper(BaseModel):
             # ProphetWrapper's lazy `from prophet import Prophet`.
             from catboost import CatBoostRegressor, Pool
 
-            model = CatBoostRegressor(random_seed=self.random_seed, verbose=False, **self.params)
+            # allow_writing_files=False: CatBoost otherwise writes a
+            # catboost_info/ folder of training logs into the working
+            # directory on every fit. Overridable through params.
+            model = CatBoostRegressor(
+                **{
+                    "random_seed": self.random_seed,
+                    "verbose": False,
+                    "allow_writing_files": False,
+                    **self.params,
+                }
+            )
             train_pool = Pool(X, y, cat_features=categorical_feature_names)
             model.fit(train_pool)
         except Exception as e:
             raise ModelConvergenceError(
-                "CatBoost failed to fit.",
+                f"CatBoost failed to fit ({type(e).__name__}: {e}).",
                 model_name=self.model_name,
                 original_exception=e,
             )
@@ -222,7 +232,7 @@ class CatBoostWrapper(BaseModel):
             yhat = self._fitted_model.predict(X_future)
         except Exception as e:
             raise ModelPredictionError(
-                "CatBoost failed during prediction.",
+                f"CatBoost failed during prediction ({type(e).__name__}: {e}).",
                 model_name=self.model_name,
                 original_exception=e,
             )
@@ -286,8 +296,13 @@ class CatBoostWrapper(BaseModel):
             min_rows_required=envelope["min_rows_required"],
             random_seed=envelope["random_seed"],
         )
+        # The model file is read from next to the envelope, where save()
+        # wrote it, not from the path stored inside: that path is where the
+        # files were when saved, so after moving them it pointed at nothing
+        # ("Model file doesn't exist") -- or at a stale model left behind.
+        # Same rule as the Bayesian PyMC wrapper.
         model = CatBoostRegressor()
-        model.load_model(envelope["model_path"])
+        model.load_model(f"{path}.cbm")
         instance._fitted_model = model
         instance._feature_columns = envelope["feature_columns"]
         instance._categorical_feature_names = envelope["categorical_feature_names"]
