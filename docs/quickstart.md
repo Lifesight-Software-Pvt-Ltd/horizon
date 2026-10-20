@@ -244,8 +244,12 @@ counts as failed.
 
 A model that cannot handle the data is left out before anything runs, with a
 warning, and listed in `forecaster.skipped_models`: SARIMAX fits in log space,
-so it is skipped when the target has a negative value (and refused if it is
-the only model requested).
+so it is skipped when the target has a negative value, or on weekly data when
+more than 10% of weeks are 0 while the series is normally above 0 (and refused
+if it is the only model requested). Below that, and on daily data at any
+share, SARIMAX leaves such zeros out of its own fit, with a warning: a day
+counts when its weekday normally has values, so the zeros of a business closed
+every Sunday are kept and modelled as usual.
 
 ## 4. Forecast the future
 
@@ -342,6 +346,13 @@ Worth knowing:
   or less, of its recent median, or an event flag of 1).
 - **Partial fill.** You can supply future values for *some* columns and let
   the rest be generated — pass a DataFrame with only the columns you know.
+- **Spend what-ifs have two limits.** Spend above the highest value in your
+  data cannot be estimated reliably: in testing, the default ensemble
+  understated a linear effect by about a third at 1.5× the highest past spend
+  and about half at 2×, and overstated one with diminishing returns. And
+  carry-over is not modelled, so a sustained change in spend is understated
+  even within the historical range. See
+  [`future_exog.md`](future_exog.md#spend-what-ifs) for the numbers.
 
 After a forecast, inspect exactly what was assumed:
 

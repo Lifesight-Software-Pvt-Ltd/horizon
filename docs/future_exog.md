@@ -94,6 +94,39 @@ declared drivers (plus, optionally, the date and target columns), and clean
 numeric values (on/off words such as `yes/no` count as 1/0); see the table in
 [`quickstart.md`](quickstart.md) for the full list of checks.
 
+## Spend what-ifs
+
+Supplying the spend you plan is the main use of `future_independent_data`.
+Two limits apply to every such scenario.
+
+**Spend above the highest value in your data cannot be estimated reliably.**
+The models disagree about values they have never seen: Prophet and
+NeuralProphet extend the driver's effect in a straight line, SARIMAX and
+Bayesian PyMC cap the driver at its historical range, and CatBoost treats it
+like the most extreme value it has seen. On synthetic data with a known spend
+effect, with spend held for the whole forecast at a multiple of the highest
+past value, the default trimmed ensemble captured this share of the true
+uplift (1.00 is right):
+
+| Spend effect | Frequency | 1× | 1.5× | 2× | 5× |
+|---|---|---|---|---|---|
+| Linear | daily | 0.88 | 0.66 | 0.57 | 0.42 |
+| Linear | weekly | 0.92 | 0.67 | 0.57 | 0.42 |
+| Diminishing returns | daily | 1.28 | 1.17 | 1.16 | 1.46 |
+| Diminishing returns | weekly | 1.17 | 0.99 | 0.96 | 1.15 |
+
+With a linear effect the forecast understates the uplift by about a third at
+1.5× and about half at 2×; with diminishing returns it overstates it. Beyond
+the highest past spend the data cannot tell the two apart, so no setting
+fixes this. `forecast()` warns whenever a supplied value is outside the range
+in your data.
+
+**Carry-over is not modelled.** Every model uses the same period's spend only.
+When part of spend's effect carries into later periods, a sustained change in
+spend is understated even within the historical range: in the same test, with
+half of each week's effect carrying into the next, the default ensemble
+captured about 45% of the true uplift, and no model more than half.
+
 ## Inspecting the assumptions
 
 After a forecast, the resolved future drivers (supplied **and** generated,

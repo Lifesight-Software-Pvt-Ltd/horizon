@@ -83,6 +83,13 @@ grid-searched. Design points worth knowing:
   (it becomes a gap) and never forecasts below zero, so SARIMAX is left out,
   with a warning, of any run whose target has a negative value, and listed in
   `forecaster.skipped_models`.
+- **Unexpected zeros are left out of the fit.** In log space a 0 among values
+  in the thousands is an outlier of about 7 units; one or two such days took
+  its test WAPE from 4 to 84 in testing. A 0 on a weekday that normally has
+  values (daily), or any 0 when the series is normally above 0 (weekly), is
+  treated as missing in SARIMAX's own fit, with a warning; the other models
+  still see it as 0, and zeros on closed weekdays are kept. Weekly data holds
+  up less well: above 10% zero weeks SARIMAX is left out of the run.
 - **Exog is clamped to the training range** so an out-of-range future value
   cannot extrapolate a fitted coefficient into a divergence.
 - **Annual-collinearity warning**: if an independent column strongly tracks

@@ -178,8 +178,8 @@ yet it can be one value throughout the window a model is fitted on — a price
 change or a new promotion that first appears in the validation or test
 window. No model can learn an effect from such a column, and they failed
 in different ways when given one: NeuralProphet discarded it at fit and then
-rejected it at prediction, so it dropped out of the run (reported on client
-data with a `Price_Hike` flag); Prophet, when the constant was not 0, fitted
+rejected it at prediction, so it dropped out of the run (reported on real
+retail data with a `Price_Hike` flag); Prophet, when the constant was not 0, fitted
 an arbitrary effect to it (+31,403 on a series around 3,500 whose true effect
 was −400); CatBoost, SARIMAX and Bayesian PyMC gave it no effect. The
 orchestrator now finds such drivers once per fit window and leaves them out
@@ -530,6 +530,29 @@ varies `(p, q)`, the seasonal `(P, Q)` at daily frequency, and
   a frame mirroring the real data: it flags the seasonal stockout column at
   R²=0.95 and stays silent on spend columns and a sparse promo flag. Nothing
   is dropped.
+- **Unexpected zeros are missing values to it, not data.** In `log1p`
+  space a 0 among values around 1,000 is a drop of about 7 units. It inflates
+  the innovation variance, the `+σ²/2` bias correction then scales the whole
+  forecast up, and the fit can diverge. Setting days to 0 at random in clean
+  daily series: 2 zero days (0.2%) took test WAPE from 4.1 to 84 on one
+  series, 1 zero day from 3.3 to 22 on another, and from 10–20% SARIMAX
+  dropped out. Turning the bias correction off helped but did not fix it. Zeros
+  on closed weekdays (every Sunday, 14%; every weekend, 29%) were harmless,
+  because the weekly pattern explains them. So a share-of-zeros rule is the
+  wrong test; what matters is whether a zero falls where the series normally
+  has a value. `unexpected_zero_mask()` marks a 0 on a weekday whose median is
+  above 0 (daily), or any 0 when the median is above 0 (weekly), and `fit()`
+  sets those rows to NaN, which the state-space fit treats as missing. With
+  that, SARIMAX kept its clean-data accuracy at low shares and stayed level
+  with CatBoost and the seasonal-naive baseline up to 30% zero days; on two
+  real series with natural zeros it went from 36 to 25 and from 121 to 61.
+  Nothing is filled: the data, and every other model, still see 0. Weekly
+  data holds up less well, because each zero week is a larger share of far
+  fewer points: across 7 synthetic and 6 real weekly series, SARIMAX became
+  unusable in a roughly constant share of cases up to 10% zero weeks and in
+  most of them from 15%. So above 10% it is left out of a weekly run, like a
+  negative target, and below that the warning says its forecast may be
+  degraded.
 - statsmodels pickles reliably, so SARIMAX needs no `save`/`load` override.
 
 Known and unresolved: SARIMAX's daily MAPE has drifted between runs on

@@ -36,6 +36,9 @@ Key safeguards, all kept from the validation-search era:
 - A divergence guard: a forecast pinned to the clip is rejected rather
   than emitted as a degenerate flat line. With the grid now tolerating
   per-candidate failures, a diverging candidate is simply skipped.
+- Unexpected zeros are left out of the fit (see unexpected_zero_mask()):
+  in log space a zero among values in the thousands is an outlier of about
+  7 units, and one or two of them were enough to wreck the forecast.
 """
 
 import warnings
@@ -55,6 +58,34 @@ from horizon_forecaster.models.base import BaseModel
 # for both frequencies -- a year is a year regardless of sampling rate --
 # which also makes them robust to gaps, unlike a positional index.
 _ANNUAL_PERIOD_DAYS = 365.25
+
+
+def unexpected_zero_mask(y, ds, frequency: str) -> np.ndarray:
+    """
+    The zeros SARIMAX leaves out of its fit: a 0 where the series normally
+    has a value. For daily data that is a 0 on a weekday whose median is
+    above 0, so a closed day (a weekday that is mostly 0, such as every
+    Sunday) keeps its zeros and the weekly pattern models them. For weekly
+    data, where there is no such pattern, it is any 0 when the series'
+    median is above 0.
+
+    Why: SARIMAX fits log1p(y), where a 0 among values around 1,000 is an
+    outlier of about 7 units. It inflates the innovation variance, the
+    lognormal bias correction then scales the forecast up, and the fit can
+    diverge. Measured by setting days to 0 at random in clean daily series:
+    2 zero days (0.2%) took test WAPE from 4.1 to 84 on one, 1 zero day from
+    3.3 to 22 on another; from 10-20% SARIMAX dropped out. With these days
+    left out it stayed at its clean-data accuracy at low shares and level
+    with CatBoost and the seasonal-naive baseline up to 30%. Every zero on
+    closed weekdays (every Sunday, every weekend) was harmless either way.
+    """
+    y = np.asarray(y, dtype=float)
+    if frequency == "daily":
+        weekday = pd.to_datetime(pd.Series(ds)).dt.dayofweek.to_numpy()
+        typical = pd.Series(y).groupby(weekday).median().reindex(weekday).to_numpy()
+    else:
+        typical = np.full(len(y), np.nanmedian(y) if len(y) else 0.0)
+    return (y == 0) & (typical > 0)
 
 
 class SARIMAXWrapper(BaseModel):
@@ -136,6 +167,11 @@ class SARIMAXWrapper(BaseModel):
 
         y_raw = train_df["y"].to_numpy(dtype=float)
         y_log = np.log1p(y_raw)
+        # Unexpected zeros are missing values to the state-space fit, so they
+        # neither distort it nor need filling. See unexpected_zero_mask().
+        masked = unexpected_zero_mask(y_raw, train_df["ds"], self.frequency)
+        y_log[masked] = np.nan
+        self.masked_zero_count = int(masked.sum())
 
         self._independent_columns: List[str] = [c for c in train_df.columns if c not in ("ds", "y")]
         self._reference_date = pd.to_datetime(train_df["ds"]).iloc[0]
