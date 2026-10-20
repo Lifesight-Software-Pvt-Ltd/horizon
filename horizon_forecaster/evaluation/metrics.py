@@ -188,11 +188,11 @@ def seasonal_naive(history_dates, history_values, future_dates, season_days: int
     model that cannot beat this adds nothing, which makes it the baseline
     every model and ensemble is compared with.
 
-    Matched by date, not by row, so a series with closed days or missing
-    dates still compares Monday with Monday: on Mon-Fri data, "7 rows back"
-    is a different weekday, and that baseline scored 10.40 WAPE against 5.90
-    for the same weekday. A future date with no such value in the history
-    (less than one season of it) repeats the last value instead.
+    Matched by date, not by row, so if the dates passed in have gaps it
+    still compares Monday with Monday. (HorizonForecaster rejects missing
+    dates, so its own baseline is never computed on gappy data.) A future
+    date with no such value in the history (less than one season of it)
+    repeats the last value instead.
     """
     hist = pd.Series(
         np.asarray(history_values, dtype=float), index=pd.to_datetime(pd.Index(history_dates))

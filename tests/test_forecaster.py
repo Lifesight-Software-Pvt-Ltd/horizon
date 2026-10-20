@@ -201,20 +201,19 @@ def test_constructor_does_not_modify_the_callers_dataframe():
 
 
 def test_constructor_refuses_ambiguous_text_dates_until_date_format_is_given():
-    # Weekly dates on the 1st-12th of each month only: every value fits
-    # both DD/MM/YYYY and MM/DD/YYYY.
+    # 1-12 February: every value fits both DD/MM/YYYY and MM/DD/YYYY.
     df = pd.DataFrame(
         {
-            "date": ["01/02/2026", "08/02/2026", "01/03/2026", "08/03/2026"],
-            "orders": [10, 20, 30, 40],
+            "date": [f"{day:02d}/02/2026" for day in range(1, 13)],
+            "orders": range(10, 130, 10),
         }
     )
-    kwargs = dict(date_column="date", target_column="orders", frequency="weekly")
+    kwargs = dict(date_column="date", target_column="orders", frequency="daily")
     with pytest.raises(InvalidConfigError, match="day-first or month-first"):
         HorizonForecaster(df, models=["prophet"], **kwargs)
 
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # tiny series: scaling/gap warnings are not the point
+        warnings.simplefilter("ignore")  # tiny series: its warnings are not the point
         forecaster = HorizonForecaster(df, models=["prophet"], date_format="%d/%m/%Y", **kwargs)
     assert forecaster.raw_df["date"].iloc[0] == pd.Timestamp("2026-02-01")
 
@@ -301,37 +300,85 @@ def test_constructor_rejects_daily_dates_with_inconsistent_times():
         _build(_spacing_df(dates), "daily")
 
 
-def test_constructor_accepts_a_continuous_gap_of_exactly_four_weeks_with_a_warning():
-    with pytest.warns(UserWarning, match=r"longest: 28 day\(s\)"):
-        _build(_spacing_df(_DAILY.delete(range(100, 128))), "daily")
-    with pytest.warns(UserWarning, match=r"longest: 4 week\(s\)"):
-        _build(_spacing_df(_WEEKLY.delete(range(50, 54))), "weekly")
-
-
 @pytest.mark.parametrize(
-    "dates, frequency, run",
+    "dates, frequency",
     [
-        (_DAILY.delete(range(100, 129)), "daily", "29 day"),
-        (_WEEKLY.delete(range(50, 55)), "weekly", "5 week"),
+        (_DAILY.delete([200]), "daily"),
+        (_DAILY.delete(range(100, 128)), "daily"),
+        (_DAILY.delete(range(100, 129)), "daily"),
+        (_WEEKLY.delete([60]), "weekly"),
+        (_WEEKLY.delete(range(50, 54)), "weekly"),
+        (_WEEKLY.delete(range(50, 55)), "weekly"),
     ],
 )
-def test_constructor_rejects_a_continuous_gap_longer_than_four_weeks(dates, frequency, run):
-    with pytest.raises(InvalidConfigError, match=rf"{run}\(s\) missing in a row"):
+def test_constructor_rejects_any_missing_date(dates, frequency):
+    """
+    Missing dates used to warn when scattered and raise only past four
+    weeks in a row. Now one missing day or week is enough.
+    """
+    with pytest.raises(InvalidConfigError, match="Every (day|week) must be present"):
         _build(_spacing_df(dates), frequency)
 
 
-def test_constructor_warns_on_scattered_missing_dates_with_the_share_present():
-    # Every 4th day removed: 25% missing, but never more than one in a row.
-    dates = _DAILY.delete(range(3, 400, 4))
-    with pytest.warns(UserWarning, match=r"75% of days are present"):
-        forecaster = _build(_spacing_df(dates), "daily")
-    assert len(forecaster.raw_df) == 300
+def test_the_missing_date_error_names_the_dates_and_the_longest_gap():
+    # Every 4th day removed from the first 400: 100 single-day gaps, then a
+    # 3-day hole, so the longest gap is not the first one.
+    dates = _DAILY.delete(list(range(3, 300, 4)) + [350, 351, 352])
+    with pytest.raises(InvalidConfigError) as caught:
+        _build(_spacing_df(dates), "daily")
+    message = str(caught.value)
+    assert "'date' is missing 78 days between its first and last dates" in message
+    assert "2024-01-04, 2024-01-08, 2024-01-12, 2024-01-16, 2024-01-20 and 73 more" in message
+    assert "in 76 gaps (the longest is 3 days, 2024-12-16 to 2024-12-18)" in message
+    assert "with 0 where the business was closed" in message
+    assert caught.value.provided_value == [
+        "2024-01-04",
+        "2024-01-08",
+        "2024-01-12",
+        "2024-01-16",
+        "2024-01-20",
+    ]
 
 
-def test_constructor_accepts_weekday_only_daily_data_with_a_warning():
-    weekdays = _DAILY[_DAILY.dayofweek < 5]
-    with pytest.warns(UserWarning, match="has gaps"):
-        _build(_spacing_df(weekdays), "daily")
+def test_the_missing_date_error_for_one_run_gives_its_first_and_last_date():
+    with pytest.raises(
+        InvalidConfigError, match=r"5 weeks .* all in a row \(2022-12-11 to 2023-01-08\)"
+    ):
+        _build(_spacing_df(_WEEKLY.delete(range(49, 54))), "weekly")
+
+
+def test_the_missing_date_error_for_one_day_is_singular():
+    with pytest.raises(InvalidConfigError, match=r"missing 1 day between .*: 2024-07-19\. Every"):
+        _build(_spacing_df(_DAILY.delete([200])), "daily")
+
+
+@pytest.mark.parametrize(
+    "keep, named",
+    [
+        (lambda d: d.dayofweek < 5, "No Saturday or Sunday appears at all"),
+        (lambda d: d.dayofweek != 6, "No Sunday appears at all"),
+        (lambda d: d.dayofweek < 4, "No Friday, Saturday or Sunday appears at all"),
+    ],
+)
+def test_the_missing_date_error_names_weekdays_that_never_appear(keep, named):
+    with pytest.raises(InvalidConfigError, match="add those days with a value of 0") as caught:
+        _build(_spacing_df(_DAILY[keep(_DAILY)]), "daily")
+    assert named in str(caught.value)
+
+
+def test_the_missing_date_error_names_no_weekday_when_every_weekday_appears():
+    with pytest.raises(InvalidConfigError) as caught:
+        _build(_spacing_df(_DAILY.delete([200, 201])), "daily")
+    assert "appears at all" not in str(caught.value)
+
+
+def test_complete_weekday_data_with_zeros_on_closed_days_is_accepted():
+    """What the error asks for: the closed days added, with a value of 0."""
+    df = _spacing_df(_DAILY)
+    df.loc[_DAILY.dayofweek >= 5, "orders"] = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _build(df, "daily", selection_metric="mape")
 
 
 def test_constructor_raises_immediately_when_training_size_leaves_no_test_rows():
@@ -2437,8 +2484,9 @@ def _weekdays_only(df):
     return df[pd.to_datetime(df["date"]).dt.dayofweek < 5].reset_index(drop=True)
 
 
-def test_the_seasonal_naive_baseline_repeats_the_same_weekday_on_weekday_only_data():
-    df = _weekdays_only(make_noisy_raw_df(n=120))
+def test_the_seasonal_naive_baseline_repeats_the_same_weekday_with_closed_weekends():
+    df = make_noisy_raw_df(n=120)
+    df.loc[pd.to_datetime(df["date"]).dt.dayofweek >= 5, "orders"] = 0.0
     forecaster = _construct(df, models=["catboost"], model_params={"catboost": _QUICK["catboost"]})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

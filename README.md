@@ -14,9 +14,9 @@ Rather than betting on one model, Horizon Forecaster fits Prophet, CatBoost,
 SARIMAX, NeuralProphet, and a Bayesian PyMC model on the same data, tunes and
 screens each one on a **validation** window, reports each one's accuracy on a
 separate **test** window that no selection step is ever allowed to read, and
-combines the survivors — while telling you the per-model MAPE, which models
-were excluded and why, and whether the combined forecast actually beats the
-best individual model (it is not guaranteed to).
+combines the survivors — while telling you the per-model MAPE and WAPE,
+which models were excluded and why, and whether the combined forecast
+actually beats the best individual model (it is not guaranteed to).
 
 **Research paper:** *Robust Ensemble Forecasting in Practice: Model Selection
 and Combination Across Heterogeneous Time Series* (Singh, Bhardwaj, Nair;
@@ -40,8 +40,9 @@ so they read on GitHub — see [`examples/`](examples/).
 Every model is an `(adapter, wrapper)` pair registered in one `MODEL_REGISTRY`,
 and all of them run through the same `evaluate()` / `forecast()` / ensemble /
 export / plot pipeline. They are selected the same way — a hyperparameter grid
-search scored by MAPE on the validation window — so their numbers are directly
-comparable.
+search scored on the validation window by `selection_metric` (MAPE, or WAPE
+when the target has many zeros or goes negative) — so their numbers are
+directly comparable.
 
 | Model | Backend | Uncertainty bounds | Notes |
 |---|---|---|---|
@@ -86,12 +87,12 @@ behaviour.
 - **Robust combination rules.** Models at or below a configurable
   `mape_threshold` are combined by a **trimmed mean** (the default: discard the
   highest and lowest member each period, average the rest), or by
-  `inverse_mape` (lower validation MAPE → more weight) or `equal` weighting.
+  `inverse_mape` (lower validation score → more weight) or `equal` weighting.
   Ask for several at once, or all three. The combined result's own accuracy is
   scored against real actuals, so you can check whether it beats the best
   single model.
 - **Transparent failure & rejection reporting.** A model that fits but scores
-  above the threshold is *rejected* from the ensemble (reported with its MAPE);
+  above the threshold is *rejected* from the ensemble (reported with its score);
   a model that fails to fit at all is recorded separately. One model failing
   never aborts the others.
 - **Daily and weekly granularity**, flexible target variables, and optional
@@ -106,13 +107,12 @@ behaviour.
   export of the run's CSVs plus PNGs.
 - **Input checks that fail loudly.** Dates are parsed before anything is
   sorted and must meet an explicit contract (format, duplicates, spacing,
-  gaps); a supplied future driver table must match the forecast exactly;
-  on/off text such as `yes/no` is read as 1/0, and other text is rejected
-  with the reason. See [`docs/quickstart.md`](docs/quickstart.md).
-- **Built-in safety warnings** for scattered missing dates, over-long
-  horizons, auto-generated future driver values, a last period that
-  `carry_forward` would hold (a promotion week), events from last year
-  missing from a generated future, future driver values outside their
+  no missing dates); a supplied future driver table must match the
+  forecast exactly; on/off text such as `yes/no` is read as 1/0, and other
+  text is rejected with the reason. See [`docs/quickstart.md`](docs/quickstart.md).
+- **Built-in safety warnings** for over-long horizons, auto-generated
+  future driver values, a last period that `carry_forward` would hold (a
+  promotion week), events from last year missing from a generated future, future driver values outside their
   historical range, drivers that never change inside a fit window, and
   forecasts that land implausibly far outside history.
 
@@ -159,7 +159,7 @@ forecaster = HorizonForecaster(
     validation_size=84,             # periods used for selection; None = frequency default
     test_size=28,                   # periods reported; None = frequency default
     models=None,                    # None = all five; or e.g. ["sarimax", "catboost"]
-    mape_threshold=40.0,            # degenerate-fit filter on the validation MAPE; None disables it
+    mape_threshold=40.0,            # degenerate-fit filter on the validation score; None disables it
     ensemble_method="trimmed",      # or "inverse_mape", "equal", a list, or None for all three
 )
 
@@ -194,14 +194,15 @@ supplying planned future driver values — in
 ## How the ensemble works
 
 `build_ensembles()` combines the point forecasts of every model whose
-**validation** MAPE is at or below `mape_threshold`, using one or more
-combination rules. The default is a **trimmed mean**: per period, discard the
-highest and lowest member and average what remains. `inverse_mape` and `equal`
+**validation** score (MAPE, or WAPE when `selection_metric` picks it) is at or
+below `mape_threshold`, using one or more combination rules. The default is a
+**trimmed mean**: per period, discard the highest and lowest member and
+average what remains. `inverse_mape` and `equal`
 weighting are also available and can be built alongside it — the models are
 already fitted by then, so extra rules are close to free.
 `evaluate_ensemble` / `forecast_ensemble` are a `Dict[str, EnsembleResult]`
 keyed by method, always a dict even for a single method. Excluded models are
-reported in `rejected_models` with their MAPE and the threshold they exceeded —
+reported in `rejected_models` with their score and the threshold they exceeded —
 distinct from models that failed to fit, which land in `evaluate_errors` /
 `forecast_errors`.
 

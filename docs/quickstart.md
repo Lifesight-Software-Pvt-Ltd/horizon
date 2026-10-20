@@ -34,10 +34,10 @@ window — a price change or a new promotion that first appears in the
 validation or test window — is left out of that window's fit for every model,
 since no model can learn an effect from it there. A warning names the driver,
 its value and the date it first changes, and says which score includes an
-effect the models could not see: the validation MAPE (which drives
-hyperparameter selection, `mape_threshold` screening and ensemble weights) or
-the test MAPE. `forecast()` refits on the full series, where the driver does
-change, and uses it.
+effect the models could not see: the validation score (MAPE or WAPE, which
+drives hyperparameter selection, `mape_threshold` screening and ensemble
+weights) or the test score. `forecast()` refits on the full series, where the
+driver does change, and uses it.
 
 **What data is accepted.** The constructor checks the date column against the
 rules below. Anything outside them raises an error naming the rule and the fix,
@@ -51,7 +51,7 @@ rather than running on data that would give a confident but wrong result.
 | 4 | Each date appears once | `InvalidConfigError` naming the dates |
 | 5 | Every step between dates is a whole number of periods — weekly dates all on the same weekday | `InvalidConfigError` |
 | 6 | More than half of the steps are exactly one period — the data really is daily or weekly | `InvalidConfigError` if it looks like the other frequency (e.g. weekly data declared daily); `UnsupportedFrequencyError` for any other spacing (every 2 days, fortnightly, monthly) |
-| 7 | No more than 4 weeks (28 days) of dates missing in a row | `InvalidConfigError` naming the gap |
+| 7 | No date missing between the first and the last — every day (daily) or every week (weekly) has a row | `InvalidConfigError` naming the missing dates |
 
 Dates are parsed before anything is sorted or split, and your DataFrame is
 never modified. If every value could be read either way — `03/04/2024` is
@@ -59,12 +59,14 @@ never modified. If every value could be read either way — `03/04/2024` is
 `date_format="%d/%m/%Y"` (or `"%m/%d/%Y"`) to say which. `date_format` also
 accepts any other strftime pattern, e.g. `"%d.%m.%Y"`.
 
-**Shorter gaps warn.** Data that meets all seven rules can still have missing
-periods — weekday-only sales, an occasional missing day. You get a warning with
-the share of periods present and the longest gap, and the run continues.
-Horizon never fills gaps, and accuracy suffers — SARIMAX most, since it treats
-consecutive rows as consecutive periods — so fill them if you can. If the
-business was closed on those dates, add them with a value of 0.
+**Missing dates are rejected, however few.** The models count rows, not
+dates, so one missing day shifts every weekly cycle after it, and the
+train/validation/test windows cover more time than their size says. The error
+lists the first five missing dates and the longest gap. Horizon never fills them
+itself, because only you know what they were: add each one with 0 if the
+business was closed that day, or the real value if the data was lost. Data
+from a business closed on weekends needs the weekend rows too, with 0; the
+error names any weekday that never appears.
 
 ```python
 import pandas as pd
@@ -90,7 +92,7 @@ forecaster = HorizonForecaster(
     validation_size=None,           # selection window; None = frequency default (84 daily / 39 weekly)
     test_size=None,                 # reported window; None = frequency default (28 daily / 13 weekly)
     models=None,                    # None = every registered model; or e.g. ["sarimax", "catboost"]
-    mape_threshold=40.0,            # degenerate-fit filter on the VALIDATION MAPE; None admits every model
+    mape_threshold=40.0,            # degenerate-fit filter on the VALIDATION score; None admits every model
     ensemble_method="trimmed",      # or "inverse_mape", "equal", a list of them, or None for all three
 )
 ```
@@ -221,12 +223,11 @@ print(forecaster.test_error_correlation)
 
 **The seasonal-naive baseline.** `evaluate()` also scores the simplest
 possible forecast on the same windows: the same weekday last week for daily
-data, the same week last year for weekly, matched by date so closed days and
-missing dates don't shift it. `forecaster.naive_baseline` is an
-`EvaluationResult` like the models'. Any model or ensemble rule whose test
-WAPE is worse than the baseline's is named in a warning — on 42 test series
-the default trimmed ensemble lost to it in 13 of the 35 where it formed,
-which no score on its own reveals.
+data, the same week last year for weekly, matched by date.
+`forecaster.naive_baseline` is an `EvaluationResult` like the models'. Any
+model or ensemble rule whose test WAPE is worse than the baseline's is named
+in a warning — on 42 test series the default trimmed ensemble lost to it in 13
+of the 35 where it formed, which no score on its own reveals.
 
 **Error correlation.** `forecaster.test_error_correlation` is the correlation
 of each pair of models' signed test errors. An ensemble gains only from
@@ -256,9 +257,10 @@ future_ensembles = forecaster.forecast_ensemble  # Dict[str, EnsembleResult], sa
 ```
 
 `forecast()` refits each model on the full dataset (once, cached). Its
-ensembles screen and weight on the **validation** MAPE from hyperparameter
-selection — which `forecast()` has to perform anyway in order to know which
-parameters to fit with, so those scores come for free and are cached. It does
+ensembles screen and weight on the **validation** score (MAPE or WAPE, per
+`selection_metric`) from hyperparameter selection — which `forecast()` has to
+perform anyway in order to know which parameters to fit with, so those scores
+come for free and are cached. It does
 **not** run `evaluate()` internally, so calling `forecast()` first costs no more
 than calling it second.
 
@@ -370,8 +372,11 @@ print(paths)
 model's and each rule's scores, `mape_threshold`, the selection metric and
 the seasonal-naive baseline. Any of `ensemble`, `per_model_mape`,
 `per_model_validation_mape`, `ensemble_mape` and `mape_threshold` passed
-explicitly still wins, and the export works without `forecaster=` as before,
-just without the WAPE columns, the baseline row and the error correlation.
+explicitly replaces the forecaster's value; an explicit
+`per_model_validation_mape` also makes the best model be chosen on those
+MAPEs, even on a run that selected on WAPE. The export works without
+`forecaster=` as before, just without the WAPE columns, the baseline row and
+the error correlation.
 
 This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
@@ -379,11 +384,11 @@ asking for all three writes three of them — plus `final_best_model`,
 and two or more models, `error_correlation`.
 
 **How the best single model is chosen.** `final_best_model` is the model with
-the lowest **validation** MAPE among those within `mape_threshold` on
+the lowest **validation** score among those within `mape_threshold` on
 validation *and* on test. Test is only a check that rules a model out, never
 what it is ranked on: ranking on test was measured to pick worse, and the
 second check stops a model that looked fine on validation but failed on
-test. Because test helped decide, that model's test MAPE is slightly
+test. Because test helped decide, that model's test score is slightly
 optimistic, and `model_summary`'s `best_model_check` column says so, along
 with why every other model was not chosen. If no model passes, the file is
 written empty with a warning naming each model's scores; the ensemble files
@@ -473,8 +478,8 @@ each line with both MAPE and WAPE.
 
 A combined ensemble can score worse than the single best model — this is a
 real property of combination, not a bug. Always compare each ensemble's
-`.mape` against each model's own `results[name].mape` before choosing which
-output to trust. Both a `final_ensemble_<method>` and a `final_best_model` CSV
+`.mape` against each model's own `results[name].mape` (or `.wape` against
+`.wape` on a run that selected on WAPE) before choosing which output to trust. Both a `final_ensemble_<method>` and a `final_best_model` CSV
 are exported for exactly this reason. Prefer the ensemble when in doubt: in
 testing on 19 real series, no score picked the model that then did best on
 test more than about 40% of the time, which is the case the trimmed mean

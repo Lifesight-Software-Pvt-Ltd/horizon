@@ -412,7 +412,7 @@ def test_parse_date_column_leaves_missing_cells_for_the_missing_value_check():
     assert parsed.iloc[1:].isna().all()
 
 
-# ---------- find_duplicate_dates / find_date_gaps ----------
+# ---------- find_duplicate_dates / describe_date_spacing ----------
 
 
 def test_find_duplicate_dates_lists_each_repeated_date_once():
@@ -427,18 +427,20 @@ def test_find_duplicate_dates_is_empty_for_unique_dates():
 def test_describe_date_spacing_is_clean_for_a_regular_series():
     spacing = describe_date_spacing(pd.Series(_JAN), "daily")
     assert spacing.one_period_share == 1.0
-    assert spacing.missing_periods == 0 and spacing.irregular_steps == 0
-    assert spacing.coverage == 1.0
+    assert spacing.missing_dates == [] and spacing.irregular_steps == 0
 
 
 def test_describe_date_spacing_counts_gaps_and_the_longest_run():
     dates = pd.Series(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-05", "2024-01-15"]))
     spacing = describe_date_spacing(dates, "daily")
-    assert spacing.missing_periods == 2 + 9
+    assert spacing.missing_dates == list(
+        pd.to_datetime(["2024-01-03", "2024-01-04"]).append(
+            pd.date_range("2024-01-06", "2024-01-14")
+        )
+    )
     assert spacing.gap_count == 2
-    assert spacing.longest_gap == (pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-15"))
+    assert spacing.longest_gap == (pd.Timestamp("2024-01-06"), pd.Timestamp("2024-01-14"))
     assert spacing.longest_gap_periods == 9
-    assert spacing.coverage == pytest.approx(4 / 15)
 
 
 def test_describe_date_spacing_reports_the_typical_step_and_its_share():
@@ -453,7 +455,7 @@ def test_describe_date_spacing_flags_weekly_dates_on_different_weekdays():
     dates = pd.Series(pd.to_datetime(["2024-01-07", "2024-01-14", "2024-01-22"]))
     spacing = describe_date_spacing(dates, "weekly")
     assert spacing.irregular_steps == 1
-    assert spacing.missing_periods == 0
+    assert spacing.missing_dates == []
 
 
 # ---------- parse_driver_column ----------

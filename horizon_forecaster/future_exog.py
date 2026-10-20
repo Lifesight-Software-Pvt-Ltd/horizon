@@ -63,7 +63,7 @@ AGGREGATORS: Dict[str, Callable] = {"mean": np.nanmean, "median": np.nanmedian}
 
 @dataclass
 class _Ctx:
-    """Shared, column-independent context computed once per resolve() call."""
+    """Shared, column-independent context computed once per resolve_future_exog() call."""
 
     horizon: int
     hist_steps: np.ndarray  # history time index, in frequency steps from the first date

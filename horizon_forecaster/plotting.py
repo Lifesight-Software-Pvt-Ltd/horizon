@@ -239,9 +239,9 @@ def plot_evaluation(
 
     Each chart draws the real actual series once (it is identical across
     models -- same held-out split), then one line per model with its MAPE
-    in the legend label, plus a shaded uncertainty band for any model that
+    and WAPE in the legend label, plus a shaded uncertainty band for any model that
     has one, and finally that chart's own ensemble overlaid as a red
-    dashed line with its MAPE where available. Asking for three rules
+    dashed line with its MAPE and WAPE where available. Asking for three rules
     therefore gives three charts of the same five models, each against a
     different combination -- which is what makes the rules comparable
     against the actuals rather than only against each other.
@@ -524,7 +524,7 @@ def plot_evaluation_per_model(
     """
     One full-size figure per model, plus one per combination rule that
     formed, each showing the held-out actuals against that single series
-    with its bounds and MAPE.
+    with its bounds, MAPE and WAPE.
 
     Preferred over the overlay when there are several models: each series
     gets its own readable, normal-sized plot instead of a cramped shared

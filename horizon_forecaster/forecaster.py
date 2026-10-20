@@ -75,7 +75,6 @@ from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
 from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
 from horizon_forecaster.utils import (
-    MAX_CONTINUOUS_GAP_DAYS,
     as_name_list,
     clean_zero_variance,
     describe_date_spacing,
@@ -360,8 +359,8 @@ class _Selection:
     Selection happens on the VALIDATION window and nothing else -- this is
     the whole point of the three-way split. Keeping it in its own record,
     cached separately from EvaluationResult, means forecast() can reuse a
-    selection (which is all it needs: the winning params, plus a validation
-    MAPE for ensemble screening/weighting) WITHOUT paying for the train+
+    selection (which is all it needs: the winning params, plus the
+    validation scores for ensemble screening/weighting) WITHOUT paying for the train+
     validation refit and test prediction that only evaluate() reports.
     """
 
@@ -378,7 +377,9 @@ class EvaluationResult:
     returns a Dict[str, EvaluationResult] keyed by model name.
 
     The two MAPEs here are the heart of the three-way split, and they are
-    NOT interchangeable:
+    NOT interchangeable (the same holds for `validation_wape` and `wape`,
+    and when the forecaster's selection_metric is "wape" it is
+    `validation_wape` that every decision was made on):
 
         validation_mape  the score every DECISION was made on -- which
                          hyperparameter candidate won, whether the model
@@ -473,8 +474,9 @@ class ForecastResult:
 class HorizonForecaster:
     """
     Main orchestrator. Takes raw user data once at construction, and
-    exposes evaluate() (train/validation/test split + MAPE, per model) and
-    forecast() (full-data refit + real future prediction, per model).
+    exposes evaluate() (train/validation/test split + MAPE and WAPE, per
+    model) and forecast() (full-data refit + real future prediction, per
+    model).
 
     Args:
         raw_df: user's raw DataFrame containing at least date_column and
@@ -519,7 +521,8 @@ class HorizonForecaster:
             model_params is omitted entirely) uses its own grid search
             as normal -- this is independent per model.
         mape_threshold: degenerate-fit filter (0.01-100, default 40), applied to
-            each model's VALIDATION MAPE. A model scoring above it is
+            each model's VALIDATION score (MAPE, or WAPE when
+            selection_metric resolves to it). A model scoring above it is
             excluded from the combination and reported in
             rejected_models. Pass None to admit every model. Treat this
             as a guard against degenerate fits rather than an accuracy
@@ -530,7 +533,7 @@ class HorizonForecaster:
         ensemble_method: how surviving models are combined. "trimmed"
             (the default -- discard the highest and lowest member per
             period and average the rest), "inverse_mape" (lower
-            validation MAPE gets proportionally more weight), or "equal".
+            validation score gets proportionally more weight), or "equal".
             Accepts a list to build several, or None to build all of
             them; the models are already fitted by then, so extra rules
             are close to free. evaluate_ensemble/forecast_ensemble are
@@ -581,8 +584,8 @@ class HorizonForecaster:
     by time rather than alphabetically. The date column must then meet the
     acceptance contract checked in _validate_date_spacing(): each date once,
     every step a whole number of periods, more than half of the steps
-    exactly one period, and no run of missing dates longer than
-    MAX_CONTINUOUS_GAP_DAYS. Anything else raises; shorter gaps only warn.
+    exactly one period, and no date missing between the first and the
+    last. Anything else raises.
 
     evaluate()/forecast() ALWAYS return a dict keyed by model name, even
     when only one model is requested -- deliberate, so the return shape
@@ -607,9 +610,11 @@ class HorizonForecaster:
     scored once on the TEST window, which no selection path is ever
     allowed to read. EvaluationResult carries both numbers -- `mape` is
     the reported test-window score, `validation_mape` the selection score
-    it was chosen by. Before 1.0 there was one held-out window serving
-    both roles, which made every reported MAPE a selection score and
-    therefore optimistic.
+    it was chosen by, with `wape` and `validation_wape` alongside (the
+    selection score is `validation_wape` when selection_metric is
+    "wape"). Before 1.0 there was one held-out window serving both roles,
+    which made every reported MAPE a selection score and therefore
+    optimistic.
 
     Ensemble behavior: after evaluate()/forecast() build their per-model
     dict as above, each call additionally populates
@@ -618,7 +623,7 @@ class HorizonForecaster:
     evaluation/ensemble.py), always a dict even when one method was
     requested, matching the convention the per-model returns already
     follow. forecast() has no held-out actuals of its own, so any
-    screening or weighting reuses the validation MAPE from selection,
+    screening or weighting reuses the validation score from selection,
     which it has to perform anyway in order to know which hyperparameters
     to fit with.
     """
@@ -974,9 +979,9 @@ class HorizonForecaster:
                     .sort_index()
                 )
                 # Every calendar week inside the data's range, so the first
-                # and last (usually partial) weeks are left out -- but a week
-                # is not required to have 7 rows, since a business closed at
-                # weekends never has them.
+                # and last (usually partial) weeks are left out. A week with
+                # fewer than 7 rows is still summed: this check runs before
+                # the date checks, which reject missing dates afterwards.
                 complete = weeks.iloc[1:-1]
                 if len(complete):
                     weekly_zero = float((complete == 0).mean())
@@ -1052,8 +1057,8 @@ class HorizonForecaster:
         val_end = n_train + n_val
         val_y, test_y = y[n_train:val_end], y[val_end:]
         season = self._naive_season_days
-        # Matched by date, so data with closed days or gaps still repeats the
-        # same weekday (or week of the year) rather than whatever row is 7 back.
+        # Matched by date rather than by row position: the same weekday last
+        # week, or the same week last year.
         val_pred = seasonal_naive(ds[:n_train], y[:n_train], ds[n_train:val_end], season)
         test_pred = seasonal_naive(ds[:val_end], y[:val_end], ds[val_end:], season)
         test_predictions = pd.DataFrame(
@@ -1312,7 +1317,7 @@ class HorizonForecaster:
             f"minimum for {sorted(too_small)} "
             f"({', '.join(f'{n} needs {f}' for n, f in sorted(too_small.items()))}). "
             f"Those models cannot be SELECTED on the validation window and will "
-            f"carry no validation MAPE, so they are excluded from any weighted "
+            f"carry no validation {self._metric_label}, so they are excluded from any weighted "
             f"ensemble and cannot be screened against mape_threshold. They may "
             f"still be evaluated: the train+validation refit sees more rows than "
             f"the training window alone, and forecast() refits on the full series "
@@ -1367,11 +1372,17 @@ class HorizonForecaster:
           2. Every step is a whole number of periods -- weekly dates all on
              the same weekday. Otherwise the weekly cycle and the forecast
              dates are misaligned.
-          3. No run of missing dates longer than MAX_CONTINUOUS_GAP_DAYS.
+          3. No date missing between the first and the last: every day
+             (daily) or every week (weekly) has a row.
 
-        What passes may still have scattered gaps. Those only warn: they are
-        common in real data, and the models still run, but the warning says
-        what they affect. Horizon never fills gaps itself.
+        Missing dates used to warn when scattered and raise only past four
+        weeks in a row. They now always raise. The models count rows, not
+        dates: a missing day shifts every weekly cycle after it, and the
+        train/validation/test windows cover more time than their size
+        says. Horizon never fills a gap itself, because only the user knows
+        whether a missing day was a closed day (0) or lost data. A weekday
+        that never appears is named, since that is almost always a closed
+        day the export left out.
         """
         dates = self.raw_df[self.date_column]
         if len(dates) < 2:
@@ -1414,35 +1425,60 @@ class HorizonForecaster:
                 provided_value=[str(start), str(end)],
             )
 
-        period_days = 1 if self.frequency == "daily" else 7
-        longest_days = spacing.longest_gap_periods * period_days
-        if longest_days > MAX_CONTINUOUS_GAP_DAYS:
-            start, end = spacing.longest_gap
+        if spacing.missing_dates:
             raise InvalidConfigError(
-                f"No data in '{self.date_column}' between {start:%Y-%m-%d} and "
-                f"{end:%Y-%m-%d}: {spacing.longest_gap_periods} {unit}(s) missing in a row. "
-                f"The limit is 4 weeks ({MAX_CONTINUOUS_GAP_DAYS} days) -- a longer hole "
-                f"removes a whole stretch of trend and seasonality, and SARIMAX treats the "
-                f"dates either side of it as neighbours. If the business was closed then, "
-                f"add those dates with a value of 0; otherwise fill the gap, or start the "
-                f"data after it.",
+                self._missing_dates_message(dates, spacing, unit),
                 param_name="date_column",
-                provided_value=[str(start), str(end)],
+                provided_value=[f"{d:%Y-%m-%d}" for d in spacing.missing_dates[:5]],
             )
 
-        if spacing.missing_periods:
-            start, end = spacing.longest_gap
-            warnings.warn(
-                f"The date column '{self.date_column}' has gaps: {spacing.coverage:.0%} of "
-                f"{unit}s are present, with {spacing.missing_periods} {unit}(s) missing across "
-                f"{spacing.gap_count} gap(s) (longest: {spacing.longest_gap_periods} {unit}(s) "
-                f"between {start:%Y-%m-%d} and {end:%Y-%m-%d}). The run continues, but expect "
-                f"lower accuracy: the train/validation/test windows are counted in rows, so "
-                f"they cover more time than their size suggests, and SARIMAX treats "
-                f"consecutive rows as consecutive periods, so it is affected most. Horizon "
-                f"does not fill gaps -- add the missing periods to your data if you can.",
-                stacklevel=3,
+    _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+    def _missing_dates_message(self, dates: pd.Series, spacing, unit: str) -> str:
+        """The error for rule 3: what is missing, where, and what to add."""
+
+        def count(n: int) -> str:
+            return f"{n} {unit}" + ("" if n == 1 else "s")
+
+        missing = spacing.missing_dates
+        shown = ", ".join(f"{d:%Y-%m-%d}" for d in missing[:5])
+        if len(missing) > 5:
+            shown += f" and {len(missing) - 5} more"
+        message = (
+            f"'{self.date_column}' is missing {count(len(missing))} between its first and "
+            f"last dates ({dates.iloc[0]:%Y-%m-%d} to {dates.iloc[-1]:%Y-%m-%d}): {shown}"
+        )
+        first, last = spacing.longest_gap
+        if spacing.gap_count == 1 and len(missing) > 1:
+            message += f", all in a row ({first:%Y-%m-%d} to {last:%Y-%m-%d})"
+        elif spacing.gap_count > 1 and spacing.longest_gap_periods == 1:
+            message += f", in {spacing.gap_count} separate gaps"
+        elif spacing.gap_count > 1:
+            message += (
+                f", in {spacing.gap_count} gaps (the longest is "
+                f"{count(spacing.longest_gap_periods)}, {first:%Y-%m-%d} to {last:%Y-%m-%d})"
             )
+        message += "."
+        span_days = (dates.iloc[-1] - dates.iloc[0]).days + 1
+        if self.frequency == "daily" and span_days >= 14:
+            present = set(dates.dt.dayofweek)
+            absent = [name for i, name in enumerate(self._WEEKDAYS) if i not in present]
+            if absent:
+                names = (
+                    absent[0]
+                    if len(absent) == 1
+                    else " or ".join([", ".join(absent[:-1]), absent[-1]])
+                )
+                message += (
+                    f" No {names} appears at all: if the business is closed then, add "
+                    f"those days with a value of 0."
+                )
+        message += (
+            f" Every {unit} must be present: add the missing dates, with 0 where the "
+            f"business was closed and the real values where data was lost, or start the "
+            f"data after a long gap."
+        )
+        return message
 
     def _drivers_that_vary_in(
         self, window: str, fit_rows: pd.DataFrame, score_rows: pd.DataFrame
@@ -1493,16 +1529,17 @@ class HorizonForecaster:
             if window == "train":
                 where = "the training window used for model selection"
                 score = (
-                    "the validation MAPE -- which picks the hyperparameters, is screened "
-                    "against mape_threshold and weights the ensemble -- includes an effect no "
-                    f"model could see. {'It is' if one else 'They are'} used in every later "
-                    f"fit where {'it changes' if one else 'they change'}"
+                    f"the validation {self._metric_label} -- which picks the hyperparameters, "
+                    "is screened against mape_threshold and weights the ensemble -- includes "
+                    f"an effect no model could see. {'It is' if one else 'They are'} used in "
+                    f"every later fit where {'it changes' if one else 'they change'}"
                 )
             else:
                 where = "the train+validation window used for the test score"
                 score = (
-                    "the test MAPE includes an effect no model could see. forecast() refits "
-                    f"on the full series, where {'it changes' if one else 'they change'}, "
+                    f"the test {self._metric_label} includes an effect no model could see. "
+                    f"forecast() refits on the full series, where "
+                    f"{'it changes' if one else 'they change'}, "
                     f"and uses {'it' if one else 'them'}"
                 )
             start = fit_rows[self.date_column].iloc[0]
@@ -1726,8 +1763,8 @@ class HorizonForecaster:
                 f"configured candidate without selecting it. Its later fits see more "
                 f"data (train+validation for evaluate(), the full series for "
                 f"forecast()) and may well succeed, but this model carries no "
-                f"validation MAPE -- it will be excluded from any weighted ensemble "
-                f"and cannot be screened against mape_threshold. Supply a longer "
+                f"validation {self._metric_label} -- it will be excluded from any weighted "
+                f"ensemble and cannot be screened against mape_threshold. Supply a longer "
                 f"series, or smaller validation_size/test_size, to select properly.",
                 stacklevel=3,
             )
@@ -1843,9 +1880,9 @@ class HorizonForecaster:
                 warnings.warn(
                     f"{model_name} could not be scored on the validation window "
                     f"({type(e).__name__}: {e}). Its explicit model_params are still "
-                    f"used, so forecast() can proceed, but it has no validation MAPE "
-                    f"-- it will be excluded from any weighted ensemble and cannot be "
-                    f"screened against mape_threshold.",
+                    f"used, so forecast() can proceed, but it has no validation "
+                    f"{self._metric_label} -- it will be excluded from any weighted "
+                    f"ensemble and cannot be screened against mape_threshold.",
                     stacklevel=3,
                 )
                 validation_mape = MapeResult(
@@ -2117,8 +2154,8 @@ class HorizonForecaster:
 
         forecast() has no held-out actuals to score accuracy against, so
         any screening or weighting its ensemble needs comes from the
-        validation MAPE established when each model's hyperparameters
-        were selected. That selection has to happen anyway -- forecast()
+        validation score (MAPE or WAPE) established when each model's
+        hyperparameters were selected. That selection has to happen anyway -- forecast()
         cannot fit without knowing which parameters won -- so the scores
         come for free and are cached, whether or not evaluate() was ever
         called. (Before 1.0 this method ran the whole of evaluate()

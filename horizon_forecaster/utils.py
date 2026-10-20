@@ -280,17 +280,6 @@ def find_duplicate_dates(dates: pd.Series) -> List[pd.Timestamp]:
     return sorted(duplicated.unique())
 
 
-# The longest run of consecutive missing dates accepted, in days: 28 daily
-# periods or 4 weekly ones. Scattered gaps and one long hole hurt the models
-# in different ways. A hole of more than four weeks removes a whole stretch
-# of trend and seasonality in one piece, and SARIMAX -- which treats
-# consecutive rows as consecutive periods -- sees the dates either side of it
-# as neighbours. Absolute rather than relative to the history: a two-month
-# hole does the same damage in four years of data as in two. 28 days is also
-# the default daily test window.
-MAX_CONTINUOUS_GAP_DAYS = 28
-
-
 class DateSpacing(NamedTuple):
     """How a sorted, de-duplicated date column departs from one row per period."""
 
@@ -298,11 +287,10 @@ class DateSpacing(NamedTuple):
     typical_step: pd.Timedelta  # the most common step
     irregular_steps: int  # steps that are not a whole number of periods
     irregular_example: Optional[Tuple[pd.Timestamp, pd.Timestamp]]
-    missing_periods: int  # whole periods absent, across all gaps
+    missing_dates: List[pd.Timestamp]  # every whole period absent, in order
     gap_count: int  # places where one or more periods are missing
-    longest_gap: Optional[Tuple[pd.Timestamp, pd.Timestamp]]  # dates either side
+    longest_gap: Optional[Tuple[pd.Timestamp, pd.Timestamp]]  # first, last missing date
     longest_gap_periods: int  # periods missing in a row in the longest gap
-    coverage: float  # rows present / periods spanned
 
 
 def describe_date_spacing(sorted_dates: pd.Series, frequency: str) -> DateSpacing:
@@ -320,27 +308,29 @@ def describe_date_spacing(sorted_dates: pd.Series, frequency: str) -> DateSpacin
     gaps = steps[whole & (steps > period)]
     irregular = steps[~whole]
 
+    missing_dates: List[pd.Timestamp] = []
+    for i, step in gaps.items():
+        missing_dates.extend(dates[i - 1] + k * period for k in range(1, int(step / period)))
+
     longest_gap, longest_gap_periods = None, 0
     if not gaps.empty:
         i = gaps.idxmax()
-        longest_gap = (dates[i - 1], dates[i])
         longest_gap_periods = int(gaps[i] / period) - 1
+        longest_gap = (dates[i - 1] + period, dates[i] - period)
     irregular_example = None
     if not irregular.empty:
         i = irregular.index[0]
         irregular_example = (dates[i - 1], dates[i])
 
-    spanned = (dates.iloc[-1] - dates.iloc[0]) / period + 1
     return DateSpacing(
         one_period_share=float((steps == period).mean()),
         typical_step=steps.mode().iloc[0],
         irregular_steps=len(irregular),
         irregular_example=irregular_example,
-        missing_periods=int(sum(int(g / period) - 1 for g in gaps)),
+        missing_dates=missing_dates,
         gap_count=len(gaps),
         longest_gap=longest_gap,
         longest_gap_periods=longest_gap_periods,
-        coverage=float(len(dates) / spanned),
     )
 
 

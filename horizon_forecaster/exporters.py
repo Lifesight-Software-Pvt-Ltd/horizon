@@ -17,8 +17,9 @@ Five deliverables, always written:
 2. Best single model's forecast -- exported alongside the combined one,
    because a combination is not guaranteed to beat the best individual
    model, so both candidates ship with the scores needed to choose. The
-   model is chosen on VALIDATION MAPE among the models that pass
-   mape_threshold on both validation and test (see choose_best_model).
+   model is chosen on the VALIDATION score (MAPE, or WAPE when the
+   forecaster selected on it) among the models that pass mape_threshold
+   on both validation and test (see choose_best_model).
 3. Per-model forecast -- every model's own forecast, stacked into one
    long/tidy table with a "model" column (+ bounds where a model
    provides them), so all models sit in one file for easy comparison.
@@ -27,10 +28,11 @@ Five deliverables, always written:
    whether it beats the seasonal-naive baseline, which gets a row of its
    own.
 5. Rejected-models table -- one row per model excluded from a
-   combination, with its MAPE, the threshold it exceeded (if any) and
+   combination, with its validation score (MAPE, or WAPE when the
+   forecaster selected on it), the threshold it exceeded (if any) and
    the human-readable reason. This is the "why isn't model X in the
    blend?" report, built straight from EnsembleResult.rejected_models.
-   Note exclusion is per method: a model with a NaN validation MAPE is
+   Note exclusion is per method: a model with a NaN validation score is
    dropped by the weighted rules but kept by the trimmed one.
 
 With `forecaster=`, a sixth: the correlation of the models' test errors,
@@ -228,10 +230,10 @@ def choose_best_model(
     Pick the model exported as "best", and say why each model was or was not.
 
     Two checks, then one choice:
-      1. validation MAPE at or below mape_threshold -- the same screen the
-         ensemble uses;
-      2. test MAPE at or below mape_threshold, when test scores are given;
-      then the lowest VALIDATION MAPE among the models that pass both.
+      1. validation score at or below mape_threshold -- the same screen
+         the ensemble uses;
+      2. test score at or below mape_threshold, when test scores are given;
+      then the lowest VALIDATION score among the models that pass both.
 
     It used to be the lowest TEST MAPE with no threshold at all, so the
     export was chosen on the window that is supposed to be reported, never
@@ -245,7 +247,7 @@ def choose_best_model(
     optimistic, because test helped decide which model it is.
 
     mape_threshold=None skips both checks; a model without a finite
-    validation MAPE is never chosen, since there is nothing to choose on.
+    validation score is never chosen, since there is nothing to choose on.
 
     `metric` names the score the two dicts hold ("MAPE", or "WAPE" when the
     forecaster's selection_metric is WAPE); only the reasons' wording uses it.
@@ -291,7 +293,7 @@ def choose_best_model(
                 f"optimistic for this model)"
             )
         else:
-            checks[best] += " the validation check (no test MAPEs were given)"
+            checks[best] += f" the validation check (no test {metric}s were given)"
     return best, checks
 
 
@@ -312,7 +314,7 @@ def build_best_model_forecast_table(
     blend can mean shipping the worse forecast. This is written alongside
     the ensemble so the choice can be made per run rather than baked in.
 
-    The model is chosen by choose_best_model(): validation MAPE among the
+    The model is chosen by choose_best_model(): validation score among the
     models within mape_threshold on validation and on test. `per_model_mape`
     is the test-window MAPE and `per_model_validation_mape` the validation
     MAPE, both from evaluate(). Returns a header-only DataFrame, with a
@@ -563,9 +565,9 @@ def build_rejected_models_table(
     (e.g. every actual in the window was zero).
 
     The `ensemble_method` column matters because exclusion is not
-    necessarily the same across rules: a model with a NaN validation MAPE
+    necessarily the same across rules: a model with a NaN validation score
     cannot be weighted, so the weighted rules drop it, while the trimmed
-    rule needs no MAPE and keeps it. Returns a header-only DataFrame when
+    rule needs no score and keeps it. Returns a header-only DataFrame when
     nothing was rejected anywhere.
     """
     ensembles = as_ensemble_dict(ensemble)
@@ -624,10 +626,13 @@ def export_forecast_csvs(
         export_forecast_csvs(forecaster.forecast(30), forecaster=forecaster)
 
     That fills in the ensemble, every score, the baseline row, the
-    threshold and the selection metric from the forecaster. Any argument
-    given explicitly still wins over what the forecaster holds: with an
-    explicit per_model_validation_mape the best model is chosen on those
-    MAPEs, even if the forecaster selected on WAPE.
+    threshold and the selection metric from the forecaster. An argument
+    given explicitly replaces the forecaster's value for that argument.
+    Only per_model_validation_mape also changes how the best model is
+    chosen: given explicitly, the choice is made on those MAPEs, even if
+    the forecaster selected on WAPE. An explicit per_model_mape, ensemble
+    or mape_threshold fills the summary and checks without changing the
+    metric the choice is made on.
 
     Args:
         forecast_results: {model_name: ForecastResult} from forecast().

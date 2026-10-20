@@ -42,9 +42,11 @@ HorizonForecaster(
 ```
 
 - **`mape_threshold`** (0.01–100, default `40`, or `None`): a
-  **degenerate-fit filter** applied to each model's **validation** MAPE — the score it was
-  selected on, not the test score it reports. A model scoring above it is
-  excluded from the combination and reported in `rejected_models`. This is an
+  **degenerate-fit filter** applied to each model's **validation** score —
+  the score it was selected on, not the test score it reports. That is MAPE,
+  or WAPE when `selection_metric` selects on it (see
+  [Exclusion is per method](#exclusion-is-per-method)). A model scoring
+  above it is excluded from the combination and reported in `rejected_models`. This is an
   **upper bound only** — an unusually low MAPE is never rejected. Pass `None`
   to admit every model.
 
@@ -59,8 +61,9 @@ HorizonForecaster(
 - **`ensemble_method`**: which combination rule to apply.
   - `"trimmed"` (**the default**) sorts the members each period, discards the
     highest and the lowest, and averages the rest. It has no weights at all.
-  - `"inverse_mape"` weights by `1 / validation MAPE`, normalized to sum to 1,
-    so a lower-MAPE model gets proportionally more say.
+  - `"inverse_mape"` weights by `1 / validation score` (MAPE or WAPE, per
+    `selection_metric`), normalized to sum to 1, so a lower-scoring model gets
+    proportionally more say.
   - `"equal"` gives every admitted model the same share.
 
   Pass a list to build several, or `None` to build all three. Combination is
@@ -97,7 +100,7 @@ Each value in the dict is an `EnsembleResult` (`evaluation/ensemble.py`):
 | `degraded` | `True` when `rule_applied` is a fallback because too few members survived for trimming to be defined. Always `False` for the weighted rules. |
 | `weights` | `{"prophet": 0.7, "catboost": 0.3}` — normalized weights per member. **`None`** for weightless rules such as the default `trimmed`: there is no weight, and reporting an equal split would imply an averaging that did not happen. |
 | `trim_shares` | Trimming only: a per-member DataFrame of how often each member was discarded as the period's high or low. More diagnostically useful than weights — it identifies which model misbehaves, and on how much of the horizon. `None` for the weighted rules and for the degraded fallbacks. |
-| `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per model excluded before combination, with its MAPE and the threshold it exceeded (if any). |
+| `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per model excluded before combination, with its validation score and the threshold it exceeded (if any). |
 | `mape` | The ensemble's own `MapeResult`, scored against real actuals. Only set in the `evaluate()` context (held-out actuals exist); always `None` for `forecast_ensemble`, since there is no ground truth for the future yet. |
 
 A model in `rejected_models` is **not the same thing** as a model in
@@ -110,7 +113,7 @@ normally; only that method's `combined` comes back `None`.
 
 Both are also warned about, once per `evaluate()` or `forecast()` call: models
 that failed (with the cause), each rule that lost requested models (and why:
-failed, above `mape_threshold`, or no validation MAPE), and, separately, any
+failed, above `mape_threshold`, or no validation score), and, separately, any
 rule that ended up with no members and so no ensemble forecast.
 
 ### Exclusion is per method
@@ -137,18 +140,18 @@ rule:
 That is why the rejected-models export carries an `ensemble_method` column —
 the same model can be dropped by one rule and kept by another in the same run.
 
-## `forecast()` reuses the selection MAPE
+## `forecast()` reuses the selection score
 
 `forecast()` has no held-out actuals of its own to score accuracy against — a
 true future forecast cannot be checked against anything yet. So its screening
-and weighting reuse the **validation** MAPE established when each model's
-hyperparameters were selected. That selection has to happen anyway —
+and weighting reuse the **validation** score (MAPE or WAPE) established when
+each model's hyperparameters were selected. That selection has to happen anyway —
 `forecast()` cannot fit without knowing which parameters won — so the scores
 come for free and are cached, whether or not `evaluate()` was ever called.
 
 `forecast()` does **not** run `evaluate()` internally — it needs only the
 cached selection, not a test-window prediction it would discard. The
-test-window MAPE that `evaluate()` reports is never used for screening or
+test-window scores that `evaluate()` reports are never used for screening or
 weighting.
 
 ## Known limitation: the ensemble is not automatically better
@@ -168,10 +171,11 @@ the offending member on exactly the periods where it offends, rather than
 carrying one fixed weight across the horizon — which is why it is the default.
 It is still not a guarantee.
 
-This is exactly why each ensemble's `mape` is computed and exposed directly,
-rather than the ensemble being assumed better. Always compare it against each
-individual model's own test MAPE (`results[model].mape`) before deciding to
-use a combined output over the best single model.
+This is exactly why each ensemble's `mape` (and `wape`) is computed and
+exposed directly, rather than the ensemble being assumed better. Always compare
+it against each individual model's own test MAPE (`results[model].mape`), or
+WAPE (`results[model].wape`) when selecting on WAPE, before deciding to use a
+combined output over the best single model.
 
 ## Scope
 
