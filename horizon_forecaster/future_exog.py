@@ -425,6 +425,14 @@ def describe_generation_risks(
 # What each model does with a future driver value outside the range it was
 # trained on. They genuinely disagree, which is why an out-of-range scenario
 # warns: the ensemble then blends very different answers.
+#
+# Which way the blend errs depends on the true shape of the driver's effect,
+# which the data cannot show beyond its highest value. Measured on synthetic
+# daily and weekly series with a known spend effect, held for the whole
+# forecast at a multiple of the historical maximum: the default trimmed
+# ensemble captured about two-thirds of a linear effect at 1.5x and about half
+# at 2x, and overstated an effect with diminishing returns (1.0-1.5x the true
+# uplift). See docs/future_exog.md, "Spend what-ifs".
 _OUT_OF_RANGE_BEHAVIOUR = {
     "prophet": "Prophet extends the driver's effect in a straight line",
     "neuralprophet": "NeuralProphet extends the driver's effect in a straight line",
@@ -654,6 +662,7 @@ def check_future_table(
     cleaned: Dict[str, pd.Series] = {}
     problems: List[str] = []
     out_of_range: List[str] = []
+    above_max = False  # a value above the history's highest: the ensemble note applies
     for col in supplied:
         values = pd.to_numeric(parsed[col], errors="coerce").reset_index(drop=True)
         blank = values.isna().to_numpy()
@@ -690,6 +699,7 @@ def check_future_table(
                 )
                 continue
         elif hist.size and (vals.max() > hist.max() or vals.min() < hist.min()):
+            above_max = above_max or bool(vals.max() > hist.max())
             out_of_range.append(
                 f"'{col}' goes from {vals.min():g} to {vals.max():g}; your data has "
                 f"{hist.min():g} to {hist.max():g}"
@@ -714,11 +724,19 @@ def check_future_table(
     if out_of_range:
         behaviour = [_OUT_OF_RANGE_BEHAVIOUR[m] for m in models if m in _OUT_OF_RANGE_BEHAVIOUR]
         how = f" ({'; '.join(behaviour)})" if behaviour else ""
+        ensemble = (
+            " Beyond the highest value in your data the true effect cannot be estimated: in "
+            "testing with a known spend effect, the default trimmed ensemble understated a "
+            "linear effect by about a third at 1.5x the highest past value and by about half "
+            "at 2x, and overstated an effect with diminishing returns."
+            if above_max and len(models) > 1
+            else ""
+        )
         warnings.warn(
             f"Some future driver values are outside anything in your data: "
             f"{'; '.join(out_of_range)}. The models disagree about values they have never "
             f"seen{how}, so treat this forecast as a scenario and compare the models "
-            f"before relying on the ensemble.",
+            f"before relying on the ensemble.{ensemble}",
             stacklevel=3,
         )
 

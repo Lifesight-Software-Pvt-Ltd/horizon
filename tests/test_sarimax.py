@@ -344,3 +344,45 @@ def test_undifferenced_fit_keeps_tracking_the_trend(monkeypatch):
         f"decline, the signature of a zero-mean undifferenced fit"
     )
     assert forecast[-1] > forecast[0], "forecast should continue the trend, not revert"
+
+
+# ---------- unexpected zeros ----------
+
+
+def test_unexpected_zero_mask_keeps_closed_weekday_zeros_and_flags_the_rest():
+    from horizon_forecaster.models.sarimax_wrapper import unexpected_zero_mask
+
+    ds = pd.Series(pd.date_range("2024-01-01", periods=70, freq="D"))  # starts on a Monday
+    y = np.full(70, 500.0)
+    y[ds.dt.dayofweek == 6] = 0.0  # closed every Sunday: the weekly pattern explains these
+    y[[2, 30]] = 0.0  # a Wednesday and a Wednesday-less day with sales normally
+    mask = unexpected_zero_mask(y, ds, "daily")
+    assert list(np.flatnonzero(mask)) == [2, 30]
+
+
+def test_unexpected_zero_mask_flags_every_zero_week_when_the_median_is_above_zero():
+    from horizon_forecaster.models.sarimax_wrapper import unexpected_zero_mask
+
+    ds = pd.Series(pd.date_range("2024-01-07", periods=20, freq="7D"))
+    y = np.full(20, 800.0)
+    y[[3, 11]] = 0.0
+    assert list(np.flatnonzero(unexpected_zero_mask(y, ds, "weekly"))) == [3, 11]
+    assert not unexpected_zero_mask(np.zeros(20), ds, "weekly").any()
+
+
+def test_a_few_unexpected_zero_days_no_longer_wreck_the_fit():
+    """
+    Two zero days in otherwise smooth data: SARIMAX used to fit them in log
+    space as outliers of ~5 units, which inflated its variance and, through
+    the bias correction, the whole forecast. They are now left out of the fit.
+    """
+    train, future, y_test = make_adapted(n=120, with_exog=False)
+    clean = SARIMAXWrapper("daily", dict(BASE), min_rows_required=35, random_seed=42).fit(train)
+    zeros = train.copy()
+    zeros.loc[[40, 77], "y"] = 0.0
+    model = SARIMAXWrapper("daily", dict(BASE), min_rows_required=35, random_seed=42).fit(zeros)
+    assert model.masked_zero_count == 2
+    yhat = model.predict(horizon=len(future), future_exog=future)["yhat"].to_numpy()
+    yhat_clean = clean.predict(horizon=len(future), future_exog=future)["yhat"].to_numpy()
+    assert np.max(np.abs(yhat / yhat_clean - 1)) < 0.05
+    assert model._resid_var < 2 * clean._resid_var

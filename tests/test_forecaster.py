@@ -2532,3 +2532,79 @@ def test_a_failed_evaluate_clears_the_previous_results(monkeypatch):
 @pytest.mark.parametrize("given, stored", [("MAPE", "mape"), ("Wape", "wape"), (" AUTO ", "mape")])
 def test_selection_metric_accepts_any_case(given, stored):
     assert _construct(make_noisy_raw_df(), selection_metric=given).selection_metric == stored
+
+
+# ---------- SARIMAX and unexpected zeros ----------
+
+
+def _weekly_df(n=60, zero_weeks=()):
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2023-01-01", periods=n, freq="7D"),
+            "orders": [1000.0 + i for i in range(n)],
+        }
+    )
+    df.loc[list(zero_weeks), "orders"] = 0.0
+    return df
+
+
+def test_sarimax_warns_that_it_leaves_unexpected_zero_days_out_of_its_fit():
+    df = make_raw_df()
+    df.loc[[10, 33], "orders"] = 0.0
+    with pytest.warns(UserWarning, match="is 0 on 2 of 60 days that fall on weekdays") as caught:
+        forecaster = _construct(df, models=["sarimax", "catboost"])
+    message = next(str(w.message) for w in caught if "SARIMAX:" in str(w.message))
+    assert "leaves these days out of its own fit; the other models still see them as 0" in message
+    assert forecaster.models == ["sarimax", "catboost"]
+
+
+def test_closed_weekday_zeros_do_not_warn_about_sarimax():
+    df = make_raw_df()
+    df.loc[pd.to_datetime(df["date"]).dt.dayofweek == 6, "orders"] = 0.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _construct(df, models=["sarimax", "catboost"], selection_metric="mape")
+    assert not [w for w in caught if "SARIMAX" in str(w.message)]
+
+
+def test_weekly_zero_weeks_up_to_ten_percent_warn_and_keep_sarimax():
+    with pytest.warns(UserWarning, match=r"is 0 in 6 of 60 weeks .*can still degrade its weekly"):
+        forecaster = HorizonForecaster(
+            _weekly_df(zero_weeks=range(5, 60, 10)),
+            "date",
+            "orders",
+            "weekly",
+            models=["sarimax", "catboost"],
+            selection_metric="mape",
+        )
+    assert "sarimax" in forecaster.models and forecaster.skipped_models == {}
+
+
+def test_weekly_zero_weeks_above_ten_percent_leave_sarimax_out():
+    with pytest.warns(
+        UserWarning, match="SARIMAX is left out of this run: the target 'orders' is 0 in 7"
+    ):
+        forecaster = HorizonForecaster(
+            _weekly_df(zero_weeks=range(3, 60, 9)),
+            "date",
+            "orders",
+            "weekly",
+            models=["sarimax", "catboost"],
+            selection_metric="mape",
+        )
+    assert forecaster.models == ["catboost"]
+    assert "12% of the weeks" in forecaster.skipped_models["sarimax"]
+
+
+def test_sarimax_alone_on_more_than_ten_percent_zero_weeks_is_refused():
+    with pytest.raises(
+        InvalidConfigError, match="SARIMAX cannot forecast this series: .* is 0 in 7"
+    ):
+        HorizonForecaster(
+            _weekly_df(zero_weeks=range(3, 60, 9)),
+            "date",
+            "orders",
+            "weekly",
+            models=["sarimax"],
+            selection_metric="mape",
+        )

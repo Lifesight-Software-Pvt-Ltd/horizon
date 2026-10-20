@@ -586,41 +586,6 @@ def clean_zero_variance(
     return cleaned, dropped
 
 
-def infer_frequency(date_series: pd.Series) -> str:
-    """
-    Infer whether a date series represents daily or weekly granularity,
-    based on the most common gap between consecutive sorted dates.
-
-    Raises:
-        InvalidConfigError: if fewer than 2 distinct dates are provided
-            (too few to infer any spacing).
-        UnsupportedFrequencyError: if the inferred gap doesn't cleanly
-            match daily (1 day) or weekly (7 days) spacing.
-    """
-    sorted_dates = pd.to_datetime(date_series).sort_values().drop_duplicates()
-
-    if len(sorted_dates) < 2:
-        raise InvalidConfigError(
-            "Need at least 2 distinct dates to infer frequency.",
-            param_name="date_column",
-            provided_value=len(sorted_dates),
-        )
-
-    diffs = sorted_dates.diff().dropna()
-    most_common_gap = diffs.mode()[0]
-
-    if most_common_gap == pd.Timedelta(days=1):
-        return "daily"
-    elif most_common_gap == pd.Timedelta(days=7):
-        return "weekly"
-    else:
-        raise UnsupportedFrequencyError(
-            f"Detected date spacing of {most_common_gap}, which does not match "
-            f"a supported frequency ({', '.join(SUPPORTED_FREQUENCIES)}).",
-            provided_frequency=str(most_common_gap),
-        )
-
-
 def validate_frequency(freq: str) -> str:
     """
     Validate a user-declared frequency string against supported values.

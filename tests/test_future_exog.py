@@ -462,6 +462,22 @@ def test_check_warns_on_out_of_range_values_naming_each_models_behaviour():
     message = str(caught[0].message)
     assert "'spend' goes from 1000 to 1000; your data has 100 to 200" in message
     assert "Prophet extends" in message and "SARIMAX caps" in message
+    assert "understated a linear effect by about a third at 1.5x" in message
+    assert "overstated an effect with diminishing returns" in message
+
+
+def test_check_out_of_range_warning_leaves_out_the_ensemble_note_for_one_model():
+    with pytest.warns(UserWarning, match="outside anything in your data") as caught:
+        _check(_table(spend=[1000.0] * 5), models=["prophet"])
+    assert "trimmed ensemble" not in str(caught[0].message)
+
+
+def test_check_out_of_range_warning_leaves_out_the_ensemble_note_below_the_minimum():
+    # The note is about values above the highest in the history; a value below
+    # the lowest still warns, without it.
+    with pytest.warns(UserWarning, match="outside anything in your data") as caught:
+        _check(_table(spend=[50.0] * 5), models=["prophet", "sarimax"])
+    assert "trimmed ensemble" not in str(caught[0].message)
 
 
 def test_check_does_not_warn_for_in_range_values():

@@ -13,7 +13,6 @@ from horizon_forecaster.utils import (
     parse_driver_column,
     resolve_split,
     clean_zero_variance,
-    infer_frequency,
     validate_frequency,
     validate_no_missing_values,
     validate_training_size,
@@ -148,31 +147,6 @@ def test_clean_zero_variance_all_nan_column_is_dropped():
     )
     cleaned, dropped = clean_zero_variance(df, exclude_columns=["date"])
     assert "organic" in dropped
-
-
-# ---------- infer_frequency ----------
-
-
-def test_infer_frequency_detects_daily():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=10, freq="D"))
-    assert infer_frequency(dates) == "daily"
-
-
-def test_infer_frequency_detects_weekly():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=10, freq="7D"))
-    assert infer_frequency(dates) == "weekly"
-
-
-def test_infer_frequency_rejects_monthly():
-    dates = pd.Series(pd.date_range("2026-01-01", periods=6, freq="30D"))
-    with pytest.raises(UnsupportedFrequencyError):
-        infer_frequency(dates)
-
-
-def test_infer_frequency_raises_on_insufficient_dates():
-    dates = pd.Series(pd.to_datetime(["2026-01-01"]))
-    with pytest.raises(InvalidConfigError):
-        infer_frequency(dates)
 
 
 # ---------- validate_frequency ----------

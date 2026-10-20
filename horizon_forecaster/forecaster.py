@@ -73,7 +73,7 @@ from horizon_forecaster.models.bayesianpymc_wrapper import BayesianPyMCWrapper
 from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
-from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper
+from horizon_forecaster.models.sarimax_wrapper import SARIMAXWrapper, unexpected_zero_mask
 from horizon_forecaster.utils import (
     as_name_list,
     clean_zero_variance,
@@ -128,6 +128,14 @@ _WAPE_ZERO_SHARE = 0.10
 # At or above this share of zero targets the data is refused: on the series
 # tested, every model then did worse than forecasting 0 every day.
 _SPARSE_TARGET_ZERO_SHARE = 0.50
+
+# Above this share of zero weeks (where the series is normally above 0),
+# SARIMAX is left out of a weekly run. Its fit leaves such weeks out, but on
+# weekly data that holds up less well than on daily: across 7 synthetic and
+# 6 real weekly series with zero weeks set at random, SARIMAX became
+# unusable in a roughly constant share of cases up to 10% and in most of
+# them from 15% (on real data: test WAPE 425 against 48, or no forecast).
+_SARIMAX_MAX_ZERO_WEEK_SHARE = 0.10
 
 # Forecasts are flagged when they peak more than this far above (or bottom
 # this far below) anything ever observed in the target. A trending series
@@ -769,6 +777,7 @@ class HorizonForecaster:
         self.selection_metric = self._resolve_selection_metric(
             raw_df[target_column], raw_df[date_column], selection_metric
         )
+        self._handle_zeros_for_sarimax(raw_df[target_column], raw_df[date_column])
 
         # Kept for forecast(): a future table may name a declared driver that
         # was dropped below, which warns rather than errors.
@@ -1151,6 +1160,70 @@ class HorizonForecaster:
         warnings.warn(
             f"SARIMAX is left out of this run: {reason}. The other models "
             f"{self.models} run as usual; see forecaster.skipped_models.",
+            stacklevel=3,
+        )
+
+    def _handle_zeros_for_sarimax(self, target: pd.Series, dates: pd.Series) -> None:
+        """
+        Say what SARIMAX does with zeros where the series normally has a value
+        (see sarimax_wrapper.unexpected_zero_mask): it leaves them out of its
+        fit, which a warning names. On weekly data with more than
+        _SARIMAX_MAX_ZERO_WEEK_SHARE of such weeks it is left out of the run
+        instead, like a target with negative values. Zeros on closed weekdays
+        are not counted and need no warning.
+        """
+        if "sarimax" not in self.models:
+            return
+        values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+        mask = unexpected_zero_mask(values, dates, self.frequency)
+        n_zero = int(mask.sum())
+        if not n_zero:
+            return
+        n = len(values)
+        examples = ", ".join(f"{d:%Y-%m-%d}" for d in pd.to_datetime(pd.Series(dates))[mask][:3])
+        more = f" and {n_zero - 3} more" if n_zero > 3 else ""
+        if self.frequency == "daily":
+            where = (
+                f"is 0 on {n_zero} of {n} days that fall on weekdays which otherwise have "
+                f"values ({examples}{more})"
+            )
+            unit = "days"
+        else:
+            where = f"is 0 in {n_zero} of {n} weeks ({examples}{more})"
+            unit = "weeks"
+        share = n_zero / n
+        if self.frequency == "weekly" and share > _SARIMAX_MAX_ZERO_WEEK_SHARE:
+            reason = (
+                f"the target '{self.target_column}' {where}, {share:.0%} of the weeks; above "
+                f"{_SARIMAX_MAX_ZERO_WEEK_SHARE:.0%} SARIMAX, which fits in log space where each "
+                f"zero week is an extreme outlier, failed or forecast far worse than the other "
+                f"models in testing"
+            )
+            if self.models == ["sarimax"]:
+                raise InvalidConfigError(
+                    f"SARIMAX cannot forecast this series: {reason}. Choose another model "
+                    f"(Prophet, CatBoost, NeuralProphet and Bayesian PyMC all handle zero weeks).",
+                    param_name="models",
+                    provided_value=self.models,
+                )
+            self.models = [m for m in self.models if m != "sarimax"]
+            self.skipped_models["sarimax"] = reason
+            warnings.warn(
+                f"SARIMAX is left out of this run: {reason}. The other models "
+                f"{self.models} run as usual; see forecaster.skipped_models.",
+                stacklevel=3,
+            )
+            return
+        caution = (
+            " Zero weeks can still degrade its weekly forecast, so compare it with the other "
+            "models."
+            if self.frequency == "weekly"
+            else ""
+        )
+        warnings.warn(
+            f"SARIMAX: the target '{self.target_column}' {where}. SARIMAX fits in log space, "
+            f"where such a zero is an extreme outlier, so it leaves these {unit} out of its own "
+            f"fit; the other models still see them as 0.{caution}",
             stacklevel=3,
         )
 
