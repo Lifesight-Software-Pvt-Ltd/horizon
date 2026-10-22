@@ -249,7 +249,9 @@ more than 10% of weeks are 0 while the series is normally above 0 (and refused
 if it is the only model requested). Below that, and on daily data at any
 share, SARIMAX leaves such zeros out of its own fit, with a warning: a day
 counts when its weekday normally has values, so the zeros of a business closed
-every Sunday are kept and modelled as usual.
+every Sunday are kept and modelled as usual. Bayesian PyMC leaves its yearly
+seasonality out of any fit whose dates span fewer than 183 days, with a
+warning, and warns when its sampler did not converge.
 
 ## 4. Forecast the future
 

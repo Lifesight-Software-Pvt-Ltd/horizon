@@ -2,8 +2,8 @@
 Bayesian PyMC model wrapper.
 
 A Bayesian structural time-series model: a linear trend, a Fourier
-seasonal basis (annual for both frequencies, plus a weekly cycle for
-daily data), and a linear regression on the user's independent variables,
+seasonal basis (annual for both frequencies once a fit spans 183 days,
+plus a weekly cycle for daily data), and a linear regression on the user's independent variables,
 observed through a Student-T likelihood (heavy tails absorb spikes that
 would drag a Gaussian fit). The posterior is sampled with NUTS.
 
@@ -31,7 +31,10 @@ from:
 - Fourier terms are built from absolute day offsets against the reference
   date captured at fit time (like SARIMAX), so train and future stay
   phase-aligned and a gap in the dates cannot shift the phase. The Fourier
-  order (`n_fourier`) is an ordinary grid hyperparameter.
+  order (`n_fourier`) is an ordinary grid hyperparameter. It sets the annual
+  order; the weekly cycle stops at order 3 (higher orders alias lower ones on
+  whole days), and a fit spanning fewer than ANNUAL_MIN_SPAN_DAYS has no
+  annual terms at all.
 
 - Coefficient priors: an independent column that looks like a continuous
   driver (more than two distinct standardised values -- e.g. spend,
@@ -80,6 +83,37 @@ _ANNUAL_PERIOD_DAYS = 365.25
 
 # Weekly period in DAYS, for the short (intra-week) cycle used on daily data.
 _WEEKLY_PERIOD_DAYS = 7.0
+
+# Highest Fourier order used for the weekly cycle. On whole-day dates order 4
+# is order 3 mirrored (cos(2*pi*4d/7) == cos(2*pi*3d/7), sin(2*pi*4d/7) ==
+# -sin(2*pi*3d/7)), so orders above 3 add only perfectly collinear columns:
+# no new shape, just a ridge NUTS crawls along. n_fourier still sets the
+# annual order.
+_WEEKLY_MAX_ORDER = 3
+
+# A fit whose dates span fewer days than this has no annual terms. From less
+# than half a year the model has to guess the other half of the yearly cycle,
+# and on real data that guess swung forecasts wildly: test WAPE 11.5 with 158
+# days of training, 73.9 with 150, 49.8 with 136 (13.5-17.4 without annual
+# terms). From about 7 months up the annual terms paid off whenever the
+# series had a yearly cycle and cost little when it did not.
+ANNUAL_MIN_SPAN_DAYS = 183
+
+# A fit is reported as poorly converged above this R-hat or below this bulk
+# effective sample size. Deliberately looser than the textbook 1.01 / 400,
+# which flagged a quarter of fits whose forecasts were fine; these flag only
+# clearly broken sampling.
+CONVERGENCE_MAX_RHAT = 1.05
+CONVERGENCE_MIN_ESS = 100
+
+
+def span_days(ds) -> int:
+    """Calendar days from the first to the last date, inclusive (0 when empty)."""
+    dates = pd.to_datetime(pd.Series(ds))
+    if dates.empty:
+        return 0
+    return int((dates.max() - dates.min()).days) + 1
+
 
 # A column with more than this many distinct standardised values is treated
 # as a continuous driver (informative prior); at or below it, a binary/near-
@@ -172,6 +206,10 @@ class BayesianPyMCWrapper(BaseModel):
         self.ci_upper_pct = float(p.get("ci_upper_pct", 97.0))
         # Short (weekly) seasonal cycle is only meaningful for daily data.
         self.use_short_seasonal = bool(p.get("use_short_seasonal", frequency == "daily"))
+        self._weekly_order = min(self.n_fourier, _WEEKLY_MAX_ORDER)
+        # Decided in fit() from the span of the training dates; see
+        # ANNUAL_MIN_SPAN_DAYS.
+        self.annual_terms = True
         # Set from the training target in fit(); None here so an unfitted
         # (or older, unpickled) wrapper degrades to "don't clip" rather
         # than raising AttributeError inside predict().
@@ -198,6 +236,7 @@ class BayesianPyMCWrapper(BaseModel):
 
         train_df = train_df.sort_values("ds").reset_index(drop=True)
         self._reference_date = pd.to_datetime(train_df["ds"]).iloc[0]
+        self.annual_terms = span_days(train_df["ds"]) >= ANNUAL_MIN_SPAN_DAYS
         self._independent_columns: List[str] = [c for c in train_df.columns if c not in ("ds", "y")]
 
         y_raw = train_df["y"].to_numpy(dtype=float)
@@ -382,20 +421,32 @@ class BayesianPyMCWrapper(BaseModel):
     def _fourier_terms(self, ds: pd.Series):
         """
         Return (ff_long, ff_short). ff_long is the annual cycle for both
-        frequencies; ff_short is the weekly cycle for daily data (else None).
-        Both are built from absolute day offsets against the reference date.
-        Column layout is [cos_1..cos_k, sin_1..sin_k].
+        frequencies, with no columns when the fit had too short a span for
+        it; ff_short is the weekly cycle for daily data (else None), at most
+        order _WEEKLY_MAX_ORDER. Both are built from absolute day offsets
+        against the reference date. Column layout is [cos_1..cos_k,
+        sin_1..sin_k].
+
+        The getattr defaults keep a model pickled before these settings
+        existed predicting exactly as it was fitted.
         """
         offset_days = pd.to_datetime(ds).reset_index(drop=True) - self._reference_date
         day = offset_days.dt.total_seconds().to_numpy() / 86400.0
-        ff_long = self._fourier_basis(day, _ANNUAL_PERIOD_DAYS)
+        if getattr(self, "annual_terms", True):
+            ff_long = self._fourier_basis(day, _ANNUAL_PERIOD_DAYS, self.n_fourier)
+        else:
+            ff_long = np.empty((len(day), 0))
+        weekly_order = getattr(self, "_weekly_order", self.n_fourier)
         ff_short = (
-            self._fourier_basis(day, _WEEKLY_PERIOD_DAYS) if self.use_short_seasonal else None
+            self._fourier_basis(day, _WEEKLY_PERIOD_DAYS, weekly_order)
+            if self.use_short_seasonal
+            else None
         )
         return ff_long, ff_short
 
-    def _fourier_basis(self, day: np.ndarray, period_days: float) -> np.ndarray:
-        k = np.arange(1, self.n_fourier + 1)
+    @staticmethod
+    def _fourier_basis(day: np.ndarray, period_days: float, order: int) -> np.ndarray:
+        k = np.arange(1, order + 1)
         ang = 2.0 * np.pi * day[:, None] * k[None, :] / period_days
         return np.concatenate([np.cos(ang), np.sin(ang)], axis=1)
 
@@ -409,20 +460,20 @@ class BayesianPyMCWrapper(BaseModel):
         ensure_macos_linker_compat()
         import pymc as pm  # lazy: keeps module import free of the heavy dependency
 
-        n_fourier2 = 2 * self.n_fourier
         with pm.Model():
             slope = pm.Normal("slope", mu=slope_est, sigma=self.slope_sigma)
             intercept = pm.Normal("intercept", mu=intercept_est, sigma=self.intercept_sigma)
             mu_det = intercept + slope * t
 
-            beta_long = pm.Normal(
-                "beta_long", mu=0.0, sigma=self.beta_fourier_sigma, shape=n_fourier2
-            )
-            mu_det = mu_det + pm.math.dot(ff_long, beta_long)
+            if ff_long.shape[1]:
+                beta_long = pm.Normal(
+                    "beta_long", mu=0.0, sigma=self.beta_fourier_sigma, shape=ff_long.shape[1]
+                )
+                mu_det = mu_det + pm.math.dot(ff_long, beta_long)
 
             if ff_short is not None:
                 beta_short = pm.Normal(
-                    "beta_short", mu=0.0, sigma=self.beta_fourier_sigma, shape=n_fourier2
+                    "beta_short", mu=0.0, sigma=self.beta_fourier_sigma, shape=ff_short.shape[1]
                 )
                 mu_det = mu_det + pm.math.dot(ff_short, beta_short)
 
@@ -466,10 +517,15 @@ class BayesianPyMCWrapper(BaseModel):
             # (chain, draw, *param) -> (chain*draw, *param)
             return arr.reshape(-1, *arr.shape[2:]) if arr.ndim > 2 else arr.reshape(-1)
 
+        slope = flat("slope")
         self._post: Dict[str, np.ndarray] = {
-            "slope": flat("slope"),
+            "slope": slope,
             "intercept": flat("intercept"),
-            "beta_long": flat("beta_long"),
+            # No annual terms -> no columns, so predict()'s matrix product
+            # contributes zero without a special case.
+            "beta_long": (
+                flat("beta_long") if "beta_long" in post else np.empty((slope.shape[0], 0))
+            ),
             # sigma/nu are the Student-T likelihood's scale and tails. They are
             # NOT part of the mean function, but predict() needs them to build a
             # posterior-PREDICTIVE band (observation noise), not just a band on
@@ -487,10 +543,12 @@ class BayesianPyMCWrapper(BaseModel):
     @staticmethod
     def _convergence_summary(trace) -> Dict[str, float]:
         """
-        A small, picklable diagnostics summary (max R-hat, divergence count)
-        kept on the fitted wrapper for the user to inspect, computed at the
-        end of fit(); the arviz import is deferred
-        so a missing arviz never breaks fit().
+        A small, picklable diagnostics summary (max R-hat, smallest bulk
+        effective sample size, divergence count) kept on the fitted wrapper
+        for the user to inspect, computed at the end of fit(). The
+        forecaster warns from it (see CONVERGENCE_MAX_RHAT). The arviz
+        import is deferred so a missing arviz never breaks fit(); R-hat is
+        NaN for a single chain.
         """
         summary: Dict[str, float] = {}
         try:
@@ -500,6 +558,13 @@ class BayesianPyMCWrapper(BaseModel):
             summary["max_rhat"] = float(max(float(v.max()) for v in rhat.data_vars.values()))
         except Exception:  # noqa: BLE001 -- diagnostics are best-effort
             summary["max_rhat"] = float("nan")
+        try:
+            import arviz as az
+
+            ess = az.ess(trace, method="bulk")
+            summary["min_ess_bulk"] = float(min(float(v.min()) for v in ess.data_vars.values()))
+        except Exception:  # noqa: BLE001 -- diagnostics are best-effort
+            summary["min_ess_bulk"] = float("nan")
         try:
             summary["num_divergences"] = int(trace.sample_stats["diverging"].values.sum())
         except Exception:  # noqa: BLE001

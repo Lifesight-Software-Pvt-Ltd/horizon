@@ -28,7 +28,11 @@ from horizon_forecaster.exceptions import (
     ModelPredictionError,
 )
 from horizon_forecaster.forecaster import MODEL_REGISTRY
-from horizon_forecaster.models.bayesianpymc_wrapper import BayesianPyMCWrapper
+from horizon_forecaster.models.bayesianpymc_wrapper import (
+    ANNUAL_MIN_SPAN_DAYS,
+    BayesianPyMCWrapper,
+    span_days,
+)
 
 # --------------------------------------------------------------------------
 # fixtures
@@ -152,6 +156,47 @@ def test_short_seasonal_absent_for_weekly():
     assert ff_short is None
 
 
+def test_weekly_order_is_capped_at_three_while_the_annual_order_follows_n_fourier():
+    w = _geom_wrapper(n_fourier=4)
+    ds = pd.Series(pd.date_range("2022-01-01", periods=10, freq="D"))
+    ff_long, ff_short = w._fourier_terms(ds)
+    assert ff_long.shape == (10, 8)
+    assert ff_short.shape == (10, 6)
+
+
+def test_weekly_order_four_only_mirrors_order_three_on_whole_days():
+    """Why the cap loses nothing: the order-4 columns are the order-3 ones, sine negated."""
+    day = np.arange(30, dtype=float)
+    basis = BayesianPyMCWrapper._fourier_basis(day, 7.0, 4)  # cos1..cos4, sin1..sin4
+    assert np.allclose(basis[:, 3], basis[:, 2])
+    assert np.allclose(basis[:, 7], -basis[:, 6])
+
+
+def test_no_annual_columns_when_the_fit_turned_annual_terms_off():
+    w = _geom_wrapper(n_fourier=4)
+    w.annual_terms = False
+    ds = pd.Series(pd.date_range("2022-01-01", periods=10, freq="D"))
+    ff_long, ff_short = w._fourier_terms(ds)
+    assert ff_long.shape == (10, 0)
+    assert ff_short.shape == (10, 6)
+
+
+def test_a_model_pickled_before_the_cap_keeps_its_original_basis():
+    w = _geom_wrapper(n_fourier=4)
+    del w._weekly_order, w.annual_terms
+    ds = pd.Series(pd.date_range("2022-01-01", periods=10, freq="D"))
+    ff_long, ff_short = w._fourier_terms(ds)
+    assert ff_long.shape == (10, 8)
+    assert ff_short.shape == (10, 8)
+
+
+def test_span_days_counts_calendar_days_inclusive():
+    assert span_days(pd.Series(pd.date_range("2022-01-01", periods=183, freq="D"))) == 183
+    weekdays = pd.Series(pd.bdate_range("2022-01-03", "2022-07-01"))  # weekday-only data
+    assert span_days(weekdays) == 180
+    assert span_days(pd.Series([], dtype="datetime64[ns]")) == 0
+
+
 def test_time_steps_units_by_frequency():
     ds = pd.Series(pd.date_range("2022-01-01", periods=3, freq="7D"))
     w_daily = _geom_wrapper(frequency="daily")
@@ -211,6 +256,82 @@ def test_config_has_both_frequencies():
 
 
 # --------------------------------------------------------------------------
+# forecaster warnings about annual terms and convergence (no sampling: the
+# fitted model is a stand-in carrying only sample_stats)
+# --------------------------------------------------------------------------
+
+
+class _FittedStub:
+    def __init__(self, max_rhat=float("nan"), min_ess_bulk=float("nan")):
+        self.sample_stats = {"max_rhat": max_rhat, "min_ess_bulk": min_ess_bulk}
+
+
+def _pymc_forecaster(n):
+    from horizon_forecaster.forecaster import HorizonForecaster
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return HorizonForecaster(
+            raw_df=make_raw(n),
+            date_column="date",
+            target_column="orders",
+            frequency="daily",
+            models=["bayesianpymc"],
+            model_params={"bayesianpymc": {"n_fourier": 2}},
+        )
+
+
+def _pymc_warnings(hf, stage, model=None):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        hf._warn_about_bayesianpymc(stage, model or _FittedStub())
+    return [str(w.message) for w in caught]
+
+
+def test_evaluate_on_a_short_series_names_both_fits_without_annual_terms():
+    (message,) = _pymc_warnings(_pymc_forecaster(150), "evaluate")  # 83 / 133 days
+    assert message.startswith("bayesianpymc: fitted without annual (yearly) seasonality")
+    assert "(validation fit: 83 days, test fit: 133 days)" in message
+
+
+def test_evaluate_says_when_only_the_validation_fit_is_short():
+    (message,) = _pymc_warnings(_pymc_forecaster(250), "evaluate")  # 138 / 222 days
+    assert "the validation fit spans 138 days, fewer than 183" in message
+    assert "the test fit (222 days) and forecast() include it" in message
+
+
+def test_forecast_on_a_short_series_says_it_has_no_annual_terms():
+    (message,) = _pymc_warnings(_pymc_forecaster(150), "forecast")
+    assert "fitted without annual (yearly) seasonality" in message
+    assert "(forecast: 150 days)" in message
+
+
+def test_no_annual_note_from_exactly_the_minimum_span():
+    n = ANNUAL_MIN_SPAN_DAYS + 84 + 28  # the training window spans exactly 183 days
+    assert _pymc_warnings(_pymc_forecaster(n), "evaluate") == []
+    assert _pymc_warnings(_pymc_forecaster(ANNUAL_MIN_SPAN_DAYS), "forecast") == []
+
+
+@pytest.mark.parametrize(
+    "stats, expected",
+    [
+        ({"max_rhat": 1.02, "min_ess_bulk": 150.0}, None),
+        ({"max_rhat": 1.06, "min_ess_bulk": 500.0}, "largest R-hat 1.060, above 1.05"),
+        ({"min_ess_bulk": 80.0}, "smallest effective sample size 80, below 100"),
+        ({}, None),  # one chain: R-hat is NaN and is not reported
+    ],
+)
+def test_convergence_warning_only_past_the_loose_thresholds(stats, expected):
+    messages = _pymc_warnings(_pymc_forecaster(400), "evaluate", _FittedStub(**stats))
+    if expected is None:
+        assert messages == []
+    else:
+        (message,) = messages
+        assert "did not converge cleanly in its test fit" in message
+        assert expected in message
+
+
+# --------------------------------------------------------------------------
 # 3. real sampling integration (local/CI gate)
 # --------------------------------------------------------------------------
 
@@ -262,6 +383,33 @@ def test_fit_predict_no_independents():
     out = w.predict(horizon=len(fut), future_exog=fut)
     assert len(out) == len(test)
     assert (out["yhat"] >= 0).all()
+
+
+def _fit_no_drivers(n):
+    raw = make_raw(n)
+    train, test = _split(raw, n - 10)
+    adapter = BayesianPyMCAdapter("date", "orders", [], "daily")
+    w = BayesianPyMCWrapper(frequency="daily", params=_FAST)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        w.fit(adapter.transform_train(train))
+    return w, w.predict(horizon=10, future_exog=adapter.transform_future(test["date"], None))
+
+
+def test_a_fit_spanning_under_six_months_samples_no_annual_terms():
+    w, out = _fit_no_drivers(60)
+    assert w.annual_terms is False
+    assert w._post["beta_long"].shape[1] == 0
+    assert w._post["beta_short"].shape[1] == 4  # weekly order 2 (n_fourier=2)
+    assert np.isfinite(out["yhat"].to_numpy()).all()
+
+
+def test_a_fit_spanning_six_months_or_more_keeps_annual_terms():
+    w, out = _fit_no_drivers(ANNUAL_MIN_SPAN_DAYS + 10)
+    assert w.annual_terms is True
+    assert w._post["beta_long"].shape[1] == 4
+    assert np.isfinite(out["yhat"].to_numpy()).all()
+    assert {"max_rhat", "min_ess_bulk", "num_divergences"} <= set(w.sample_stats)
 
 
 def test_predict_horizon_mismatch_raises():

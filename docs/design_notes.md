@@ -627,8 +627,8 @@ operation.
 
 ### Bayesian PyMC
 
-A structural model — linear trend + annual Fourier (+ weekly for daily) + a
-linear regression on standardised exog — observed through a Student-T
+A structural model — linear trend + annual Fourier (from 183 days of data)
+(+ weekly for daily) + a linear regression on standardised exog — observed through a Student-T
 likelihood and sampled with NUTS. The adapter is close to SARIMAX's minus the
 log1p and the collinearity warning; target standardisation and Fourier live
 in the wrapper, mirroring that split.
@@ -683,6 +683,36 @@ in the wrapper, mirroring that split.
   divergences, and the daily posterior was briefly judged untrustworthy. That
   figure was an artifact of an 80-step warmup in a throwaway test. With
   adequate warmup the posterior is clean (0 divergences, R-hat ≈ 1.0).
+- **The weekly cycle is capped at order 3.** On whole-day dates
+  cos(2π·4d/7) = cos(2π·3d/7) and sin(2π·4d/7) = −sin(2π·3d/7), so order 4
+  adds two columns perfectly collinear with order 3 (posterior correlation
+  about −0.99 between the pairs). They add no shape, only a ridge: on six real
+  daily series dropping them made sampling a median 5.4× faster (1.2–12×),
+  and test WAPE moved by at most 0.06 points on five and 0.3 on the sixth.
+  `n_fourier` keeps setting the annual order, where 4 is a real harmonic.
+- **Annual terms need a fit spanning 183 days.** Below that the yearly cycle
+  is mostly unseen and the model's guess at the rest of it is unstable. On a
+  real six-month daily series, test WAPE with annual terms was 11.5 from 158
+  training days, 73.9 from 150 and 49.8 from 136; without them 13.5, 15.0
+  and 17.4. On synthetic series and a real one, leaving them out below 6
+  months cost at most about a point. From about 7 months the annual terms
+  paid off whenever the series had a yearly cycle (11 months: 5.3 against
+  36.4 without; a real series 4.9 against 7.4) and cost 0.1–2.5 points when
+  it had none, so a length cut-off between one and two years — the first
+  plan — would have been wrong. The rule reads the span of each fit's own
+  dates, like Prophet's yearly `auto`, so `forecast()`, which sees the most
+  data, is never held back by the shorter validation window; the price is
+  that on a 7–9 month series the validation score comes from a slightly
+  simpler model, which the warning says. Calendar span rather than row count, so the rule reads the same for daily and weekly data. Letting the
+  grid choose on validation score was rejected: the validation fit is the
+  shortest, and at 10–12 months it preferred no annual terms in four cases
+  where they were better on test, by up to four times (4.4 against 17.3).
+- **Convergence warning at R-hat > 1.05 or bulk ESS < 100.** The textbook
+  1.01 / 400 flagged 14 of 52 fits with the shipped settings, all forecasting
+  well (test WAPE 2.6–5.3), and every fit of one real series whose ESS sits
+  around 180–260 at the shipped settings. A warning on a quarter of good runs would
+  be ignored, so the thresholds flag only clearly broken sampling. Grid
+  candidates are not checked; they are discarded after scoring.
 - **A macOS linker workaround runs before the first model is built.**
   PyTensor appends `-ld64` to compile commands on macOS 15+, and current
   Apple toolchains no longer have that linker, so every compile failed with

@@ -527,7 +527,8 @@ neuralprophet:
 # Bayesian PyMC (NUTS/MCMC).
 #
 # A Bayesian structural model: linear trend + Fourier seasonality (annual
-# for both frequencies, plus a weekly cycle for daily) + a linear regression
+# for both frequencies once a fit spans 183 days, plus a weekly cycle for
+# daily) + a linear regression
 # on the independent columns, observed through a Student-T likelihood. All
 # of that lives in models/bayesianpymc_wrapper.py; the adapter only hands
 # over "ds", raw "y", and standardised exog.
@@ -554,7 +555,10 @@ neuralprophet:
 #       not the model, and 1000 is empirically plenty here (point MAPE moved
 #       <0.2pp vs 2000), so this is a near-free ~2x speedup;
 #   (b) keeps the Fourier order low (3-4 daily, never 6, which was slowest
-#       and never won); and
+#       and never won). n_fourier is the ANNUAL order; the wrapper caps
+#       the weekly cycle at 3, since on whole days order 4 only repeats
+#       order 3, and leaves the annual terms out of any fit spanning
+#       fewer than 183 days (see bayesianpymc_wrapper.py); and
 #   (c) GRID-SELECTS beta_fourier_sigma (0.3 tight vs 1.0 loose) rather than
 #       hardcoding it. A tight Fourier prior regularises the collinear ridge
 #       (faster, and better when seasonality is weak/noisy/collinear); a loose
