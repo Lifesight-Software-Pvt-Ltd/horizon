@@ -1709,6 +1709,10 @@ def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        # Bayesian PyMC's own notes describe the forecast fit itself (90 days
+        # has no annual terms; _FAST_PYMC's 40 draws do not converge), so they
+        # are expected here; nothing may warn about selection running again.
+        warnings.filterwarnings("ignore", message="bayesianpymc: ")
         forecaster.forecast(horizon=5)  # must not warn -- evaluate() already ran
 
 

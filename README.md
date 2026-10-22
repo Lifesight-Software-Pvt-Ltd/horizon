@@ -113,8 +113,9 @@ behaviour.
 - **Built-in safety warnings** for over-long horizons, auto-generated
   future driver values, a last period that `carry_forward` would hold (a
   promotion week), events from last year missing from a generated future, future driver values outside their
-  historical range, drivers that never change inside a fit window, and
-  forecasts that land implausibly far outside history.
+  historical range, drivers that never change inside a fit window, Bayesian
+  PyMC sampling that did not converge, and forecasts that land implausibly
+  far outside history.
 
 ---
 

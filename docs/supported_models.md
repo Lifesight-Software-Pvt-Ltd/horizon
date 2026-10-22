@@ -115,8 +115,8 @@ restores the (unpicklable) Lightning trainer.
 ### bayesianpymc
 
 A Bayesian structural time-series model sampled with NUTS: a linear trend, a
-Fourier seasonal basis (annual for both frequencies, plus a weekly cycle for
-daily data), and a linear regression on your standardised independent columns,
+Fourier seasonal basis (annual for both frequencies once the data spans 6
+months, plus a weekly cycle for daily data), and a linear regression on your standardised independent columns,
 all observed through a Student-T likelihood (heavy tails absorb spikes a
 Gaussian fit would chase). Design points worth knowing:
 
@@ -138,12 +138,27 @@ Gaussian fit would chase). Design points worth knowing:
   and badly under-cover.
 - **Daily is tuned for scale.** On ~1000+ daily rows, seasonal-collinear exog
   makes NUTS take deep, slow trajectories. The daily config therefore halves
-  draws/tune to 1000 (which barely moves the point forecast), caps the Fourier
-  order at 4, and **grid-selects `beta_fourier_sigma` (0.3 vs 1.0)** so the
-  data chooses how tightly to regularise the Fourier basis — a tight prior
-  helps on weak/collinear seasonality, a loose one preserves strong
+  draws/tune to 1000 (which barely moves the point forecast), keeps the
+  Fourier order at 3–4, and **grid-selects `beta_fourier_sigma` (0.3 vs 1.0)**
+  so the data chooses how tightly to regularise the Fourier basis — a tight
+  prior helps on weak/collinear seasonality, a loose one preserves strong
   seasonality, and neither is universally better. Weekly samples cleanly at
   the full 2000/2000.
+- **The weekly cycle stops at order 3.** `n_fourier` sets the annual order;
+  on whole-day dates a weekly order of 4 only repeats order 3, so it is never
+  used.
+- **No annual terms from under 6 months of data.** A fit whose dates span
+  fewer than 183 days leaves the annual Fourier terms out: from less than half
+  a year the model has to guess the rest of the yearly cycle, and on real data
+  that guess swung test WAPE from 11.5 to 73.9 between two windows a week
+  apart. Each fit decides from its own dates, so on a 7–9 month series the
+  validation fit can run without them while the test fit and `forecast()`
+  include them. `evaluate()` and `forecast()` warn once when this happens.
+- **Convergence is checked.** `evaluate()` (test fit) and `forecast()` warn
+  when the largest R-hat is above 1.05 or the smallest bulk effective sample
+  size is below 100; raise `draws` and `tune` if you see it. The values are on
+  the fitted wrapper as `sample_stats` (`max_rhat`, `min_ess_bulk`,
+  `num_divergences`).
 - **`save()`/`load()` write the PyMC `InferenceData` to a NetCDF sidecar** and
   pickle the rest; predictions reload exactly from the pickled posterior draws.
 

@@ -69,7 +69,13 @@ from horizon_forecaster.exceptions import (
     UnsupportedFrequencyError,
 )
 from horizon_forecaster.models.base import BaseModel
-from horizon_forecaster.models.bayesianpymc_wrapper import BayesianPyMCWrapper
+from horizon_forecaster.models.bayesianpymc_wrapper import (
+    ANNUAL_MIN_SPAN_DAYS,
+    CONVERGENCE_MAX_RHAT,
+    CONVERGENCE_MIN_ESS,
+    BayesianPyMCWrapper,
+    span_days,
+)
 from horizon_forecaster.models.catboost_wrapper import CatBoostWrapper
 from horizon_forecaster.models.neuralprophet_wrapper import NeuralProphetWrapper
 from horizon_forecaster.models.prophet_wrapper import ProphetWrapper
@@ -2090,6 +2096,8 @@ class HorizonForecaster:
         self.naive_baseline = self._seasonal_naive_baseline()
         self.test_error_correlation = error_correlation(results) if len(results) > 1 else None
         self._warn_about_results_worse_than_naive(results)
+        if "bayesianpymc" in results:
+            self._warn_about_bayesianpymc("evaluate", results["bayesianpymc"].fitted_model)
 
         return results
 
@@ -2161,6 +2169,68 @@ class HorizonForecaster:
             used_default_future_strategy=used_default_strategy,
             future_exog_used=future_exog_used,
         )
+
+    def _warn_about_bayesianpymc(self, stage: str, model) -> None:
+        """
+        One warning per call for each of two things Bayesian PyMC's fits
+        decide for themselves: annual terms left out of a fit spanning
+        fewer than ANNUAL_MIN_SPAN_DAYS, and sampling that did not converge.
+
+        For evaluate() the annual note covers both fits, since the
+        validation fit can be short while the test fit is not; the
+        convergence check reads the test fit, the one whose numbers are
+        reported. For forecast() both read the full-series fit. Grid
+        candidates are not checked: they are discarded after scoring.
+        """
+        if model is None:
+            return
+        dates = self.raw_df[self.date_column]
+        if stage == "evaluate":
+            fits = [
+                ("validation fit", span_days(dates.iloc[: self._n_train])),
+                ("test fit", span_days(dates.iloc[: self._n_train + self._n_validation])),
+            ]
+        else:
+            fits = [("forecast", span_days(dates))]
+        short = [(name, days) for name, days in fits if days < ANNUAL_MIN_SPAN_DAYS]
+        if len(short) == len(fits):
+            spans = ", ".join(f"{name}: {days} days" for name, days in short)
+            warnings.warn(
+                f"bayesianpymc: fitted without annual (yearly) seasonality, because its data "
+                f"spans fewer than {ANNUAL_MIN_SPAN_DAYS} days ({spans}). With under 6 months "
+                f"of history it would have to guess the rest of the yearly cycle, and in "
+                f"testing that guess made forecasts swing wildly. The rest of the model is "
+                f"unchanged.",
+                stacklevel=3,
+            )
+        elif short:
+            (_, val_days), (_, test_days) = fits
+            warnings.warn(
+                f"bayesianpymc: the validation fit spans {val_days} days, fewer than "
+                f"{ANNUAL_MIN_SPAN_DAYS}, so it ran without annual (yearly) seasonality, while "
+                f"the test fit ({test_days} days) and forecast() include it. Its validation "
+                f"score therefore describes a slightly simpler model than the one tested.",
+                stacklevel=3,
+            )
+
+        stats = getattr(model, "sample_stats", None) or {}
+        rhat = stats.get("max_rhat", float("nan"))
+        ess = stats.get("min_ess_bulk", float("nan"))
+        problems = []
+        if rhat == rhat and rhat > CONVERGENCE_MAX_RHAT:
+            problems.append(f"largest R-hat {rhat:.3f}, above {CONVERGENCE_MAX_RHAT}")
+        if ess == ess and ess < CONVERGENCE_MIN_ESS:
+            problems.append(
+                f"smallest effective sample size {ess:.0f}, below {CONVERGENCE_MIN_ESS}"
+            )
+        if problems:
+            fit = "test fit" if stage == "evaluate" else "forecast fit"
+            warnings.warn(
+                f"bayesianpymc: the sampler did not converge cleanly in its {fit} "
+                f"({'; '.join(problems)}), so its forecast and band may be unreliable. "
+                f"Raise 'draws' and 'tune' in model_params, or rely on the other models.",
+                stacklevel=3,
+            )
 
     def _warn_on_forecasts_far_outside_history(self, results: Dict[str, ForecastResult]) -> None:
         """
@@ -2370,6 +2440,8 @@ class HorizonForecaster:
 
         self.forecast_errors = errors
         self._warn_on_forecasts_far_outside_history(results)
+        if "bayesianpymc" in results:
+            self._warn_about_bayesianpymc("forecast", self._forecast_models["bayesianpymc"])
 
         if not results:
             self.forecast_ensemble = None
