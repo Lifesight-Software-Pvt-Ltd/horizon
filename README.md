@@ -44,20 +44,22 @@ search scored on the validation window by `selection_metric` (MAPE, or WAPE
 when the target has many zeros or goes negative) — so their numbers are
 directly comparable.
 
-| Model | Backend | Uncertainty bounds | Notes |
-|---|---|---|---|
-| `prophet` | Prophet (cmdstanpy) | yes | Additive/multiplicative seasonality; seeded so intervals are reproducible. Can emit negative point forecasts on a low-level series — no output clamp is applied. |
-| `catboost` | CatBoost | no | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
-| `sarimax` | statsmodels | yes | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)` and the annual Fourier order come from the shared grid, joined by seasonal `(P, Q)` at daily frequency (weekly disables the seasonal order, since an s=52 term is prohibitively slow, and leans on the Fourier terms instead); only `d` is derived from the data by an ADF test inside the wrapper. Left out, with a warning, when the target has negative values, or on weekly data with more than 10% zero weeks (see `skipped_models`); otherwise zeros where the series normally has values are left out of its fit, with a warning. |
-| `neuralprophet` | NeuralProphet (torch) | no (v1) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
-| `bayesianpymc` | PyMC (NUTS/MCMC) | yes | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
+| Model | Backend | Notes |
+|---|---|---|
+| `prophet` | Prophet (cmdstanpy) | Additive/multiplicative seasonality. Can emit negative point forecasts on a low-level series — no output clamp is applied. |
+| `catboost` | CatBoost | Gradient-boosted trees over trend-index + cyclical-seasonality features (no target lags), so it forecasts any horizon in one batched call. |
+| `sarimax` | statsmodels | Log-space (S)ARIMA with a standardised exogenous regression matrix. Grid-searched like every other model — `(p, q)` and the annual Fourier order come from the shared grid, joined by seasonal `(P, Q)` at daily frequency (weekly disables the seasonal order, since an s=52 term is prohibitively slow, and leans on the Fourier terms instead); only `d` is derived from the data by an ADF test inside the wrapper. Left out, with a warning, when the target has negative values, or on weekly data with more than 10% zero weeks (see `skipped_models`); otherwise zeros where the series normally has values are left out of its fit, with a warning. |
+| `neuralprophet` | NeuralProphet (torch) | Decomposition model, `n_lags=0` (no autoregression in v1), CPU-pinned for reproducibility. |
+| `bayesianpymc` | PyMC (NUTS/MCMC) | Bayesian structural model: linear trend + Fourier seasonality + exog regression under a Student-T likelihood. Slowest by far. |
 
-Uncertainty bounds (`yhat_lower` / `yhat_upper`) are per-model and optional —
-Prophet, SARIMAX, and Bayesian PyMC provide them; CatBoost and NeuralProphet
-(v1) do not. They flow into per-model plots and CSVs but are **never combined
-into the ensemble**, which operates on the point forecasts alone. See
-[`docs/supported_models.md`](docs/supported_models.md) for full per-model
-behaviour.
+Every model and every ensemble rule comes with a **95% band**
+(`yhat_lower` / `yhat_upper`), built the same way for all of them from that
+forecast's own validation errors (split conformal prediction), and widening
+past the validation window. On 80 test windows it covered 87–95% of actuals
+over the first four weeks, where the models' own intervals covered 76–95%,
+and it gives CatBoost, NeuralProphet and the ensemble a band they did not
+have. See [`docs/supported_models.md`](docs/supported_models.md#uncertainty-bands)
+for how it is built and where it holds, and for full per-model behaviour.
 
 > **Note on speed:** Bayesian PyMC runs a full MCMC sample per grid candidate
 > and is dramatically slower than the other four. Pass `models=` to exclude it,
@@ -114,8 +116,9 @@ behaviour.
   future driver values, a last period that `carry_forward` would hold (a
   promotion week), events from last year missing from a generated future, future driver values outside their
   historical range, drivers that never change inside a fit window, Bayesian
-  PyMC sampling that did not converge, and forecasts that land implausibly
-  far outside history.
+  PyMC sampling that did not converge, forecasts that run past the window the
+  95% bands are calibrated on, and forecasts that land implausibly far outside
+  history.
 
 ---
 
@@ -176,7 +179,7 @@ if ens.combined is not None:
 
 # 2) Forecast the future (refits on all data, once, cached)
 forecasts = forecaster.forecast(horizon=30)
-future = forecasts["sarimax"].forecast      # DataFrame ["ds", "yhat"] (+ bounds where available)
+future = forecasts["sarimax"].forecast      # DataFrame ["ds", "yhat", "yhat_lower", "yhat_upper"] (95% band)
 ```
 
 Training takes whatever the two evaluation windows leave. Leave

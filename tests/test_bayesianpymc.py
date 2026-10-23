@@ -192,8 +192,8 @@ def test_a_model_pickled_before_the_cap_keeps_its_original_basis():
 
 def test_span_days_counts_calendar_days_inclusive():
     assert span_days(pd.Series(pd.date_range("2022-01-01", periods=183, freq="D"))) == 183
-    weekdays = pd.Series(pd.bdate_range("2022-01-03", "2022-07-01"))  # weekday-only data
-    assert span_days(weekdays) == 180
+    unordered = pd.Series(pd.to_datetime(["2022-07-01", "2022-01-03", "2022-03-15"]))
+    assert span_days(unordered) == 180  # first to last date, not the row count
     assert span_days(pd.Series([], dtype="datetime64[ns]")) == 0
 
 
@@ -304,6 +304,31 @@ def test_forecast_on_a_short_series_says_it_has_no_annual_terms():
     (message,) = _pymc_warnings(_pymc_forecaster(150), "forecast")
     assert "fitted without annual (yearly) seasonality" in message
     assert "(forecast: 150 days)" in message
+
+
+def test_no_validation_fit_is_described_when_the_training_window_is_below_the_floor():
+    from horizon_forecaster.forecaster import HorizonForecaster
+
+    def forecaster(n, validation, test):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return HorizonForecaster(
+                raw_df=make_raw(n),
+                date_column="date",
+                target_column="orders",
+                frequency="daily",
+                models=["bayesianpymc"],
+                validation_size=validation,
+                test_size=test,
+            )
+
+    # 26 training rows, under PyMC's floor of 35: there is no validation fit,
+    # and the test fit spans 194 days, so there is nothing to say.
+    assert _pymc_warnings(forecaster(250, 168, 56), "evaluate") == []
+    # 30 training rows; the test fit spans 130 days and is the only fit named.
+    (message,) = _pymc_warnings(forecaster(150, 100, 20), "evaluate")
+    assert "(test fit: 130 days)" in message
+    assert "validation fit" not in message
 
 
 def test_no_annual_note_from_exactly_the_minimum_span():

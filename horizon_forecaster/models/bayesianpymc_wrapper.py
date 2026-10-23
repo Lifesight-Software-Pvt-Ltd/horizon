@@ -50,9 +50,10 @@ from:
   wrapper) banded `mu`, the latent mean, which omits the observation noise and badly under-covers
   (only ~34% of real actuals fell inside its nominal 94% band on daily
   data); sampling the likelihood adds that noise back so the band covers
-  ~(ci_upper - ci_lower)% of outcomes. Like every wrapper these bounds are
-  individual-model-only and never enter the ensemble (see BaseModel.predict
-  docstring).
+  ~(ci_upper - ci_lower)% of outcomes. These bounds are what the wrapper
+  returns when used on its own: HorizonForecaster discards them and gives
+  this model, like every other, the calibrated 95% band built from its
+  validation errors (evaluation/bands.py; see BaseModel.predict docstring).
 
 Selection: PyMC uses the SAME forecaster-level grid search as the other
 models. Because NUTS sampling is expensive, the default grid is small: daily

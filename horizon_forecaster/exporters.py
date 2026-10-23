@@ -94,6 +94,8 @@ _SUMMARY_COLUMNS = [
     "zero_actuals_excluded",
     "beats_naive",
     "selection_metric",
+    "band_coverage",
+    "band_test_points",
 ]
 
 # Matches HorizonForecaster's default mape_threshold. Pass the forecaster's
@@ -110,6 +112,25 @@ class _ThresholdDefault:
 
 
 _THRESHOLD_DEFAULT = _ThresholdDefault()
+
+
+def band_coverage(frame: "pd.DataFrame", actuals: "Optional[pd.DataFrame]" = None) -> tuple:
+    """
+    (percent of actuals inside the 95% band, number of points) on a test
+    window, or (None, None) when the frame has no band. `actuals` (columns
+    "ds", "y") is merged in by date when `frame` has no "y" column, as for an
+    ensemble's combined forecast.
+    """
+    if frame is None or "yhat_lower" not in frame.columns:
+        return (None, None)
+    if "y" not in frame.columns:
+        if actuals is None:
+            return (None, None)
+        frame = frame.merge(actuals[["ds", "y"]], on="ds", how="inner")
+    if frame.empty:
+        return (None, None)
+    inside = (frame["y"] >= frame["yhat_lower"]) & (frame["y"] <= frame["yhat_upper"])
+    return (float(inside.mean() * 100), int(len(frame)))
 
 
 def _scores_from_forecaster(forecaster, caller: str) -> dict:
@@ -136,6 +157,8 @@ def _scores_from_forecaster(forecaster, caller: str) -> dict:
         results = {}
     baseline = getattr(forecaster, "naive_baseline", None)
     evaluated = forecaster.evaluate_ensemble or {}
+    first = getattr(next(iter(results.values()), None), "test_predictions", None)
+    actuals = first[["ds", "y"]] if first is not None and "y" in first else None
     return {
         "per_model_mape": {m: r.mape.value for m, r in results.items()} or None,
         "per_model_validation_mape": {m: r.validation_mape.value for m, r in results.items()}
@@ -153,6 +176,14 @@ def _scores_from_forecaster(forecaster, caller: str) -> dict:
             )
             for method, e in evaluated.items()
         },
+        "band_coverage": {
+            m: band_coverage(getattr(r, "test_predictions", None)) for m, r in results.items()
+        },
+        "ensemble_band_coverage": {
+            method: band_coverage(e.combined, actuals)
+            for method, e in evaluated.items()
+            if e.combined is not None and actuals is not None
+        },
         "baseline": baseline if results else None,
         "selection_metric": getattr(forecaster, "selection_metric", "mape"),
         "error_correlation": (
@@ -165,7 +196,8 @@ def build_final_forecast_table(
     ensemble: "Optional[EnsembleResult] | Dict[str, EnsembleResult]",
 ) -> pd.DataFrame:
     """
-    The final blended forecast as a ["ds", "yhat"] table.
+    The final blended forecast as a ["ds", "yhat"] table, plus its 95% band
+    ["yhat_lower", "yhat_upper"] when it has one.
 
     Accepts the {method: EnsembleResult} dict a forecaster actually
     produces, a single EnsembleResult, or None. Given several methods it
@@ -181,7 +213,8 @@ def build_final_forecast_table(
     result = next(iter(as_ensemble_dict(ensemble).values()), None)
     if result is None or result.combined is None:
         return pd.DataFrame(columns=_FINAL_COLUMNS)
-    return result.combined[_FINAL_COLUMNS].reset_index(drop=True)
+    columns = _FINAL_COLUMNS + [c for c in ("yhat_lower", "yhat_upper") if c in result.combined]
+    return result.combined[columns].reset_index(drop=True)
 
 
 def build_per_model_forecast_table(
@@ -190,10 +223,10 @@ def build_per_model_forecast_table(
     """
     Every model's forecast stacked into one long table.
 
-    Columns: ["model", "ds", "yhat"], plus "yhat_lower"/"yhat_upper" when
-    at least one model supplies them (models that don't, e.g. CatBoost,
-    get NaN in those columns). Returns a header-only DataFrame when
-    forecast_results is empty.
+    Columns: ["model", "ds", "yhat"], plus the 95% band "yhat_lower"/
+    "yhat_upper" when at least one model has one (a model without, e.g. one
+    with too few validation errors, gets NaN there). Returns a header-only
+    DataFrame when forecast_results is empty.
     """
     check_results_dict(forecast_results, "forecast", "build_per_model_forecast_table")
     if not forecast_results:
@@ -371,6 +404,8 @@ def build_model_summary_table(
     ensemble_scores: "Optional[Dict[str, tuple]]" = None,
     baseline=None,
     selection_metric: Optional[str] = None,
+    band_coverage: "Optional[Dict[str, tuple]]" = None,
+    ensemble_band_coverage: "Optional[Dict[str, tuple]]" = None,
 ) -> pd.DataFrame:
     """
     The at-a-glance table for deciding whether to act on a combined
@@ -386,8 +421,14 @@ def build_model_summary_table(
     Columns: ["model", "validation_mape", "mape", "ensemble_method",
     "rule_applied", "ensemble_weight", "status", "best_model_check",
     "validation_wape", "wape", "zero_actuals_excluded", "beats_naive",
-    "selection_metric"]. The last five were added after the first eight,
-    so readers that pick columns by name keep working.
+    "selection_metric", "band_coverage", "band_test_points"]. Columns after
+    the first eight were added later, at the end, so readers that pick
+    columns by name keep working.
+
+    `band_coverage` is the percentage of test-window actuals inside the
+    row's 95% band, and `band_test_points` how many points that is: a
+    check of the band on this run, noisy on a short window (about +/-8
+    points on 28). Empty when the row has no band.
 
     `best_model_check` says, per model, whether it was exported as the best
     single model and why not otherwise (from choose_best_model); empty on
@@ -426,6 +467,10 @@ def build_model_summary_table(
             forecast() ensemble), from forecaster.evaluate_ensemble.
         baseline: forecaster.naive_baseline (an EvaluationResult).
         selection_metric: forecaster.selection_metric.
+        band_coverage: {model: (percent, points)}, from band_coverage() of
+            each result's test_predictions.
+        ensemble_band_coverage: {method: (percent, points)} for the
+            evaluate() ensembles, the same check on the combined forecast.
     """
     caller = "build_model_summary_table"
     check_score_dict(per_model_mape, "per_model_mape", caller)
@@ -441,6 +486,8 @@ def build_model_summary_table(
     zero_actuals_excluded = zero_actuals_excluded or {}
     ensemble_scores = ensemble_scores or {}
     best_model_checks = best_model_checks or {}
+    band_coverage = band_coverage or {}
+    ensemble_band_coverage = ensemble_band_coverage or {}
     base_wape = _finite_or_none(getattr(baseline, "wape", None))
 
     def beats(value):
@@ -462,6 +509,8 @@ def build_model_summary_table(
             "zero_actuals_excluded": zero_actuals_excluded.get(name),
             "beats_naive": beats(per_model_wape.get(name)),
             "selection_metric": selection_metric,
+            "band_coverage": band_coverage.get(name, (None, None))[0],
+            "band_test_points": band_coverage.get(name, (None, None))[1],
         }
 
     rows = []
@@ -515,6 +564,8 @@ def build_model_summary_table(
                     "zero_actuals_excluded": excluded,
                     "beats_naive": beats(scored_wape),
                     "selection_metric": selection_metric,
+                    "band_coverage": ensemble_band_coverage.get(method, (None, None))[0],
+                    "band_test_points": ensemble_band_coverage.get(method, (None, None))[1],
                 }
             )
 
@@ -678,6 +729,8 @@ def export_forecast_csvs(
         "ensemble_scores": None,
         "baseline": None,
         "selection_metric": None,
+        "band_coverage": None,
+        "ensemble_band_coverage": None,
     }
     correlation = None
     # Explicit validation scores win over the forecaster's, the best-model

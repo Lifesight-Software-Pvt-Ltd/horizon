@@ -120,6 +120,16 @@ available makes the reported MAPE an estimate of the same procedure that
 produces the real forecast. `EvaluationResult.fitted_model` is consequently
 that refit — the model that actually produced `test_predictions`.
 
+One deliberate exception: the data checks that decide the run as a whole —
+whether selection uses MAPE or WAPE, leaving SARIMAX out for a negative or
+zero-heavy target, and dropping a declared driver that never changes in the
+history — read every row, test included. This keeps the run uniform:
+`evaluate()` and `forecast()`, which refits on the full series, make the same
+decision, so a user never sees a model evaluated on one rule and forecast on
+another, and the results read clearly from start to finish instead of
+contradicting each other. These checks read properties of the data, never a
+model's score, so they cannot make a reported score optimistic.
+
 ### Window sizes are absolute, not percentages
 
 Defaults are **84 validation / 28 test** for daily, **39 / 13** for weekly,
@@ -233,14 +243,71 @@ test WAPE. On the same 42 series the default trimmed ensemble lost to it in
 or weight; a benchmark-relative metric (RelMAE, MASE) that does that is still
 open (§9).
 
-### Uncertainty bounds are per-model only
+### Uncertainty bands: one calibrated method for every output
 
-`yhat_lower`/`yhat_upper` are optional in the `BaseModel` contract, provided
-by Prophet, SARIMAX and Bayesian PyMC, and flow into per-model plots and
-CSVs. They are **never combined into the ensemble**. Averaging intervals
-produced by a trend simulation, a Gaussian innovation band and an MCMC
-posterior has no coherent interpretation. This is enforced by a test, not
-only documented.
+Every model and every ensemble rule gets a 95% band from its own validation
+errors (split conformal prediction; `evaluation/bands.py`), and the models'
+own intervals are discarded. Those meant different things (a trend
+simulation, a Gaussian innovation band, an MCMC posterior), CatBoost,
+NeuralProphet and the ensembles had none, and averaging them for an ensemble
+has no coherent interpretation. They also covered too little. On 80 distinct
+test windows across 44 real and synthetic series (up to four origins each,
+test windows up to 500 days or 100 weeks), over the first 28 days or 13
+weeks:
+
+| | Calibrated band | Model's own 95% band |
+|---|---|---|
+| Prophet | 91% | 86% |
+| SARIMAX | 87% | 76% |
+| Bayesian PyMC (12 windows) | 95% | 95% |
+| CatBoost / NeuralProphet | 93% | none |
+| Trimmed ensemble | 91% | none |
+
+The width is q, the ⌈0.95(n + 1)⌉-th smallest absolute validation error, which
+the conformal argument guarantees at 95% if future errors behave like past
+ones. They do not quite: the errors come from the candidate that won the grid
+search because its validation errors were smallest, so they run slightly
+optimistic. In the study, the grid-searched models covered less over the first
+four weeks (Prophet 91%, SARIMAX 87%) than the two run with fixed settings
+(CatBoost and NeuralProphet 93%), consistent with this. CatBoost's default
+18-candidate grid was not part of the study, so its coverage in a default run
+may be a little lower than measured. The decisions, each from the same study:
+
+- **Fixed width up to the validation length, then × √(h ÷ L).** A fixed width
+  held on the first 28 days but fell to 69–77% from 3 to 16 months ahead;
+  growing the width from day 1 (√h scaled on the validation errors)
+  under-covered the near term (88–90%). Widening only past the validation
+  window kept the near term and lifted 3–16 months to 82–88%. √ is the
+  random-walk error growth Hyndman uses to widen naive-forecast intervals.
+  Weekly beyond 39 weeks reached only 57–61%, against 38–47% for the own
+  bands; the forecast warns there rather than claim 95%.
+- **Raw errors, symmetric.** Percentage errors changed little and break near
+  zero. Separate upper and lower quantiles covered worse (82–89%), because
+  each tail is estimated from half the evidence. Calibrating on only the
+  first 28 validation days, to match the test horizon, is impossible on weekly
+  data (13 errors) and gained nothing on daily.
+- **At least 19 errors.** ⌈0.95(n + 1)⌉ ≤ n first holds at n = 19; below it
+  there is no 95% band, so none is given. 19–28 errors worked (88–98%) but
+  rest on the one or two largest errors.
+- **Unexpected zero days left out of the calibration**, by the same rule
+  SARIMAX uses. With them in, 2–10% zero days made the band 2–4 times wider
+  (about ±70% of the level at 5%) while still missing every zero day; left
+  out, ordinary days kept 95–97% coverage.
+- **An ensemble is calibrated on its own validation forecast**: the members'
+  validation forecasts combined by the same rule, threshold and scores, so
+  its members match the forecast it surrounds. A member without a validation
+  forecast leaves that rule without a band rather than a mismatched one.
+- **Known limits, warned or documented:** generated drivers cost about 9
+  points of coverage (the validation errors were measured with the real
+  ones); January and November covered about 10 points less within the same
+  series, since 84 validation days rarely include the year's peak; misses
+  fall mostly above the band on growing series, where the forecast itself
+  runs low.
+
+The per-step form of conformal prediction used by Nixtla's libraries and
+Hyndman's `conformalForecast`, which calibrates every step ahead from several
+rolling validation windows, would fit long horizons better but needs several
+extra fits of every model per run (§9).
 
 ---
 
@@ -417,7 +484,11 @@ Independent columns keep their original names, since Prophet's
   in the config) immediately before calling Prophet. The seed is an explicit
   wrapper constructor argument, never part of `params`, because `params` is
   passed straight to `Prophet(**params)`, which would reject it. Verified
-  across separate processes, not just repeated calls.
+  across separate processes, not just repeated calls. Since the calibrated
+  bands replaced every model's own interval, Horizon's config sets
+  `uncertainty_samples: 0`, so inside a Horizon run Prophet no longer
+  simulates an interval at all; the seed matters only to a wrapper used on
+  its own.
 - **`save()`/`load()` use `model_to_json()`, not pickle**, per Prophet's own
   documentation — the cmdstanpy backend does not deserialize reliably across
   environments. The JSON is wrapped in an envelope carrying wrapper state
@@ -496,7 +567,8 @@ varies `(p, q)`, the seasonal `(P, Q)` at daily frequency, and
   produced an `[8k, 700k]` band around an accurate ~80k point forecast. A
   documented consequence of the bias correction is that the corrected point
   can sit slightly above the interval centre; mean > median is correct
-  lognormal behaviour.
+  lognormal behaviour. HorizonForecaster replaces this interval with the
+  calibrated band (§2); it remains what the wrapper returns on its own.
 - **Explosion is controlled at the source, with a divergence guard behind
   it.** The winning order is refit with `enforce_stationarity=True` (falling
   back to `False` only if that fit fails), which makes the hard clip a rare
@@ -622,8 +694,9 @@ operation.
   to extrapolate from; reverting to the 0.8 default kept the win.
 - `yearly_seasonality="auto"`, not forced — forcing it on short history has
   produced unusable forecasts twice in this project. Non-negative clipping is
-  data-driven, mirroring CatBoost. No uncertainty bounds in 1.0, though
-  `quantiles=[...]` is a natural follow-up now the output layer handles them.
+  data-driven, mirroring CatBoost. No interval of its own (`quantiles=[...]`
+  would add output heads and training cost); it gets the calibrated band like
+  every model (§2).
 
 ### Bayesian PyMC
 
@@ -656,6 +729,8 @@ in the wrapper, mirroring that split.
   94% band. Retaining the posterior `sigma`/`nu` draws and drawing Student-T
   noise restores coverage. The point forecast is still `mu.mean` (the
   predictive mean for `nu > 1`), so MAPE is unaffected; only the band widened.
+  HorizonForecaster now replaces this band with the calibrated one (§2), which
+  covered the same 95% on the windows PyMC ran on.
 - **No unconditional zero clamp.** The back-transform once applied
   `np.clip(..., 0.0, None)` regardless of the data, so any target that
   legitimately goes negative — net revenue after refunds, inventory deltas,
@@ -702,8 +777,10 @@ in the wrapper, mirroring that split.
   plan — would have been wrong. The rule reads the span of each fit's own
   dates, like Prophet's yearly `auto`, so `forecast()`, which sees the most
   data, is never held back by the shorter validation window; the price is
-  that on a 7–9 month series the validation score comes from a slightly
-  simpler model, which the warning says. Calendar span rather than row count, so the rule reads the same for daily and weekly data. Letting the
+  that with the default windows (84 validation and 28 test days) a 7–9 month
+  series has its validation score from a slightly simpler model, which the
+  warning says. Calendar span rather than row count, so the rule reads the
+  same for daily and weekly data. Letting the
   grid choose on validation score was rejected: the validation fit is the
   shortest, and at 10–12 months it preferred no annual terms in four cases
   where they were better on test, by up to four times (4.4 against 17.3).
@@ -914,6 +991,12 @@ None of these block a stable API; all are additive.
   window may favour candidates that suit it specifically. The per-window
   driver check (§2) is already written as one function per fit window, so a
   backtest can call it per fold.
+- **Per-step band calibration.** The 95% band has one width up to the
+  validation length and a √ widening past it (§2). Calibrating each step ahead
+  from several rolling validation windows, as Nixtla's libraries and
+  `conformalForecast` do, would fit long horizons better, at the cost of
+  several extra fits of every model per run; it would reuse the same folds as
+  rolling-origin backtesting.
 - **Benchmark-relative metrics (RelMAE) and MASE.** The seasonal-naive
   baseline is reported and warned about (§2), and selection can run on WAPE,
   but nothing is selected or weighted relative to the baseline. The

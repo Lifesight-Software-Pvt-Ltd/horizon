@@ -186,8 +186,9 @@ generically against whatever is registered in `forecaster.py`'s
 `MODEL_REGISTRY`: all five registered models feed it with **no model-specific
 code in this module**.
 
-Uncertainty bounds are deliberately an individual-model concept and are never
-propagated into a combined output: averaging confidence/credible intervals
-across statistically different models (trend simulation vs. posterior vs.
-Gaussian approximation) has no coherent interpretation, so this module
-operates on the `yhat` column only.
+This module combines the `yhat` column only; the members' bands are never
+averaged, which would have no coherent interpretation. Each ensemble rule
+instead gets its own 95% band, calibrated on the rule's own validation
+forecast exactly as each model's band is (see
+[`supported_models.md`](supported_models.md#uncertainty-bands)), and added to
+`EnsembleResult.combined` by `HorizonForecaster`.
