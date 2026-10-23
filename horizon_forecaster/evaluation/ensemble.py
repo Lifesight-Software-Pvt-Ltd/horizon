@@ -42,13 +42,12 @@ what allowed the pre-1.0 library to weight an ensemble using the very
 numbers it then reported.
 
 Design constraint carried over from models/base.py's BaseModel.predict()
-contract: this module operates on the "yhat" column ONLY. Uncertainty
-bounds (yhat_lower/yhat_upper) are never combined -- averaging
-confidence/credible intervals across statistically different model
-types (Prophet's trend simulation vs. CatBoost's point estimate vs.
-PyMC's posterior) has no coherent interpretation. Per-model bounds
-remain available on each model's own EvaluationResult/ForecastResult for
-individual-model plots/CSVs.
+contract: this module operates on the "yhat" column ONLY. Bounds
+(yhat_lower/yhat_upper) are never combined -- averaging intervals across
+models has no coherent interpretation. An ensemble's band is instead
+calibrated by HorizonForecaster on the ensemble's own validation errors,
+exactly as each model's is (evaluation/bands.py), and added to `combined`
+afterwards.
 
 KNOWN LIMITATION (confirmed via direct testing, not theoretical): a
 combined ensemble is NOT guaranteed to beat the single best individual
@@ -74,6 +73,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from horizon_forecaster.evaluation.bands import BandCalibration
 from horizon_forecaster.evaluation.metrics import MapeResult, mape, wape
 from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejectionError
 
@@ -110,7 +110,9 @@ class EnsembleResult:
     Attributes:
         combined: DataFrame with columns ["ds", "yhat"] -- the combined
             prediction, a genuinely new series (not any single model's own
-            yhat). None when no member was available to combine.
+            yhat) -- plus its calibrated 95% band "yhat_lower"/"yhat_upper"
+            when HorizonForecaster built it (see `band`). None when no
+            member was available to combine.
         method: the combination rule that was REQUESTED ("trimmed",
             "inverse_mape" or "equal").
         rule_applied: the rule that actually ran. Usually equal to
@@ -150,6 +152,9 @@ class EnsembleResult:
         wape: the ensemble's own WAPE on the same window, set exactly when
             `mape` is. WAPE counts every row, so it stays meaningful where
             MAPE skips zero actuals.
+        band: how the combined forecast's 95% band was calibrated, from the
+            rule's own validation forecast (evaluation/bands.py). Set by
+            HorizonForecaster; None when build_ensemble() is called directly.
     """
 
     combined: Optional[pd.DataFrame]
@@ -162,6 +167,7 @@ class EnsembleResult:
     rejected_models: Dict[str, ThresholdRejectionError] = field(default_factory=dict)
     mape: Optional[MapeResult] = None
     wape: Optional[float] = None
+    band: Optional[BandCalibration] = None
 
 
 def as_ensemble_dict(

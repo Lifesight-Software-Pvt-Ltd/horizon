@@ -36,11 +36,12 @@ Design choices, all deliberate:
   registered model charts correctly with no change here. The ensemble
   is the one fixed style -- a red dashed line
   -- so it always stands out from the individual models.
-- Uncertainty bounds (yhat_lower/yhat_upper) are drawn as a shaded band
-  only for the models that actually provide them (Prophet, SARIMAX and
-  Bayesian PyMC do; CatBoost and NeuralProphet do not). The ensemble
-  never has bounds, by design (see evaluation/ensemble.py) -- it is
-  always a single line.
+- Every model and ensemble rule carries a calibrated 95% band
+  (yhat_lower/yhat_upper, see evaluation/bands.py), drawn shaded. The
+  overlay charts (plot_evaluation, plot_forecast) shade only the
+  ensemble's band, or the one model's when a single model is drawn
+  without an ensemble: five overlapping bands would hide the lines. The
+  per-model charts shade each model's own band.
 """
 
 from __future__ import annotations
@@ -94,11 +95,16 @@ def _finalize(ax: "Axes", title: str) -> "Axes":
     return ax
 
 
-def _draw_bounds(ax: "Axes", df: "pd.DataFrame", color) -> None:
-    """Shade yhat_lower..yhat_upper if the model produced them."""
+def _draw_bounds(ax: "Axes", df: "pd.DataFrame", color, label: Optional[str] = None) -> None:
+    """Shade the 95% band yhat_lower..yhat_upper when the frame has one."""
     if "yhat_lower" in df.columns and "yhat_upper" in df.columns:
         ax.fill_between(
-            df["ds"], df["yhat_lower"], df["yhat_upper"], alpha=_BOUND_ALPHA, color=color
+            df["ds"],
+            df["yhat_lower"],
+            df["yhat_upper"],
+            alpha=_BOUND_ALPHA,
+            color=color,
+            label=label,
         )
 
 
@@ -239,9 +245,10 @@ def plot_evaluation(
 
     Each chart draws the real actual series once (it is identical across
     models -- same held-out split), then one line per model with its MAPE
-    and WAPE in the legend label, plus a shaded uncertainty band for any model that
-    has one, and finally that chart's own ensemble overlaid as a red
-    dashed line with its MAPE and WAPE where available. Asking for three rules
+    and WAPE in the legend label, and finally that chart's own ensemble
+    overlaid as a red dashed line with its MAPE and WAPE where available,
+    with the ensemble's 95% band shaded (a single model drawn without an
+    ensemble gets its own band instead). Asking for three rules
     therefore gives three charts of the same five models, each against a
     different combination -- which is what makes the rules comparable
     against the actuals rather than only against each other.
@@ -302,9 +309,11 @@ def plot_evaluation(
                 label=f"{name} predicted ({scores})",
                 marker="o",
             )
-            _draw_bounds(current, preds, line.get_color())
+            if result is None and len(evaluation_results) == 1:
+                _draw_bounds(current, preds, line.get_color(), f"{name} 95% band")
 
         if result is not None and result.combined is not None:
+            _draw_bounds(current, result.combined, _ENSEMBLE_COLOR, "Ensemble 95% band")
             mape_label = (
                 f" ({_scores(result.mape, getattr(result, 'wape', None))})"
                 if result.mape is not None
@@ -353,7 +362,7 @@ def plot_forecast(
             ({method: EnsembleResult}), a single EnsembleResult, or None to
             draw the models alone. A forecast ensemble never carries its
             own MAPE (no future actuals exist), so no MAPE is shown in its
-            label. Where a rule was requested but none could be formed, a
+            label; its 95% band is shaded. Where a rule was requested but none could be formed, a
             visible red note flags the individual forecasts as diagnosis
             only (see plot_evaluation).
         ax: an existing Axes to draw on. Only valid when a single chart
@@ -392,9 +401,11 @@ def plot_forecast(
         for name, model_result in forecast_results.items():
             fc = model_result.forecast
             (line,) = current.plot(fc["ds"], fc["yhat"], label=f"{name} forecast")
-            _draw_bounds(current, fc, line.get_color())
+            if result is None and len(forecast_results) == 1:
+                _draw_bounds(current, fc, line.get_color(), f"{name} 95% band")
 
         if result is not None and result.combined is not None:
+            _draw_bounds(current, result.combined, _ENSEMBLE_COLOR, "Ensemble 95% band")
             current.plot(
                 result.combined["ds"],
                 result.combined["yhat"],
@@ -524,7 +535,7 @@ def plot_evaluation_per_model(
     """
     One full-size figure per model, plus one per combination rule that
     formed, each showing the held-out actuals against that single series
-    with its bounds, MAPE and WAPE.
+    with its 95% band, MAPE and WAPE.
 
     Preferred over the overlay when there are several models: each series
     gets its own readable, normal-sized plot instead of a cramped shared
@@ -565,7 +576,7 @@ def plot_evaluation_per_model(
             label=f"{name} predicted",
             marker="o",
         )
-        _draw_bounds(ax, result.test_predictions, line.get_color())
+        _draw_bounds(ax, result.test_predictions, line.get_color(), "95% band")
         _annotate_no_ensemble(ax, _no_ensemble_marker(ensembles))
         _finalize(
             ax,
@@ -583,6 +594,7 @@ def plot_evaluation_per_model(
         )
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(actual["ds"], actual["y"], label="Actual", color=_ACTUAL_COLOR, marker="o")
+        _draw_bounds(ax, result.combined, _ENSEMBLE_COLOR, "95% band")
         ax.plot(
             result.combined["ds"],
             result.combined["yhat"],
@@ -652,7 +664,7 @@ def plot_forecast_per_model(
             color=color,
             linestyle="--" if is_ensemble else "-",
         )
-        _draw_bounds(ax, fc, line.get_color())
+        _draw_bounds(ax, fc, line.get_color(), "95% band")
         if not is_ensemble:
             _annotate_no_ensemble(ax, unformed)
         _finalize(ax, f"History + {label} forecast")

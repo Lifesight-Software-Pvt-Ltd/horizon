@@ -120,18 +120,18 @@ class BaseModel(ABC):
             supports it (Prophet, SARIMAX, PyMC) MAY also include
             "yhat_lower" and "yhat_upper" columns (model-native
             uncertainty/credible intervals). Wrappers that do not
-            support this (CatBoost, NeuralProphet in v1) should simply
-            omit these columns rather than fabricating them.
+            support this (CatBoost, NeuralProphet) should simply omit
+            these columns rather than fabricating them.
 
-            IMPORTANT — uncertainty bounds are an INDIVIDUAL-MODEL-ONLY
-            concept in this library. They are surfaced in per-model
-            plots/CSVs (see plotting.py / exporters.py) but are never
-            propagated into the ensemble output: averaging confidence/
-            credible intervals across statistically different models
-            (trend-simulation vs. posterior vs. Gaussian-approximation
-            bands) has no coherent interpretation, so ensemble.py
-            operates on the "yhat" column only and ignores bounds
-            entirely, by design.
+            IMPORTANT — these model-native bounds are only what a
+            wrapper returns when used on its own. HorizonForecaster
+            discards them and gives every model and ensemble rule the
+            same calibrated 95% band, built from that forecast's own
+            validation errors (see evaluation/bands.py). The native
+            intervals meant different things across models and covered
+            too little, and averaging them for an ensemble has no
+            coherent interpretation, so ensemble.py operates on the
+            "yhat" column only.
 
         Raises:
             ModelPredictionError: if called before fit(), or if the

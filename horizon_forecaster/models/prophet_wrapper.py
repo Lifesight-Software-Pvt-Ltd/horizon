@@ -128,6 +128,10 @@ class ProphetWrapper(BaseModel):
         requires a future dataframe to predict against — a None here is
         treated as a caller error (forecaster.py failed to build it),
         not a valid "predict with no context" request.
+
+        Returns ["ds", "yhat", "yhat_lower", "yhat_upper"], or just
+        ["ds", "yhat"] when params set uncertainty_samples=0, as
+        HorizonForecaster's config does.
         """
         self._check_is_fitted()
 
@@ -177,7 +181,11 @@ class ProphetWrapper(BaseModel):
                 original_exception=e,
             )
 
-        return forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+        # With uncertainty_samples=0 (HorizonForecaster's config, which
+        # replaces every model's interval with a calibrated band) Prophet
+        # skips its interval simulation and returns no bound columns.
+        bounds = [c for c in ("yhat_lower", "yhat_upper") if c in forecast.columns]
+        return forecast[["ds", "yhat", *bounds]].copy()
 
     def save(self, path: str) -> None:
         """

@@ -39,10 +39,12 @@ from horizon_forecaster.data_adapter.catboost_adapter import CatBoostAdapter
 from horizon_forecaster.data_adapter.neuralprophet_adapter import NeuralProphetAdapter
 from horizon_forecaster.data_adapter.prophet_adapter import ProphetAdapter
 from horizon_forecaster.data_adapter.sarimax_adapter import SARIMAXAdapter
+from horizon_forecaster.evaluation.bands import BandCalibration, band, calibrate
 from horizon_forecaster.evaluation.ensemble import (
     DEFAULT_ENSEMBLE_METHOD,
     ENSEMBLE_METHODS,
     EnsembleResult,
+    build_ensemble,
     build_ensembles,
 )
 from horizon_forecaster.evaluation.metrics import (
@@ -269,6 +271,15 @@ def _check_column_roles(
         )
 
 
+# Settings that only shape a model's own interval. HorizonForecaster replaces
+# every model's interval with a calibrated band, so passing one is a mistake.
+_NATIVE_BAND_SETTINGS = {
+    "prophet": ("interval_width", "uncertainty_samples"),
+    "sarimax": ("alpha",),
+    "bayesianpymc": ("ci_lower_pct", "ci_upper_pct"),
+}
+
+
 def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
     """
     model_params must map model names to dicts of settings. An unknown model
@@ -323,6 +334,16 @@ def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
                     param_name="model_params",
                     provided_value={name: missing},
                 )
+        native = [k for k in _NATIVE_BAND_SETTINGS.get(name, ()) if k in settings]
+        if native:
+            raise InvalidConfigError(
+                f"model_params['{name}'] sets {', '.join(repr(k) for k in native)}, which only "
+                f"shaped {name}'s own interval. Horizon gives every model and ensemble a 95% "
+                f"band calibrated on its validation errors instead (docs/supported_models.md, "
+                f"'Uncertainty bands'), so the setting would have no effect: remove it.",
+                param_name="model_params",
+                provided_value={name: native},
+            )
         accepted = MODEL_REGISTRY[name]["wrapper"].accepted_params
         if accepted is None:
             continue
@@ -382,6 +403,10 @@ class _Selection:
     validation_mape: MapeResult
     grid_search_summary: Optional[List[dict]] = None
     validation_wape: float = float("nan")
+    # The winning settings' forecast over the validation window; the band
+    # is calibrated from its errors (see evaluation/bands.py). None when
+    # the model could not be scored on validation.
+    validation_predictions: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -419,9 +444,9 @@ class EvaluationResult:
         n_train: rows used to fit during selection.
         n_validation: rows in the validation window.
         n_test: rows in the test window.
-        test_predictions: DataFrame with columns ["ds", "y", "yhat"]
-            (plus "yhat_lower"/"yhat_upper" if available), over the test
-            window.
+        test_predictions: DataFrame with columns ["ds", "y", "yhat"],
+            plus the calibrated 95% band "yhat_lower"/"yhat_upper" (see
+            `band`), over the test window.
         fitted_model: the wrapper instance fitted on TRAIN + VALIDATION
             using the winning hyperparameters -- i.e. the model that
             actually produced `test_predictions`. Deliberately not the
@@ -444,6 +469,9 @@ class EvaluationResult:
             training window, so the first configured candidate was used
             as an unselected fallback. Do not read `is None` as "an
             override was given"; check `model_params` for that.
+        band: how the 95% band in `test_predictions` was calibrated
+            (evaluation/bands.py). Its `width` is None, and the band
+            columns are absent, when there were too few validation errors.
     """
 
     model_name: str
@@ -457,6 +485,7 @@ class EvaluationResult:
     grid_search_summary: Optional[List[dict]] = None
     wape: float = float("nan")
     validation_wape: float = float("nan")
+    band: Optional[BandCalibration] = None
 
 
 @dataclass
@@ -467,8 +496,8 @@ class ForecastResult:
 
     Attributes:
         model_name: which model produced this forecast.
-        forecast: DataFrame with columns ["ds", "yhat"] (plus
-            "yhat_lower"/"yhat_upper" if available).
+        forecast: DataFrame with columns ["ds", "yhat"], plus the calibrated
+            95% band "yhat_lower"/"yhat_upper" (see `band`).
         horizon: the number of periods forecasted.
         used_default_future_strategy: True if ANY future independent-variable
             values were auto-generated (via future_exog_strategy) rather than
@@ -476,6 +505,10 @@ class ForecastResult:
         future_exog_used: the resolved future independent values actually fed
             to the models (supplied columns + generated columns), with a "ds"
             column, for inspection. None when there are no independent columns.
+        band: how the 95% band in `forecast` was calibrated (the same
+            calibration as the model's evaluate() band); its `width` is None,
+            and the band columns are absent, when there were too few
+            validation errors.
     """
 
     model_name: str
@@ -483,6 +516,7 @@ class ForecastResult:
     horizon: int
     used_default_future_strategy: bool
     future_exog_used: Optional[pd.DataFrame] = None
+    band: Optional[BandCalibration] = None
 
 
 class HorizonForecaster:
@@ -629,6 +663,16 @@ class HorizonForecaster:
     "wape"). Before 1.0 there was one held-out window serving both roles,
     which made every reported MAPE a selection score and therefore
     optimistic.
+
+    One deliberate exception: the data checks that decide the run as a
+    whole -- MAPE or WAPE (see selection_metric), leaving SARIMAX out for
+    a negative or zero-heavy target (see skipped_models), and dropping a
+    declared driver that never changes in the history (see
+    dropped_zero_variance_columns) -- read every row, test included, so
+    that evaluate() and forecast() always make the same decision and the
+    results stay uniform and clear. They read properties of the data,
+    never a model's score, so they cannot make a reported score
+    optimistic. See docs/design_notes.md, "Three windows, not two".
 
     Ensemble behavior: after evaluate()/forecast() build their per-model
     dict as above, each call additionally populates
@@ -889,6 +933,7 @@ class HorizonForecaster:
         # from the full EvaluationResult, because forecast() needs only the
         # former -- see _Selection's docstring.
         self._selection_cache: Dict[str, _Selection] = {}
+        self._band_cache: Dict[str, BandCalibration] = {}
         self._evaluation_cache: Dict[str, EvaluationResult] = {}
         self._split_cache: Dict[str, tuple] = {}
         self._refit_cache: Dict[str, tuple] = {}
@@ -1888,7 +1933,7 @@ class HorizonForecaster:
             return float("inf") if val != val else val
 
         candidates.sort(key=sort_key)
-        best_params, _best_model, _best_forecast_df, best_mape, best_wape = candidates[0]
+        best_params, _best_model, best_forecast_df, best_mape, best_wape = candidates[0]
 
         # The candidates' own fitted models are deliberately discarded. Each
         # was fitted on TRAIN only, and every window that gets reported is
@@ -1905,6 +1950,7 @@ class HorizonForecaster:
             validation_mape=best_mape,
             grid_search_summary=grid_search_summary,
             validation_wape=best_wape,
+            validation_predictions=best_forecast_df["yhat"].to_numpy(dtype=float),
         )
 
     def _select(self, model_name: str) -> _Selection:
@@ -1944,6 +1990,7 @@ class HorizonForecaster:
                     y_validation,
                 )
                 validation_wape = wape(y_validation, _forecast_df["yhat"].values)
+                validation_predictions = _forecast_df["yhat"].to_numpy(dtype=float)
             except HorizonForecasterError as e:
                 # With explicit params there is nothing to SELECT -- this fit
                 # exists only to produce a validation score. If it fails (a
@@ -1968,11 +2015,13 @@ class HorizonForecaster:
                     value=float("nan"), excluded_zero_actual_count=0, total_count=0
                 )
                 validation_wape = float("nan")
+                validation_predictions = None
             selection = _Selection(
                 params=explicit_params,
                 validation_mape=validation_mape,
                 grid_search_summary=None,
                 validation_wape=validation_wape,
+                validation_predictions=validation_predictions,
             )
 
         self._selection_cache[model_name] = selection
@@ -1996,6 +2045,8 @@ class HorizonForecaster:
             adapted_test_features,
             y_test,
         )
+        calibration = self._band_calibration(model_name)
+        forecast_df = self._with_band(forecast_df, calibration)
         test_predictions = self._build_test_predictions(adapted_test_features, y_test, forecast_df)
         test_wape = wape(y_test, forecast_df["yhat"].values)
 
@@ -2011,6 +2062,7 @@ class HorizonForecaster:
             grid_search_summary=selection.grid_search_summary,
             wape=test_wape,
             validation_wape=selection.validation_wape,
+            band=calibration,
         )
         self._evaluation_cache[model_name] = result
         return result
@@ -2090,7 +2142,9 @@ class HorizonForecaster:
             actuals=first_result.test_predictions[["ds", "y"]],
             metric=self._metric_label,
         )
+        self._add_ensemble_bands(self.evaluate_ensemble, list(results))
         self._warn_about_lost_models("evaluate", results, errors, self.evaluate_ensemble)
+        self._warn_about_bands("evaluate", results, self.evaluate_ensemble)
 
         self.evaluation_results = results
         self.naive_baseline = self._seasonal_naive_baseline()
@@ -2161,14 +2215,164 @@ class HorizonForecaster:
             horizon=horizon, future_exog=future_exog
         )
         _check_finite_predictions(model_name, forecast_df)
+        calibration = self._band_calibration(model_name)
 
         return ForecastResult(
             model_name=self._forecast_models[model_name].model_name,
-            forecast=forecast_df,
+            forecast=self._with_band(forecast_df, calibration),
             horizon=horizon,
             used_default_future_strategy=used_default_strategy,
             future_exog_used=future_exog_used,
+            band=calibration,
         )
+
+    # ---------- calibrated 95% bands (see evaluation/bands.py) ----------
+
+    def _validation_rows(self) -> pd.DataFrame:
+        return self.raw_df.iloc[self._n_train : self._n_train + self._n_validation]
+
+    def _validation_zero_days(self) -> np.ndarray:
+        """
+        Unexpected zeros in the validation window -- a 0 where the series
+        normally has a value, the same rule SARIMAX uses -- judged on train +
+        validation. They are left out of every band's calibration.
+        """
+        end = self._n_train + self._n_validation
+        history = self.raw_df.iloc[:end]
+        mask = unexpected_zero_mask(
+            history[self.target_column].to_numpy(dtype=float),
+            history[self.date_column],
+            self.frequency,
+        )
+        return mask[self._n_train : end]
+
+    def _band_calibration(self, model_name: str) -> BandCalibration:
+        """One model's band calibration, from its selection's validation forecast. Cached."""
+        if model_name not in self._band_cache:
+            predictions = self._selection_cache[model_name].validation_predictions
+            self._band_cache[model_name] = self._calibrate(predictions)
+        return self._band_cache[model_name]
+
+    def _calibrate(self, validation_predictions) -> BandCalibration:
+        if validation_predictions is None:
+            return BandCalibration(
+                width=None,
+                n_errors=0,
+                n_zero_days_left_out=0,
+                validation_length=self._n_validation,
+                reason="no validation forecast to calibrate from",
+            )
+        return calibrate(
+            self._validation_rows()[self.target_column].to_numpy(dtype=float),
+            validation_predictions,
+            self._validation_zero_days(),
+        )
+
+    def _with_band(self, frame: pd.DataFrame, calibration: BandCalibration) -> pd.DataFrame:
+        """
+        Replace any model-native bounds on `frame` with the calibrated band.
+        Row i of `frame` is i + 1 periods after the last fitted date. The
+        lower edge is floored at 0 when the target is never negative.
+        """
+        out = frame.drop(columns=[c for c in ("yhat_lower", "yhat_upper") if c in frame.columns])
+        floor = bool((self.raw_df[self.target_column] >= 0).all())
+        edges = band(out["yhat"].to_numpy(dtype=float), calibration, floor)
+        if edges is not None:
+            out["yhat_lower"], out["yhat_upper"] = edges
+        return out
+
+    def _add_ensemble_bands(self, ensembles: Dict[str, EnsembleResult], models) -> None:
+        """
+        Give each ensemble rule its own band, calibrated on the rule's own
+        validation forecast: the members' validation forecasts combined by
+        the same rule, scores and threshold, so the members match the
+        combination it surrounds. The members' bands are never averaged.
+        """
+        dates = self._validation_rows()[self.date_column].reset_index(drop=True)
+        available = {
+            m: pd.DataFrame({"ds": dates, "yhat": self._selection_cache[m].validation_predictions})
+            for m in models
+            if self._selection_cache[m].validation_predictions is not None
+        }
+        scores = {m: self._selection_score(self._selection_cache[m]) for m in available}
+        for rule, result in ensembles.items():
+            if result.combined is None:
+                continue
+            calibration = None
+            if all(m in available for m in result.members):
+                validation = build_ensemble(
+                    per_model_selection_mape=scores,
+                    per_model_predictions=available,
+                    mape_threshold=self.mape_threshold,
+                    method=rule,
+                )
+                if validation.combined is not None and list(validation.members) == list(
+                    result.members
+                ):
+                    combined = validation.combined.sort_values("ds")
+                    calibration = self._calibrate(combined["yhat"].to_numpy(dtype=float))
+            if calibration is None:
+                calibration = BandCalibration(
+                    width=None,
+                    n_errors=0,
+                    n_zero_days_left_out=0,
+                    validation_length=self._n_validation,
+                    reason="a member has no validation forecast to calibrate from",
+                )
+            result.band = calibration
+            result.combined = self._with_band(result.combined, calibration)
+
+    def _warn_about_bands(self, stage: str, results, ensembles, horizon: int = 0) -> None:
+        """
+        One warning per call for each band issue: outputs with no band (and
+        why), unexpected zero days left out of the calibration, and, for
+        forecast(), a horizon running past the validation window.
+        """
+        calibrations = {name: r.band for name, r in results.items() if r.band is not None}
+        calibrations.update(
+            {
+                f"the '{rule}' ensemble": e.band
+                for rule, e in (ensembles or {}).items()
+                if e.combined is not None and e.band is not None
+            }
+        )
+        missing: Dict[str, List[str]] = {}
+        for name, c in calibrations.items():
+            if c.width is None:
+                missing.setdefault(c.reason, []).append(name)
+        if missing:
+            warnings.warn(
+                "No 95% band for "
+                + "; ".join(f"{', '.join(names)} ({why})" for why, names in missing.items())
+                + ". A band is calibrated from at least 19 errors on the validation window; "
+                "a longer validation_size gives every output one.",
+                stacklevel=3,
+            )
+        zero_days = max((c.n_zero_days_left_out for c in calibrations.values()), default=0)
+        if zero_days:
+            period = "day" if self.frequency == "daily" else "week"
+            warnings.warn(
+                f"{zero_days} {period}(s) in the validation window are 0 where the series "
+                f"normally has a value, and were left out of the 95% bands' calibration, so a "
+                f"few outages do not widen the band for every other {period}. The bands "
+                f"therefore describe ordinary {period}s and do not cover such outages.",
+                stacklevel=3,
+            )
+        if stage == "forecast" and horizon > self._n_validation:
+            unit = "days" if self.frequency == "daily" else "weeks"
+            tested = (
+                "about 82-88% of actuals from 3 to 16 months ahead on daily data"
+                if self.frequency == "daily"
+                else "about 57-61% of actuals from 9 months to 2 years ahead on weekly data"
+            )
+            warnings.warn(
+                f"The forecast runs {horizon} {unit} ahead, past the {self._n_validation} "
+                f"{unit} of validation errors the 95% bands are calibrated on. After "
+                f"{self._n_validation} {unit} each band widens with the square root of the "
+                f"distance ahead; in testing it then covered {tested}. Treat the far end of "
+                f"the band as a rough range rather than a 95% guarantee.",
+                stacklevel=3,
+            )
 
     def _warn_about_bayesianpymc(self, stage: str, model) -> None:
         """
@@ -2190,6 +2394,11 @@ class HorizonForecaster:
                 ("validation fit", span_days(dates.iloc[: self._n_train])),
                 ("test fit", span_days(dates.iloc[: self._n_train + self._n_validation])),
             ]
+            # A training window below the model's row floor means there was
+            # no validation fit at all (the floor warning already says so).
+            floor = self._configs["bayesianpymc"]["wrapper_config"]["min_rows_required"]
+            if self._n_train < floor:
+                fits = fits[1:]
         else:
             fits = [("forecast", span_days(dates))]
         short = [(name, days) for name, days in fits if days < ANNUAL_MIN_SPAN_DAYS]
@@ -2399,7 +2608,9 @@ class HorizonForecaster:
                 f"result. Supply real planned values if you have them (you can supply "
                 f"just some columns; the rest are filled), inspect what was assumed via "
                 f"forecaster.future_exog_used, and treat this output as a scenario rather "
-                f"than a prediction.",
+                f"than a prediction. The 95% bands assume these values are right: in testing, "
+                f"band coverage fell by about 9 points when drivers were generated rather "
+                f"than known.",
                 stacklevel=2,
             )
 
@@ -2467,7 +2678,9 @@ class HorizonForecaster:
             actuals=None,
             metric=self._metric_label,
         )
+        self._add_ensemble_bands(self.forecast_ensemble, list(selection_mape))
         self._warn_about_lost_models("forecast", results, errors, self.forecast_ensemble)
+        self._warn_about_bands("forecast", results, self.forecast_ensemble, horizon)
 
         return results
 

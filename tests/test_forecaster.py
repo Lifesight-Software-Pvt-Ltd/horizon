@@ -1573,7 +1573,9 @@ def test_evaluate_populates_ensemble_with_default_permissive_threshold():
     assert ensemble.degraded is True
     assert ensemble.weights is None
     assert ensemble.mape is not None  # actuals are available in the evaluate() context
-    assert set(ensemble.combined.columns) == {"ds", "yhat"}
+    # The ensemble's own calibrated band, never the members' bands averaged.
+    assert set(ensemble.combined.columns) <= {"ds", "yhat", "yhat_lower", "yhat_upper"}
+    assert ("yhat_lower" in ensemble.combined) == (ensemble.band.width is not None)
 
 
 def test_evaluate_ensemble_uses_configured_ensemble_method():
@@ -1663,7 +1665,8 @@ def test_forecast_screens_on_validation_mape_without_running_a_full_evaluate():
     assert forecaster._selection_cache  # populated by selection, not by evaluate()
     assert forecaster.evaluate_ensemble is None  # evaluate() was never run
     assert forecaster.forecast_ensemble is not None
-    assert set(forecaster.forecast_ensemble["trimmed"].combined.columns) == {"ds", "yhat"}
+    combined = forecaster.forecast_ensemble["trimmed"].combined
+    assert {"ds", "yhat"} <= set(combined.columns)
     assert len(forecaster.forecast_ensemble["trimmed"].combined) == 5
     assert forecaster.forecast_ensemble["trimmed"].mape is None  # no actuals exist for the future
 

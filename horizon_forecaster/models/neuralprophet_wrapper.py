@@ -52,10 +52,10 @@ reference implementation this was ported from:
   computed by the orchestrator, and NeuralProphet's own docs note that
   collecting metrics slows training.
 
-- **No uncertainty bounds in v1**, per models/base.py's contract note.
-  NeuralProphet can produce them via `quantiles=[...]`, which is a natural
-  follow-up now that the plotting/export layers handle bounds, but it adds
-  output heads and training cost.
+- **No native uncertainty bounds.** NeuralProphet can produce them via
+  `quantiles=[...]`, but that adds output heads and training cost, and
+  HorizonForecaster gives every model the same calibrated 95% band from
+  its validation errors anyway (evaluation/bands.py).
 """
 
 import logging
