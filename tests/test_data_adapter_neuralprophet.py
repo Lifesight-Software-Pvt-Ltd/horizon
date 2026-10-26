@@ -92,8 +92,8 @@ def test_collect_metrics_is_disabled_for_every_frequency():
     OmegaConf rejects ConfigTrain's `loss_func: Union[str, _Loss, Callable]`
     and fit() dies before training.
 
-    Asserted per frequency because the first attempt at this fix landed in
-    the daily block only -- and weekly was the frequency actually failing.
+    Asserted per frequency, since a setting present in one frequency's
+    block says nothing about the other's.
     """
     import yaml
     from pathlib import Path

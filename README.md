@@ -57,8 +57,8 @@ Every model and every ensemble rule comes with a **95% band**
 forecast's own validation errors (split conformal prediction), and widening
 past the validation window. On 80 test windows it covered 87–95% of actuals
 over the first four weeks, where the models' own intervals covered 76–95%,
-and it gives CatBoost, NeuralProphet and the ensemble a band they did not
-have. See [`docs/supported_models.md`](docs/supported_models.md#uncertainty-bands)
+and it covers CatBoost, NeuralProphet and the ensembles, which have no
+interval of their own. See [`docs/supported_models.md`](docs/supported_models.md#uncertainty-bands)
 for how it is built and where it holds, and for full per-model behaviour.
 
 > **Note on speed:** Bayesian PyMC runs a full MCMC sample per grid candidate
@@ -231,11 +231,13 @@ run. See [`docs/ensemble_methods.md`](docs/ensemble_methods.md).
 `export_forecast()` writes, into one folder:
 
 - **CSVs** — one `final_ensemble_<method>` per combination rule, plus
-  `final_best_model`, `per_model`, `rejected_models` (per model *and* method), and
-  `model_summary` (validation and test MAPE and WAPE, method, rule applied,
-  weight, status, why each model was or was not exported as the best single
-  model, and whether it beats the seasonal-naive baseline, which has a row of
-  its own), plus `error_correlation` when `forecaster=` is passed. The best
+  `final_best_model` and `per_model`, each forecast with its calibrated 95%
+  band; `rejected_models` (per model *and* method); and `model_summary`
+  (validation and test MAPE and WAPE, method, rule applied, weight, status, why
+  each model was or was not exported as the best single model, whether it beats
+  the seasonal-naive baseline, which has a row of its own, and how often its
+  95% band held the test actuals), plus `error_correlation` when `forecaster=`
+  is passed. The best
   single model is the lowest validation score among the models within
   `mape_threshold` on both validation and test.
 - **Plots** (unless disabled) — one overlay per combination rule (every
@@ -284,13 +286,13 @@ Known gaps, deliberately **not** in 1.0 and all candidates for future work:
   window, so it reflects one particular stretch of history rather than an
   average over several origins.
 - **Benchmark-relative metrics** (RelMAE / MASE). The seasonal-naive baseline
-  is now reported and warned about, but nothing is selected or weighted on a
+  is reported and warned about, but nothing is selected or weighted on a
   score relative to it.
 - **Family de-duplication.** Prophet and NeuralProphet are close relatives, so a
   combination containing both is less diverse than its member count suggests;
   nothing currently accounts for that.
 - **Acting on error diversity.** The correlation of the models' test errors is
-  now reported, but the ensemble does not use it to choose or weight members.
+  reported, but the ensemble does not use it to choose or weight members.
 
 The reasoning behind the design — the contracts, the per-model decisions, and
 the failure modes that produced them — is in
@@ -312,7 +314,7 @@ the failure modes that produced them — is in
 - [`docs/future_exog.md`](docs/future_exog.md) — future-driver strategies
 - [`docs/design_notes.md`](docs/design_notes.md) — why the library is built this way
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute, and what is in scope
-- [`CHANGELOG.md`](CHANGELOG.md) — full change history
+- [`CHANGELOG.md`](CHANGELOG.md) — what each release contains
 
 ---
 

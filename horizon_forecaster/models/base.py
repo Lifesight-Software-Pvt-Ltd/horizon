@@ -128,8 +128,8 @@ class BaseModel(ABC):
             discards them and gives every model and ensemble rule the
             same calibrated 95% band, built from that forecast's own
             validation errors (see evaluation/bands.py). The native
-            intervals meant different things across models and covered
-            too little, and averaging them for an ensemble has no
+            intervals mean different things across models and cover too
+            little, and averaging them for an ensemble has no
             coherent interpretation, so ensemble.py operates on the
             "yhat" column only.
 

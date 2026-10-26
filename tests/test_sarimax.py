@@ -78,7 +78,7 @@ def test_predict_produces_reasonable_mape(fitted):
     assert mape(y_test, out["yhat"].to_numpy()).value < 30
 
 
-# ---------- annual Fourier (now the wrapper's job) ----------
+# ---------- annual Fourier (the wrapper's job) ----------
 
 
 def test_fourier_order_zero_adds_no_exog_columns():
@@ -252,10 +252,10 @@ def test_sarimax_uses_the_standard_grid_search_like_other_models():
         models=["sarimax"],
         mape_threshold=100,
     )
-    assert f._use_grid_search["sarimax"] is True  # no longer self-tuning
+    assert f._use_grid_search["sarimax"] is True  # the shared grid, no private search
 
     result = f.evaluate()["sarimax"]
-    # SARIMAX now reports its grid like every other model
+    # SARIMAX reports its grid like every other model
     assert result.grid_search_summary is not None
     assert len(result.grid_search_summary) >= 1
     assert "yhat_lower" in result.test_predictions.columns
@@ -293,7 +293,7 @@ def test_no_trend_term_once_anything_is_differenced(order, seasonal_order):
 
 def test_undifferenced_fit_keeps_tracking_the_trend(monkeypatch):
     """
-    End-to-end regression for the bug the trend term fixes.
+    End-to-end check of what the trend term prevents.
 
     Forces the d=0 branch on a clearly rising series. Without a trend term
     statsmodels fits a ZERO-MEAN process to log1p data centred near 7, the
@@ -370,11 +370,11 @@ def test_unexpected_zero_mask_flags_every_zero_week_when_the_median_is_above_zer
     assert not unexpected_zero_mask(np.zeros(20), ds, "weekly").any()
 
 
-def test_a_few_unexpected_zero_days_no_longer_wreck_the_fit():
+def test_a_few_unexpected_zero_days_do_not_wreck_the_fit():
     """
-    Two zero days in otherwise smooth data: SARIMAX used to fit them in log
-    space as outliers of ~5 units, which inflated its variance and, through
-    the bias correction, the whole forecast. They are now left out of the fit.
+    Two zero days in otherwise smooth data: fitted in log space they are
+    outliers of ~5 units, which inflate SARIMAX's variance and, through the
+    bias correction, the whole forecast. So they are left out of the fit.
     """
     train, future, y_test = make_adapted(n=120, with_exog=False)
     clean = SARIMAXWrapper("daily", dict(BASE), min_rows_required=35, random_seed=42).fit(train)

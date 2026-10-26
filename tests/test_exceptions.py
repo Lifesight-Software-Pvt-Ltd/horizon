@@ -111,8 +111,8 @@ def test_unsupported_frequency_error_carries_provided_value():
 
 
 def test_invalid_config_error_is_also_a_value_error():
-    # The metrics, ensemble builders and plotting helpers raised plain
-    # ValueErrors in 1.0.0; code catching ValueError around them still works.
+    # Code catching ValueError around the metrics, ensemble builders and
+    # plotting helpers catches InvalidConfigError too.
     err = InvalidConfigError("bad argument", param_name="x")
     assert isinstance(err, ValueError)
     assert isinstance(err, HorizonForecasterError)

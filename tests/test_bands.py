@@ -238,6 +238,33 @@ def test_too_few_validation_errors_means_no_band_and_a_warning():
     assert "yhat_lower" not in f.forecast_ensemble["trimmed"].combined.columns
     hit = [m for m in messages if m.startswith("No 95% band for")]
     assert hit and "14 validation errors, fewer than the 19 a 95% band needs" in hit[0]
+    assert "a longer validation_size gives such an output one" in hit[0]
+
+
+def test_a_failed_validation_fit_means_no_band_without_the_validation_size_advice():
+    # 60 days: 30 train, 20 validation, 10 test. SARIMAX needs 35 rows, so its
+    # validation fit fails; a longer validation window would only shrink training.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        f = HorizonForecaster(
+            _series(n=60),
+            "date",
+            "sales",
+            "daily",
+            models=["sarimax", "catboost"],
+            model_params={"sarimax": _PARAMS["sarimax"], "catboost": _PARAMS["catboost"]},
+            validation_size=20,
+            test_size=10,
+            mape_threshold=None,
+        )
+        results = f.evaluate()
+    assert results["sarimax"].band.width is None
+    assert results["catboost"].band.width is not None
+    hit = [str(w.message) for w in caught if str(w.message).startswith("No 95% band for")]
+    assert len(hit) == 1
+    assert "sarimax (no validation forecast to calibrate from)" in hit[0]
+    assert "could not be scored on the validation window" in hit[0]
+    assert "longer validation_size" not in hit[0]
 
 
 def test_an_ensemble_member_without_a_validation_forecast_leaves_the_ensemble_without_a_band(run):

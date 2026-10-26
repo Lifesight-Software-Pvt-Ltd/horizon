@@ -12,10 +12,10 @@
 #                        chosen on a window that exists only for choosing;
 #                        the test window is scored once, afterwards, by the
 #                        winner refit on train+validation, and no selection
-#                        path is ever allowed to read it. Before 1.0 there
-#                        was a single held-out window doing both jobs,
-#                        which made every reported MAPE a selection score
-#                        and therefore optimistic.
+#                        path is ever allowed to read it. A single
+#                        held-out window doing both jobs would make every
+#                        reported MAPE a selection score and therefore
+#                        optimistic.
 #
 #                        Grid SIZE and composition are per-model, not a
 #                        shared convention: prophet, sarimax and
@@ -253,11 +253,8 @@ catboost:
         depth: 3
         l2_leaf_reg: 8
     wrapper_config:
-      # Same floor as Prophet's daily config. (Previously this floor
-      # applied to rows LEFT AFTER CatBoostAdapter's lag-warmup drop --
-      # that mechanism no longer exists since the adapter's redesign
-      # away from lag/rolling features, so this is now simply a raw
-      # training-row-count floor, identical in meaning to Prophet's.)
+      # Same floor as Prophet's daily config: a raw training-row count,
+      # identical in meaning to Prophet's.
       min_rows_required: 14
       random_seed: 42
 
@@ -359,23 +356,14 @@ catboost:
 # SARIMAX seasonal order entirely (a real s=52 is prohibitively slow) and
 # leans on the Fourier terms.
 #
-# SARIMAX originally self-tuned inside its wrapper (ADF for d, then an
-# internal search over orders on a validation tail it carved out of train
-# itself) and carried no hyperparameter_grid. That was more statistically
-# honest at the time -- it never saw the reported window -- but it made
-# SARIMAX the only model selected differently: pre-1.0, prophet/catboost/
-# neuralprophet all picked candidates by scoring on the very window that
-# was then reported, so their MAPE was optimistic while SARIMAX's was not.
-# Comparing those numbers, and deriving inverse-MAPE ensemble weights from
-# them, penalised SARIMAX for being more rigorous. One mechanism for every
-# model is the more useful property, so it now uses this grid like
-# everybody else.
-#
-# Since 1.0 the asymmetry is gone for a second reason: EVERY model,
-# SARIMAX included, is now selected on a dedicated validation window and
-# reported on a test window no selection path may read (see this file's
-# header). So sharing the orchestrator's grid no longer costs SARIMAX the
-# rigour its private search was protecting.
+# SARIMAX uses this grid like every other model. A private search inside
+# the wrapper (ADF for d, then a search over orders on a validation tail
+# carved out of train) was considered and rejected: it would make SARIMAX
+# the only model selected differently, and one mechanism for every model
+# keeps the scores and the inverse-MAPE weights comparable. It would also
+# protect nothing, since every model is selected on a dedicated validation
+# window and reported on a test window no selection path may read (see
+# this file's header).
 #
 # The grid varies (p, q), the seasonal (P, Q), and fourier_order_annual.
 # `d` is NOT in the grid: it stays ADF-derived inside the wrapper, since it
@@ -431,8 +419,8 @@ sarimax:
 # ---------------------------------------------------------------------------
 # NeuralProphet (torch / PyTorch Lightning).
 #
-# This uses the standard forecaster-level grid search, like every other model
-# (sarimax included since 1.0). The reference implementation this was ported
+# This uses the standard forecaster-level grid search, like every other
+# model. The reference implementation this was ported
 # from already selected by held-out MAPE, which is exactly what
 # hyperparameter_grid does, so no self-tuning wrapper is needed.
 #
@@ -450,18 +438,18 @@ sarimax:
 # short history has produced unusable forecasts twice in this project, once
 # for Prophet and once for SARIMAX's annual Fourier terms.
 #
-# Grid + trend widened after synthetic-sweep testing showed NeuralProphet was
-# the consistent outlier -- badly on a mid-series level shift (18.7% vs ~2%)
-# and on strong seasonality -- while the structural models fit those clean
-# signals near-perfectly. The cause was under-fitting: too few epochs (a
-# neural model trained by SGD needs more than the old 50-100 to converge) and too
-# little trend flexibility to track a level shift. So the grid now spans a
-# middle learning rate (0.03) and higher epochs (150/300), and the trend gets
-# more changepoints (n_changepoints), while changepoints_range stays at its
-# 0.8 default -- see the
-# inline note below for the 0.9 experiment that regressed and was reverted. The
-# grid selects the best by validation score, so a setting
-# that overfits a given dataset simply won't be chosen. n_lags stays 0 (the
+# The grid and trend settings come from a synthetic sweep in which a
+# narrower setup (50-100 epochs, default changepoints) made NeuralProphet the
+# consistent outlier -- badly on a mid-series level shift (18.7% vs ~2%) and
+# on strong seasonality -- while the structural models fit those clean
+# signals near-perfectly. The cause was under-fitting: a neural model trained
+# by SGD needs more epochs to converge, and the trend needs flexibility to
+# track a level shift. So the grid spans a middle learning rate (0.03) and
+# higher epochs (150/300), and the trend gets more changepoints
+# (n_changepoints), while changepoints_range stays at its 0.8 default -- see
+# the inline note below for why 0.9 was rejected. The grid selects the best
+# by validation score, so a setting that overfits a given dataset simply
+# won't be chosen. n_lags stays 0 (the
 # fit-once/predict-any-horizon comparability constraint -- see the wrapper).
 neuralprophet:
   daily:

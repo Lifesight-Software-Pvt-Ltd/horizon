@@ -152,11 +152,11 @@ def test_prophet_adapter_transform_future_with_no_independent_columns_declared()
 # =====================================================================
 # CatBoostAdapter
 #
-# Redesigned (real accuracy finding): lag/rolling-window features are
-# gone entirely, replaced with a trend index (time_idx) + cyclical
-# (sin/cos) seasonality — see catboost_adapter.py's module docstring for
-# the full story (a frozen lag/rolling snapshot produced 60-90% MAPE on
-# a real dataset's sudden demand-shift period; a trend+cyclical feature
+# A trend index (time_idx) + cyclical (sin/cos) seasonality, with no
+# lag/rolling-window features (a real accuracy finding) — see
+# catboost_adapter.py's module docstring for the full story (a frozen
+# lag/rolling snapshot produced 60-90% MAPE on a real dataset's sudden
+# demand-shift period; a trend+cyclical feature
 # set doesn't have this failure mode since nothing needs to be frozen).
 # =====================================================================
 
@@ -239,8 +239,8 @@ def test_catboost_adapter_transform_train_weekly_excludes_daily_only_features():
 
 def test_catboost_adapter_transform_train_drops_no_rows():
     """
-    Unlike the old lag/rolling design, none of these features need
-    history to warm up -- every row of the input should survive.
+    None of these features need history to warm up (unlike lag/rolling
+    features) -- every row of the input should survive.
     """
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
@@ -378,10 +378,10 @@ def test_catboost_adapter_transform_future_basic_shape():
 
 def test_catboost_adapter_transform_future_time_idx_continues_seamlessly_from_training():
     """
-    Direct regression test for the redesign's core property: time_idx
-    must continue from exactly where training left off, and must vary
-    per row -- unlike the old lag/rolling design, where several features
-    were frozen (identical) across the whole forecast horizon.
+    The core property of the trend-index design: time_idx must continue
+    from exactly where training left off, and must vary per row -- unlike
+    lag/rolling features, which are frozen (identical) across the whole
+    forecast horizon.
     """
     df = make_catboost_raw_df(n=30)
     adapter = CatBoostAdapter(date_column="date", target_column="orders", frequency="daily")
@@ -414,8 +414,8 @@ def test_catboost_adapter_transform_future_handles_a_non_contiguous_horizon():
     Because none of these features depend on target history, a forecast
     horizon that isn't immediately contiguous with training (e.g. a
     gap) still produces correct, well-defined time_idx values -- there's
-    no "must be the very next period" constraint the old lag/rolling
-    design implicitly had (it needed real, unbroken target history right
+    no "must be the very next period" constraint, which lag/rolling
+    features would impose (they need real, unbroken target history right
     up to the forecast start).
     """
     df = make_catboost_raw_df(n=30)

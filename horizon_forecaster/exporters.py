@@ -11,7 +11,8 @@ duck-typed.
 
 Five deliverables, always written:
 
-1. Final combined forecast -- the ensemble's ["ds", "yhat"] series: the
+1. Final combined forecast -- the ensemble's ["ds", "yhat"] series, plus
+   its calibrated 95% band ["yhat_lower", "yhat_upper"] when it has one: the
    single blended number the caller ultimately acts on. One file per
    combination method, since several rules can be built in one run.
 2. Best single model's forecast -- exported alongside the combined one,
@@ -21,12 +22,14 @@ Five deliverables, always written:
    forecaster selected on it) among the models that pass mape_threshold
    on both validation and test (see choose_best_model).
 3. Per-model forecast -- every model's own forecast, stacked into one
-   long/tidy table with a "model" column (+ bounds where a model
-   provides them), so all models sit in one file for easy comparison.
+   long/tidy table with a "model" column, plus each model's calibrated
+   95% band when it has one, so all models sit in one file for easy
+   comparison.
 4. Model summary -- per model, its validation and test MAPE and WAPE,
-   ensemble membership, weight (where the rule has one), status and
-   whether it beats the seasonal-naive baseline, which gets a row of its
-   own.
+   ensemble membership, weight (where the rule has one), status, whether
+   it beats the seasonal-naive baseline, which gets a row of its own, and
+   how often its 95% band held the test actuals (band_coverage,
+   band_test_points).
 5. Rejected-models table -- one row per model excluded from a
    combination, with its validation score (MAPE, or WAPE when the
    forecaster selected on it), the threshold it exceeded (if any) and
@@ -38,7 +41,7 @@ Five deliverables, always written:
 With `forecaster=`, a sixth: the correlation of the models' test errors,
 which says whether the members make different mistakes (the only way an
 ensemble gains). Passing the forecaster also fills in every score, so
-callers no longer build the score dicts by hand.
+callers do not build the score dicts by hand.
 
 Each has a pure "build the DataFrame" function (returns a DataFrame,
 writes nothing) plus one convenience writer, export_forecast_csvs(),
@@ -268,10 +271,10 @@ def choose_best_model(
       2. test score at or below mape_threshold, when test scores are given;
       then the lowest VALIDATION score among the models that pass both.
 
-    It used to be the lowest TEST MAPE with no threshold at all, so the
-    export was chosen on the window that is supposed to be reported, never
-    selected on -- and a model the ensemble had rejected was exported at
-    103% error in a real run. Choosing on test was also measured directly
+    Choosing the lowest TEST MAPE with no threshold was rejected: it picks
+    the export on the window that is supposed to be reported, never
+    selected on, and in a real run it exported a model the ensemble had
+    rejected, at 103% error. Choosing on test was also measured directly
     and picked worse (docs/design_notes.md, "Window sizes"). Test is kept
     only as a check that rules a model out: a model that passed validation
     but scored above the threshold on test kept doing badly in the periods
@@ -339,8 +342,8 @@ def build_best_model_forecast_table(
     metric: str = "MAPE",
 ) -> pd.DataFrame:
     """
-    The best single model's forecast, as a ["model", "ds", "yhat"] table
-    (+ bounds where that model provides them).
+    The best single model's forecast, as a ["model", "ds", "yhat"] table,
+    plus its calibrated 95% band when it has one.
 
     Exists because a weighted ensemble is NOT guaranteed to beat the best
     individual model (see evaluation/ensemble.py) -- exporting only the

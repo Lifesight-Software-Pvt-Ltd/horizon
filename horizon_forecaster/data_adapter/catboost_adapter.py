@@ -6,14 +6,14 @@ seasonality — it just sees a table of numeric/categorical features and a
 target. All of the time-series structure Prophet gets "for free" has to
 be engineered here as explicit columns.
 
---- Redesigned: lag/rolling features removed (real accuracy finding) ---
+--- Why there are no lag/rolling features (real accuracy finding) ---
 
-The original version of this adapter engineered lag(1/2/3/7/14)
-and rolling-window(7/14) features from the target's own history. Because
-CatBoostWrapper.predict() is a single batched call (not a per-step
-recursive loop), those features had to be "frozen" once at the end of
-training history and broadcast unchanged across the entire forecast
-horizon (the "direct" multi-horizon strategy).
+Lag(1/2/3/7/14) and rolling-window(7/14) features from the target's own
+history were tried and rejected. Because CatBoostWrapper.predict() is a
+single batched call (not a per-step recursive loop), those features have
+to be "frozen" once at the end of training history and broadcast
+unchanged across the entire forecast horizon (the "direct" multi-horizon
+strategy).
 
 Real-dataset testing surfaced a serious consequence of that design: on a
 144-day held-out test window, CatBoost's MAPE was 52.6% in the first half
@@ -30,7 +30,7 @@ such failure mode, because none of ITS features depend on the target's
 own recent history, so none of them need to be frozen in the first
 place.
 
-This version adopts that proven approach: an explicit linear trend index
+This adapter uses that proven approach: an explicit linear trend index
 (`time_idx`, an absolute day/week offset from a fixed reference date —
 NOT a row-position counter, so it stays continuous and gap-robust across
 the train/future boundary), continuous cyclical encodings of
@@ -40,13 +40,12 @@ through as-is. None of these require knowledge of the target's own
 history, so transform_future() computes every one of them directly from
 dates alone — exactly like transform_train() does.
 
-Practical consequence: this adapter is effectively STATELESS again
-(matching ProphetAdapter), except for a single `_reference_date`
-retained across the train/future boundary purely to keep `time_idx`
-continuous. There is no more "frozen feature", no more lag-warmup row
-dropping, and transform_future() no longer depends on real target
-history at all — only on a reference date established by a prior
-transform_train() call.
+Practical consequence: this adapter is effectively STATELESS (matching
+ProphetAdapter), except for a single `_reference_date` retained across
+the train/future boundary purely to keep `time_idx` continuous. There is
+no frozen feature and no lag-warmup row dropping, and transform_future()
+does not depend on real target history at all — only on a reference date
+established by a prior transform_train() call.
 """
 
 from typing import List, Optional
@@ -95,8 +94,8 @@ class CatBoostAdapter(BaseAdapter):
 
         # Set by transform_train(); required by transform_future() purely
         # to keep the trend index (time_idx) continuous and gap-robust
-        # across the train/future boundary. Unlike the old lag/rolling
-        # design, no target history is retained or needed here.
+        # across the train/future boundary. No target history is retained
+        # or needed here.
         self._reference_date: Optional[pd.Timestamp] = None
 
     def transform_train(self, raw_df: pd.DataFrame) -> pd.DataFrame:

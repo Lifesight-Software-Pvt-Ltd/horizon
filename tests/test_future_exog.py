@@ -151,7 +151,7 @@ def test_driver_with_negatives_is_not_clipped():
 
 
 # --------------------------------------------------------------------------
-# cycle (legacy) -- must reproduce the old replay-the-tail behaviour
+# cycle -- replays the trailing history verbatim
 # --------------------------------------------------------------------------
 
 

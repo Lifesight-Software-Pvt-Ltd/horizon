@@ -165,9 +165,9 @@ toolchains reject; Horizon detects and works around this automatically. See
 Every forecast Horizon returns, from each model and each ensemble rule, has a
 95% band in `yhat_lower`/`yhat_upper`, built the same way from that forecast's
 own errors on the validation window (split conformal prediction). The
-models' own intervals are not used: they meant different things, three of
-the five models and every ensemble had none, and the ones that existed
-covered too little.
+models' own intervals are not used: they mean different things, two of
+the five models (CatBoost and NeuralProphet) and every ensemble have
+none, and the ones that exist cover too little.
 
 **How it is built.** For a forecast made h periods after the last fitted
 date, with L validation periods:
@@ -222,6 +222,11 @@ run.
 - **Fewer than 19 validation errors.** No 95% band can be guaranteed, so that
   output has no band columns and a warning says why. The default windows are
   far above this; a very short `validation_size` is not.
+- **No validation forecast.** A model that could not be scored on the
+  validation window (its training window below the model's row floor, for
+  example) has no errors to calibrate from, so it has no band, and neither
+  has an ensemble that includes it. The warning says so; a longer
+  `validation_size` would not help, since it takes rows from training.
 - **Settings for the models' own intervals are refused**
   (`interval_width` and `uncertainty_samples` for Prophet, `alpha` for SARIMAX,
   `ci_lower_pct`/`ci_upper_pct` for Bayesian PyMC), since they would have no

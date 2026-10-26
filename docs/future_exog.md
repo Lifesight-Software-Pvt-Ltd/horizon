@@ -53,8 +53,7 @@ otherwise they're auto-detected: a column whose values are only 0 and 1
 (`True`/`False`, and the words `yes/no`, `y/n`, `t/f`, `on/off`, are read as
 1/0 first). A column with two other values — TV spend of 0 or 5,000, prices
 of 9.99 and 12.99, a 0% or 20% discount — is a quantity, not a flag, and
-follows the chosen strategy; before this rule such columns were set to 0 for
-the whole forecast. The `cycle` legacy strategy is exempt from all of this
+follows the chosen strategy. The `cycle` strategy is exempt from all of this
 and tiles every column as-is.
 
 ## Warnings about generated values

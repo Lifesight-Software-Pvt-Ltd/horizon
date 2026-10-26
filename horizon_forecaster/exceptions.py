@@ -90,9 +90,8 @@ class InvalidConfigError(HorizonForecasterError, ValueError):
     """
     A bad argument or bad input data.
 
-    Also a ValueError: in 1.0.0 the metrics, the ensemble builders and the
-    plotting helpers raised plain ValueErrors, and code that catches
-    ValueError around them keeps working.
+    Also a ValueError, so code that catches ValueError around the metrics,
+    the ensemble builders or the plotting helpers catches it too.
     """
 
     def __init__(

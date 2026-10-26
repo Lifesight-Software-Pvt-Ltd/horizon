@@ -104,10 +104,9 @@ def _default_params() -> dict:
     """
     The parsed default_params.yaml, read once per process.
 
-    It used to be re-read and re-parsed for every requested model, so a
-    default five-model construction parsed the same ~600-line file five
-    times. The file ships inside the package and never changes at
-    runtime, so caching is safe.
+    Cached so a default five-model construction does not parse the same
+    ~600-line file five times. The file ships inside the package and never
+    changes at runtime, so caching is safe.
 
     Callers must treat the returned dict as READ-ONLY -- it is shared by
     every HorizonForecaster in the process. Nothing mutates it today:
@@ -224,10 +223,10 @@ def _check_column_roles(
 ) -> None:
     """
     Each used column plays one role, is named once in independent_columns,
-    and appears once in raw_df. Each of these used to run without complaint:
-    the date as the target, or the target as its own driver, scored a MAPE
-    of 0.0; the date as a driver gave SARIMAX 99.97%; a driver listed twice
-    made every model fail with a raw ValueError.
+    and appears once in raw_df. Unchecked, each of these runs without
+    complaint: the date as the target, or the target as its own driver,
+    scores a MAPE of 0.0; the date as a driver gave SARIMAX 99.97%; a driver
+    listed twice makes every model fail with a raw ValueError.
     """
     if target_column == date_column:
         raise InvalidConfigError(
@@ -283,11 +282,11 @@ _NATIVE_BAND_SETTINGS = {
 def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
     """
     model_params must map model names to dicts of settings. An unknown model
-    name is an error (a typo such as "neural_prophet" used to be ignored, so
-    the model ran on its defaults). For wrappers that read their settings
-    one by one (SARIMAX, PyMC -- see BaseModel.accepted_params) an unknown
-    setting is an error too: it used to be ignored while still switching off
-    the grid search, so a typo changed the result without a word. Names for
+    name is an error (ignored, a typo such as "neural_prophet" would leave
+    the model on its defaults). For wrappers that read their settings one by
+    one (SARIMAX, PyMC -- see BaseModel.accepted_params) an unknown setting
+    is an error too: ignored, it would still switch off the grid search, so
+    a typo would change the result without a word. Names for
     a known model that was not requested are allowed and unused.
     """
     if model_params is None:
@@ -365,8 +364,8 @@ def _check_model_params(model_params) -> Dict[str, Optional[dict]]:
 def _check_finite_predictions(model_name: str, forecast_df: pd.DataFrame) -> None:
     """
     A model that returns NaN or inf predictions has failed, even if it raised
-    nothing. Such a model used to be kept: SARIMAX on an all-negative target
-    returned NaN everywhere, scored NaN, and was still listed as a member of
+    nothing. Kept, such a model misleads: SARIMAX on an all-negative target
+    returns NaN everywhere, scores NaN, and would be listed as a member of
     the trimmed ensemble while the other members did the work.
     """
     yhat = pd.to_numeric(forecast_df["yhat"], errors="coerce").to_numpy(dtype=float)
@@ -591,7 +590,7 @@ class HorizonForecaster:
             future_exog.FUTURE_EXOG_STRATEGIES: "carry_forward" (default --
             hold the last value flat), "recent_average", "historical_average"
             (season-aware), "seasonal_naive" (seasonal cycle + drift),
-            "linear_trend", or "cycle" (the legacy replay-the-tail behaviour).
+            "linear_trend", or "cycle" (replay the trailing history).
             Continuous drivers use the chosen strategy; binary event flags
             default to 0 (except under seasonal_naive). See future_exog.py.
         event_columns: names of the binary 0/1 event/flag columns (promos,
@@ -660,9 +659,8 @@ class HorizonForecaster:
     the reported test-window score, `validation_mape` the selection score
     it was chosen by, with `wape` and `validation_wape` alongside (the
     selection score is `validation_wape` when selection_metric is
-    "wape"). Before 1.0 there was one held-out window serving both roles,
-    which made every reported MAPE a selection score and therefore
-    optimistic.
+    "wape"). A single held-out window serving both roles would make every
+    reported MAPE a selection score and therefore optimistic.
 
     One deliberate exception: the data checks that decide the run as a
     whole -- MAPE or WAPE (see selection_metric), leaving SARIMAX out for
@@ -763,7 +761,7 @@ class HorizonForecaster:
         # The data and the column roles, before anything reads a column:
         # a raw_df that is not a DataFrame, a column that plays two roles
         # (the target as a driver, the date as the target), or a name that
-        # appears twice all used to run to completion with a meaningless
+        # appears twice would otherwise run to completion with a meaningless
         # score or fail as a raw pandas error deep inside every model.
         _check_raw_df(raw_df)
         requested_independent_columns = (
@@ -813,8 +811,9 @@ class HorizonForecaster:
         # Complete, finite data: a single blank, non-numeric or infinite cell
         # in the date, the target or ANY declared driver is a hard failure --
         # nothing is silently dropped or imputed. This runs BEFORE the
-        # zero-variance cleanup below: an all-blank driver used to count as
-        # "constant" there and vanish, while a single blank raised.
+        # zero-variance cleanup below, which would otherwise count an
+        # all-blank driver as "constant" and drop it, while a single blank
+        # raised.
         validate_no_missing_values(
             raw_df, date_column, target_column, requested_independent_columns
         )
@@ -1281,11 +1280,12 @@ class HorizonForecaster:
     def _warn_about_lost_models(self, stage: str, results, errors, ensembles) -> None:
         """
         After evaluate() or forecast(): say which requested models are missing
-        from the results or from an ensemble, and why. Each of these used to be
-        visible only by inspecting evaluate_errors / forecast_errors or the
-        EnsembleResult fields: a failed model, a model screened out by
-        mape_threshold, a trimmed rule that fell back to a mean because members
-        were lost, and an ensemble with no members at all.
+        from the results or from an ensemble, and why. Without the warning
+        each of these is visible only by inspecting evaluate_errors /
+        forecast_errors or the EnsembleResult fields: a failed model, a model
+        screened out by mape_threshold, a trimmed rule that fell back to a
+        mean because members were lost, and an ensemble with no members at
+        all.
         """
         requested = list(self.models)
         if errors:
@@ -1488,8 +1488,8 @@ class HorizonForecaster:
              data is not at the declared frequency at all: either it is
              clearly the OTHER supported frequency (a mis-declared
              `frequency`), or a cadence Horizon does not support (every 2
-             days, fortnightly, monthly). Previously both only warned, and
-             the run went on to produce forecast dates, window sizes and
+             days, fortnightly, monthly). Both raise: with only a warning
+             the run goes on to produce forecast dates, window sizes and
              model settings for the wrong frequency -- monthly data declared
              daily finished with a confident 0.67% MAPE and a daily-dated
              forecast.
@@ -1499,12 +1499,12 @@ class HorizonForecaster:
           3. No date missing between the first and the last: every day
              (daily) or every week (weekly) has a row.
 
-        Missing dates used to warn when scattered and raise only past four
-        weeks in a row. They now always raise. The models count rows, not
-        dates: a missing day shifts every weekly cycle after it, and the
-        train/validation/test windows cover more time than their size
-        says. Horizon never fills a gap itself, because only the user knows
-        whether a missing day was a closed day (0) or lost data. A weekday
+        Missing dates always raise (warning on scattered gaps was tried and
+        rejected). The models count rows, not dates: a missing day shifts
+        every weekly cycle after it, and the train/validation/test windows
+        cover more time than their size says. Horizon never fills a gap
+        itself, because only the user knows whether a missing day was a
+        closed day (0) or lost data. A weekday
         that never appears is named, since that is almost always a closed
         day the export left out.
         """
@@ -1698,8 +1698,8 @@ class HorizonForecaster:
         adapter's retained self._reference_date to the scoring window's
         own first date, which would restart the trend index (time_idx) at
         0 instead of letting it continue seamlessly from where the fit
-        window left off -- silently corrupting the very feature the
-        redesign added, and any subsequent use of the adapter.
+        window left off -- silently corrupting the trend feature, and any
+        subsequent use of the adapter.
         transform_future() is the correct call here -- it's exactly what a
         genuine future forecast would do, reusing the reference_date
         established by the fit. The only difference from a real future
@@ -1708,7 +1708,7 @@ class HorizonForecaster:
         scoring) -- so they're read directly from raw_df, never routed
         through the adapter, which by design never sees them.
 
-        A FRESH adapter is built per call. This matters now that there are
+        A FRESH adapter is built per call. This matters because there are
         two fit windows (train, and train+validation): a stateful adapter
         fitted on train carries standardisation constants and a reference
         date derived from train alone, and reusing it for the train+
@@ -2341,11 +2341,26 @@ class HorizonForecaster:
             if c.width is None:
                 missing.setdefault(c.reason, []).append(name)
         if missing:
+            # The advice depends on the reason: too few errors needs a longer
+            # validation window, while a failed validation fit needs more
+            # training rows, which a longer validation window would take away.
+            advice = []
+            if any("validation errors, fewer than" in why for why in missing):
+                advice.append(
+                    "A band is calibrated from at least 19 errors on the validation window, "
+                    "so a longer validation_size gives such an output one."
+                )
+            if any("no validation forecast" in why for why in missing):
+                advice.append(
+                    "A model with no validation forecast could not be scored on the validation "
+                    "window (an earlier warning says why), so it has no errors to calibrate "
+                    "from, and neither has an ensemble that includes it."
+                )
             warnings.warn(
                 "No 95% band for "
                 + "; ".join(f"{', '.join(names)} ({why})" for why, names in missing.items())
-                + ". A band is calibrated from at least 19 errors on the validation window; "
-                "a longer validation_size gives every output one.",
+                + ". "
+                + " ".join(advice),
                 stacklevel=3,
             )
         zero_days = max((c.n_zero_days_left_out for c in calibrations.values()), default=0)
@@ -2510,9 +2525,8 @@ class HorizonForecaster:
         hyperparameters were selected. That selection has to happen anyway -- forecast()
         cannot fit without knowing which parameters won -- so the scores
         come for free and are cached, whether or not evaluate() was ever
-        called. (Before 1.0 this method ran the whole of evaluate()
-        internally to obtain them, which additionally paid for a test-
-        window prediction it then discarded.)
+        called. Running the whole of evaluate() internally instead would
+        also pay for a test-window prediction that is then discarded.
 
         Args:
             horizon: number of future periods to forecast.
@@ -2539,10 +2553,10 @@ class HorizonForecaster:
         self.future_exog_used = None
 
         # A whole number, checked before anything else: a float such as 2.5
-        # used to build two future dates and then fail inside every model as
-        # a row-count mismatch, ending in an AllModelsRejectedError that hid
-        # the real cause. A whole float (30.0) always worked and still does.
-        # bool is excluded because it is an int subclass.
+        # would build two future dates and then fail inside every model as a
+        # row-count mismatch, ending in an AllModelsRejectedError that hides
+        # the real cause. A whole float (30.0) is accepted. bool is excluded
+        # because it is an int subclass.
         is_whole = (
             not isinstance(horizon, bool)
             and isinstance(horizon, numbers.Real)
@@ -2556,7 +2570,7 @@ class HorizonForecaster:
             )
         horizon = int(horizon)
         # pandas cannot represent dates after 2262-04-11; a horizon reaching
-        # past it used to fail with a raw OutOfBoundsDatetime.
+        # past it would otherwise fail with a raw OutOfBoundsDatetime.
         last_date = pd.Timestamp(self.raw_df[self.date_column].max())
         days_per_period = 7 if self.frequency == "weekly" else 1
         if horizon * days_per_period > (pd.Timestamp.max - last_date).days:
@@ -2572,7 +2586,7 @@ class HorizonForecaster:
             warnings.warn(
                 f"Forecasting {horizon} periods from only {n_total} periods of history. "
                 f"Forecasts this far beyond the available history should be treated with "
-                f"caution — uncertainty intervals may understate the true risk of "
+                f"caution — the 95% bands may understate the true risk of "
                 f"extrapolating this far.",
                 stacklevel=2,
             )

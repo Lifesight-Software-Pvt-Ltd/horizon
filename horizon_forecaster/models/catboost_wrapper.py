@@ -31,8 +31,8 @@ class CatBoostWrapper(BaseModel):
     always returns exactly ["ds", "yhat"]; HorizonForecaster adds the same
     calibrated 95% band it gives every model (evaluation/bands.py).
 
-    Design decision (revised — see CatBoostAdapter's module docstring for
-    the full finding): no calendar feature is declared categorical.
+    Design decision (see CatBoostAdapter's module docstring for the full
+    finding): no calendar feature is declared categorical.
     CatBoostAdapter's calendar fields (day_of_week, month, quarter,
     year, ...) are trained as plain numeric alongside their cyclical
     sin/cos counterparts. This mirrors a real, independently verified
@@ -51,7 +51,7 @@ class CatBoostWrapper(BaseModel):
     — unlike Prophet, which models trend as an explicit continuous
     function. Verified directly: a clean +2/period synthetic trend
     produced a test MAPE of ~9% specifically because of this
-    flattening, not noise or a fitting bug. CatBoostAdapter now includes
+    flattening, not noise or a fitting bug. CatBoostAdapter includes
     an explicit numeric `time_idx` trend feature specifically to give
     the model *some* signal to key its trend-related splits on, but this
     does not fully remove the underlying limitation — a tree still
@@ -72,9 +72,9 @@ class CatBoostWrapper(BaseModel):
     model_name = "catboost"
 
     # Mirrors ProphetWrapper's pattern: frequency-aware fallback floors,
-    # used only if min_rows_required isn't explicitly provided. No longer
-    # a post-warmup count (CatBoostAdapter no longer drops any rows) —
-    # this is now simply the training row count, same as ProphetWrapper.
+    # used only if min_rows_required isn't explicitly provided. A plain
+    # training row count, same as ProphetWrapper (CatBoostAdapter drops no
+    # rows).
     _FREQUENCY_MIN_ROWS_DEFAULTS = {"daily": 14, "weekly": 8}
     _FALLBACK_MIN_ROWS = 10
 
@@ -299,17 +299,15 @@ class CatBoostWrapper(BaseModel):
         )
         # The model file is read from next to the envelope, where save()
         # wrote it, not from the path stored inside: that path is where the
-        # files were when saved, so after moving them it pointed at nothing
-        # ("Model file doesn't exist") -- or at a stale model left behind.
+        # files were when saved, so after moving them it would point at
+        # nothing ("Model file doesn't exist") -- or at a stale model left
+        # behind.
         # Same rule as the Bayesian PyMC wrapper.
         model = CatBoostRegressor()
         model.load_model(f"{path}.cbm")
         instance._fitted_model = model
         instance._feature_columns = envelope["feature_columns"]
         instance._categorical_feature_names = envelope["categorical_feature_names"]
-        # .get(), not [...]: tolerates loading an envelope saved before
-        # target_min existed, falling back to no clipping rather than a
-        # hard KeyError on an old file.
-        instance._target_min = envelope.get("target_min")
+        instance._target_min = envelope["target_min"]
         instance.is_fitted = True
         return instance

@@ -71,13 +71,13 @@ isolation is the general guarantee, not a patch for that one case.
 
 Every later step — sorting, the window split, the forecast dates, each
 model's seasonal settings — assumes the date column is real, regular dates
-at the declared frequency. When that was assumed rather than checked, bad
-dates produced confident wrong answers instead of errors: text dates such as
-`01/15/2023` were sorted alphabetically, so the windows mixed years and the
-forecast started from the wrong date; monthly data declared daily finished
-with a 0.67% MAPE and a daily-dated forecast; duplicate dates crashed
-`evaluate()` late with an unrelated error. So the constructor now parses the
-dates first, on a copy, and enforces an explicit contract (the table in
+at the declared frequency. Assumed rather than checked, bad dates produce
+confident wrong answers instead of errors: text dates such as `01/15/2023`
+sort alphabetically, so the windows mix years and the forecast starts from
+the wrong date; monthly data declared daily finished with a 0.67% MAPE and a
+daily-dated forecast; duplicate dates crash `evaluate()` late with an
+unrelated error. So the constructor parses the dates first, on a copy, and
+enforces an explicit contract (the table in
 [`quickstart.md`](quickstart.md)): one of six text formats or a datetime,
 each date once, weekly dates on one weekday, more than half the steps
 exactly one period, and no date missing between the first and the last.
@@ -86,14 +86,14 @@ Two choices in it are worth recording:
 
 - **Ambiguous dates raise rather than being guessed.** A column whose every
   value reads equally well day-first or month-first (`03/04/2024`) has no
-  safe default, and real exports had been read month-first silently.
+  safe default, and reading it month-first silently got real exports wrong.
   `date_format` settles it.
-- **Any missing date raises.** This first allowed scattered gaps with a
-  warning and raised only past four weeks in a row. It was tightened to
-  reject every missing date: the models count rows, not dates, so a
-  missing day shifts every weekly cycle after it and makes the
-  train/validation/test windows cover more time than their size says, and
-  SARIMAX treats the dates either side of a gap as neighbours. Horizon
+- **Any missing date raises.** Allowing scattered gaps with a warning, and
+  raising only past four weeks in a row, was tried and rejected: the models
+  count rows, not dates, so a missing day shifts every weekly cycle after it
+  and makes the train/validation/test windows cover more time than their
+  size says, and SARIMAX treats the dates either side of a gap as
+  neighbours. Horizon
   still never fills a gap itself — only the user knows whether a missing
   day was a closed day (0) or lost data — so the error lists the dates and
   says what to add. A weekday that never appears in daily data is named,
@@ -141,7 +141,7 @@ really act on, regardless of whether you hold two years of history or ten.
 
 `validation_size`/`test_size` accept an `int` (periods), a `float` strictly
 between 0 and 1 (a fraction), or `None` for the default. `training_size`
-survives as a percentage-only alternative route (50–100, or 0.5–1.0) with the
+is a percentage-only alternative route (50–100, or 0.5–1.0) with the
 remainder split three-quarters to validation, and is **mutually exclusive** with
 the other two — passing both raises `InvalidConfigError` rather than letting
 one silently win.
@@ -151,14 +151,14 @@ at 45% of rows between them, preserving the 3:1 ratio and warning with the
 resulting sizes. Explicitly requested sizes are never silently shrunk.
 
 **Validation is three times the test window, and why not a rolling
-backtest.** Validation started at twice the test window. Testing showed that
-the model it picked often did badly on test (validation-best ranked 4th or
-5th of five in all four real runs), so a 3-fold rolling backtest was the
-planned fix. Before building it, the two were compared on 19 real series (5
-weekly, 14 daily, up to 4 test origins each, 4 models at fixed settings):
-today's window, one window three test-lengths long, and three rolling folds
-of one test-length each, all judged by how well they picked the model that
-then did best on test.
+backtest.** A validation window twice the test length was tried first. The
+model it picked often did badly on test (validation-best ranked 4th or 5th
+of five in all four real runs), so a 3-fold rolling backtest was considered.
+The options were compared on 19 real series (5 weekly, 14 daily, up to 4
+test origins each, 4 models at fixed settings): a window twice the test
+length, one window three test-lengths long, and three rolling folds of one
+test-length each, all judged by how well they picked the model that then did
+best on test.
 
 | | single (2×) | long (3×) | 3 folds |
 |---|---|---|---|
@@ -177,9 +177,9 @@ Every score beat a random pick by a wide margin (median regret 0.2 against
 predicts the test window. Choosing on the most recent window instead (the
 test window, then forecasting the next one) was also measured and was worse
 on weekly data (picked the best model 11% of the time against 33%), so
-selection stays on validation. The budget for defaulted windows rose from 40%
-to 45% of rows at the same time, so a typical 122-week series keeps the full
-39 + 13 rather than shrinking its test window below a quarter.
+selection stays on validation. Defaulted windows may take up to 45% of the
+rows, so a typical 122-week series keeps the full 39 + 13 rather than
+shrinking its test window below a quarter.
 
 ### A driver that never changes inside a fit window
 
@@ -192,7 +192,7 @@ rejected it at prediction, so it dropped out of the run (reported on real
 retail data with a `Price_Hike` flag); Prophet, when the constant was not 0, fitted
 an arbitrary effect to it (+31,403 on a series around 3,500 whose true effect
 was −400); CatBoost, SARIMAX and Bayesian PyMC gave it no effect. The
-orchestrator now finds such drivers once per fit window and leaves them out
+orchestrator finds such drivers once per fit window and leaves them out
 of that fit for every model, so all of them give the same, honest answer —
 no effect yet — and stay comparable. A warning names the driver and the
 score that includes the effect no model could see.
@@ -247,10 +247,10 @@ open (§9).
 
 Every model and every ensemble rule gets a 95% band from its own validation
 errors (split conformal prediction; `evaluation/bands.py`), and the models'
-own intervals are discarded. Those meant different things (a trend
+own intervals are discarded. Those mean different things (a trend
 simulation, a Gaussian innovation band, an MCMC posterior), CatBoost,
-NeuralProphet and the ensembles had none, and averaging them for an ensemble
-has no coherent interpretation. They also covered too little. On 80 distinct
+NeuralProphet and the ensembles have none, and averaging them for an ensemble
+has no coherent interpretation. They also cover too little. On 80 distinct
 test windows across 44 real and synthetic series (up to four origins each,
 test windows up to 500 days or 100 weeks), over the first 28 days or 13
 weeks:
@@ -402,11 +402,11 @@ behind a single `resolve_future_exog()` entry point. Strategies:
 `carry_forward` (default), `recent_average`, `historical_average`,
 `seasonal_naive`, `linear_trend`, and `cycle`.
 
-- **The default is `carry_forward`, not replay.** The original behaviour
-  replayed the last `horizon` periods of history, which injects the recent
-  pattern — including any one-off spike — into the future. Holding the last
-  level flat is the least-surprising neutral baseline. `cycle` keeps the old
-  behaviour for anyone who wants it.
+- **The default is `carry_forward`, not replay.** Replaying the last
+  `horizon` periods of history injects the recent pattern — including any
+  one-off spike — into the future. Holding the last level flat is the
+  least-surprising neutral baseline. `cycle` replays the history for anyone
+  who wants it.
 - **Flags are type-aware.** Carrying a binary promo flag forward assumes a
   permanent promo; averaging one yields a nonsensical fraction. Continuous
   drivers use the chosen strategy; binary 0/1 event flags default to 0 ("no
@@ -417,8 +417,7 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   which caught quantities too: TV spend of 0 or 5,000, a 0%/20% discount and
   a 9.99/12.99 price were all forecast at 0 — the last one a free product.
   A two-value column is not necessarily an on/off switch; only 0/1 is.
-  `cycle` is exempt from all of this and tiles every column as-is,
-  reproducing the old output exactly.
+  `cycle` is exempt from all of this and tiles every column as-is.
 - **On/off text is read from a fixed word list.** `true/false`, `yes/no`,
   `y/n`, `t/f` and `on/off` become 1/0, in the data and in the future table.
   Any other pair of words ("Promo"/"None") is an error, not a guess: guessing
@@ -445,12 +444,12 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   columns are generated — matching the common case where next quarter's
   planned spend is known but the promotional calendar is not.
 - **A supplied table is checked, not trusted.** Every model reads it by
-  position, and each used to react to a bad one differently while the run
-  still finished: too few rows made Prophet and SARIMAX fail and CatBoost
-  forecast alone; a misspelled column was ignored and the real driver
-  silently generated; a blank dropped two models; a date column was never
-  read, so a table starting a week late was applied to the wrong periods.
-  `check_future_table()` now rejects anything that does not match the
+  position, and unchecked, each reacts to a bad one differently while the
+  run still finishes: too few rows make Prophet and SARIMAX fail and
+  CatBoost forecast alone; a misspelled column is ignored and the real
+  driver silently generated; a blank drops two models; an unread date column
+  lets a table starting a week late be applied to the wrong periods.
+  `check_future_table()` rejects anything that does not match the
   forecast exactly — row count, columns, optional dates, values — before any
   model runs. Values outside a driver's historical range only warn, because
   scenario work needs them; the warning says what each model does with them
@@ -477,18 +476,18 @@ matrix construction, no sampling to tune — which is why it was built first.
 Independent columns keep their original names, since Prophet's
 `add_regressor()` references columns by name.
 
-- **Seeded, because it was not reproducible.** `yhat_lower`/`yhat_upper`
-  varied between repeated `predict()` calls on the same fitted model —
-  Prophet's uncertainty simulation draws from numpy's global random state.
-  `predict()` now sets the seed (default 42, from `wrapper_config.random_seed`
-  in the config) immediately before calling Prophet. The seed is an explicit
-  wrapper constructor argument, never part of `params`, because `params` is
-  passed straight to `Prophet(**params)`, which would reject it. Verified
-  across separate processes, not just repeated calls. Since the calibrated
-  bands replaced every model's own interval, Horizon's config sets
-  `uncertainty_samples: 0`, so inside a Horizon run Prophet no longer
-  simulates an interval at all; the seed matters only to a wrapper used on
-  its own.
+- **Seeded, for reproducible bounds.** Prophet's uncertainty simulation
+  draws from numpy's global random state, so unseeded, `yhat_lower` and
+  `yhat_upper` vary between repeated `predict()` calls on the same fitted
+  model. `predict()` sets the seed (default 42, from
+  `wrapper_config.random_seed` in the config) immediately before calling
+  Prophet. The seed is an explicit wrapper constructor argument, never part
+  of `params`, because `params` is passed straight to `Prophet(**params)`,
+  which would reject it. Verified across separate processes, not just
+  repeated calls. Inside a Horizon run the calibrated band replaces every
+  model's own interval, so Horizon's config sets `uncertainty_samples: 0`
+  and Prophet simulates no interval at all; the seed matters only to a
+  wrapper used on its own.
 - **`save()`/`load()` use `model_to_json()`, not pickle**, per Prophet's own
   documentation — the cmdstanpy backend does not deserialize reliably across
   environments. The JSON is wrapped in an envelope carrying wrapper state
@@ -512,10 +511,10 @@ gap-robust; sin/cos encodings cover yearly and half-yearly cycles, with
 weekly and monthly added for daily data; calendar fields and independent
 columns pass through.
 
-This replaced a lag(1/2/3/7/14) + rolling(7/14) design, and the reason it
-was replaced still applies. Because `predict()` is one batched call rather than a
-per-step recursive loop, those features had to be frozen at train-end and
-broadcast across the whole horizon. On real revenue data that scored 39.95%
+A lag(1/2/3/7/14) + rolling(7/14) design was tried and rejected. Because
+`predict()` is one batched call rather than a per-step recursive loop, those
+features have to be frozen at train-end and broadcast across the whole
+horizon. On real revenue data that scored 39.95%
 MAPE against Prophet's 18.68%. Two plausible explanations were tested and
 disproven — the tree-extrapolation ceiling (0 of 144 test rows exceeded the
 training max) and monotonic staleness (the second half of the window scored
@@ -523,7 +522,7 @@ training max) and monotonic staleness (the second half of the window scored
 found it: a December demand dip scored 67–90% MAPE against a 34–40%
 baseline. A frozen snapshot of recent history cannot see a demand shift
 coming; it keeps predicting the pre-shift baseline for the entire horizon.
-After the redesign, that same segment scored 14.59% — the best segment
+With the trend-index features, that same segment scored 14.59% — the best segment
 rather than the worst — with overall MAPE at 18.86%, matching Prophet.
 
 Every feature is computed identically by `transform_train()` and
@@ -587,7 +586,8 @@ varies `(p, q)`, the seasonal `(P, Q)` at daily frequency, and
   records the standardised min/max per column and `transform_future()` clamps
   to it. SARIMAX is linear in the exog, so extrapolating a coefficient beyond
   the trained range is unreliable anyway. Verified: a synthetic series with a
-  40× spend spike across the test window, which diverged before, fits at ~17%.
+  40× spend spike across the test window, which diverges without the clamp,
+  fits at ~17%.
 - **The collinearity warning is diagnostic, not a fix.**
   `_warn_on_annual_collinearity()` flags any independent column whose
   variance is ≥30% explained by an annual sin/cos basis. It exists because
@@ -666,9 +666,8 @@ operation.
   rejects `ConfigTrain`'s `loss_func: Union[str, _Loss, Callable]` and kills
   `fit()` before a single epoch. On newer stacks the same logger fails
   differently, via TensorBoard → TensorFlow → jax → `np.dtypes.StringDType`.
-  The config sets it false for both frequencies, and both the config and the
-  test defaults assert it — the first attempt at this fix landed in the
-  `daily` block only, and `weekly` was the frequency actually failing.
+  The config sets it false for both frequencies, and the tests assert it
+  for each frequency separately.
 - **`weights_only=False` in the torch load fallback, with the trainer
   restored.** PyTorch ≥2.6 flipped `torch.load`'s `weights_only` default to
   `True`, and NeuralProphet saves a full Python object rather than a state
@@ -728,14 +727,14 @@ in the wrapper, mirroring that split.
   under-covered badly — only ~34% of real daily actuals fell inside a nominal
   94% band. Retaining the posterior `sigma`/`nu` draws and drawing Student-T
   noise restores coverage. The point forecast is still `mu.mean` (the
-  predictive mean for `nu > 1`), so MAPE is unaffected; only the band widened.
-  HorizonForecaster now replaces this band with the calibrated one (§2), which
-  covered the same 95% on the windows PyMC ran on.
-- **No unconditional zero clamp.** The back-transform once applied
-  `np.clip(..., 0.0, None)` regardless of the data, so any target that
-  legitimately goes negative — net revenue after refunds, inventory deltas,
-  week-on-week change — had every negative prediction silently rewritten to
-  0. Clipping is now data-driven like CatBoost's.
+  predictive mean for `nu > 1`), so MAPE is unaffected; only the band is
+  wider. HorizonForecaster replaces this band with the calibrated one (§2),
+  which covered the same 95% on the windows PyMC ran on.
+- **No unconditional zero clamp.** Clipping every prediction at 0 regardless
+  of the data was rejected: any target that legitimately goes negative — net
+  revenue after refunds, inventory deltas, week-on-week change — would have
+  every negative prediction silently rewritten to 0. Clipping is data-driven
+  like CatBoost's.
 - **`save`/`load` via a NetCDF sidecar.** `InferenceData` is not pickled
   directly: the trace is written to `<path>.nc` via arviz and the rest of the
   wrapper is pickled. `predict()` depends only on the pickled numpy state, so
@@ -754,10 +753,8 @@ in the wrapper, mirroring that split.
   the collinear synthetic it halved sampling time *and* improved MAPE (1.0 →
   14.55%, 0.3 → 11.56%) — but it underfits strong, well-supported
   seasonality, so which wins is data-dependent and belongs in the grid.
-  One correction is worth recording: an early diagnostic reported ~40%
-  divergences, and the daily posterior was briefly judged untrustworthy. That
-  figure was an artifact of an 80-step warmup in a throwaway test. With
-  adequate warmup the posterior is clean (0 divergences, R-hat ≈ 1.0).
+  With adequate warmup the daily posterior is clean (0 divergences,
+  R-hat ≈ 1.0); a very short warmup reports spurious divergences.
 - **The weekly cycle is capped at order 3.** On whole-day dates
   cos(2π·4d/7) = cos(2π·3d/7) and sin(2π·4d/7) = −sin(2π·3d/7), so order 4
   adds two columns perfectly collinear with order 3 (posterior correlation
@@ -823,8 +820,8 @@ a first faceted-grid attempt made each panel too small to read.
 - **One chart per combination rule, not one chart for the first rule.** Both
   overlays return `{method: Axes}` — always a dict, matching the convention
   `evaluate()` and `evaluate_ensemble` already follow — and the per-model
-  functions emit an `ensemble_<method>` figure for every rule that formed. An
-  earlier cut collapsed to the first requested method on the grounds that
+  functions emit an `ensemble_<method>` figure for every rule that formed.
+  Collapsing to the first requested method was tried, on the grounds that
   several rules on one time axis bury the per-model lines. The premise was
   right and the conclusion was wrong: with `ensemble_method=None` a caller
   pays to build all three rules and could then see only one of them, with no
@@ -860,23 +857,27 @@ a first faceted-grid attempt made each panel too small to read.
   written**, always, with `model_summary` carrying validation and test
   MAPE, method, rule applied, weight, status and `best_model_check`. The
   export deliberately does not bake in the choice between them.
-- **New summary columns go after the existing ones.** `validation_wape`,
-  `wape`, `zero_actuals_excluded`, `beats_naive` and `selection_metric` were
-  appended, and the baseline is an extra row, so a reader that selects
-  columns by name or position, or filters rows by status, is unaffected.
-  `rejected_models` keeps its `mape` column name even when it holds a WAPE;
-  the new `selection_metric` column says which.
+- **The summary's column order is fixed.** `model_summary` starts with
+  `model`, `validation_mape`, `mape`, `ensemble_method`, `rule_applied`,
+  `ensemble_weight`, `status` and `best_model_check`, followed by
+  `validation_wape`, `wape`, `zero_actuals_excluded`, `beats_naive`,
+  `selection_metric`, `band_coverage` and `band_test_points`; the
+  seasonal-naive baseline is its own row, with status `baseline`. A new
+  column goes at the end, so a reader that selects columns by name or
+  position, or filters rows by status, keeps working. `rejected_models`
+  calls its score column `mape` even when it holds a WAPE; its
+  `selection_metric` column says which.
 - **`forecaster=` on the exports.** Building the score dicts by hand was the
   usual way to get a file subtly wrong (a forgotten threshold, the test MAPE
   passed as validation). The exports read the forecaster's public attributes
   only, so `exporters.py` still never imports `forecaster.py`, and explicit
   arguments still win.
 - **The best single model is chosen on validation, with test as a check.**
-  It used to be the lowest test MAPE with no threshold, so the export was
-  selected on the window that is meant only to be reported, and in one real
-  run a model the ensemble had rejected was exported at 103% error. It is
-  now the lowest validation score (MAPE or WAPE) among the models within
-  `mape_threshold` on validation *and* on test. Ranking on test was measured and picked worse
+  It is the lowest validation score (MAPE or WAPE) among the models within
+  `mape_threshold` on validation *and* on test. Choosing the lowest test MAPE
+  with no threshold was rejected: it selects on the window that is meant only
+  to be reported, and in one real run it exported a model the ensemble had
+  rejected, at 103% error. Ranking on test was measured and picked worse
   (§2, "Window sizes"), but as a veto it carries signal: in the same
   comparison, models that passed validation and then scored above 40% on
   test had a median error of 24.8% over the periods that followed, against
@@ -939,12 +940,14 @@ testing against this code; the pin stands until a vetted release is adopted.
 ## 8. How this library is tested
 
 The suite fits real models rather than mocking them. Mocking is used only
-where it is the only way to hit a path deterministically — CatBoost's
-prediction-clipping tests monkeypatch `_fitted_model.predict` to return a
-fixed array, the NeuralProphet torch-compat tests stub `torch` because
-the fallback branch never runs on an older version, and the PyTensor
-linker-workaround tests stub the platform and compiler because the patch
-branch only runs on an affected Mac.
+where it is the only way to hit a path deterministically. For example,
+CatBoost's prediction-clipping tests monkeypatch `_fitted_model.predict` to
+return a fixed array; the NeuralProphet torch-compat tests stub `torch`,
+because the fallback branch never runs on an older version; the PyTensor
+linker-workaround tests stub the platform and compiler, because the patch
+branch only runs on an affected Mac; the SARIMAX trend test forces the ADF
+test to `d=0`; and the failure-path tests force a fit to fail or return
+NaN, or hand the warning code a fixed set of sampler diagnostics.
 
 Beyond unit tests, three things repeatedly found what unit tests did not:
 

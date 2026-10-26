@@ -11,10 +11,10 @@ What it does NOT do, deliberately:
 - No target transform. The log1p/expm1 round trip lives in
   SARIMAXWrapper, so "y" keeps one consistent meaning across every model
   and the wrapper's yhat comes back in raw units for MAPE.
-- No seasonal features. Annual Fourier terms used to be generated here,
-  but they moved into SARIMAXWrapper so the Fourier order becomes an
-  ordinary hyperparameter the grid search can choose per dataset. Real
-  data forced this: on a ~3-year daily series annual Fourier was a large
+- No seasonal features. Annual Fourier terms live in SARIMAXWrapper, so
+  the Fourier order is an ordinary hyperparameter the grid search can
+  choose per dataset; built here, once, it could not vary per candidate.
+  Real data requires that: on a ~3-year daily series annual Fourier was a large
   win, while on a ~2-year weekly series it made things dramatically worse
   (and at high order it diverged outright). No fixed default is right for
   both, so the data has to decide -- which it can only do if the setting
@@ -58,8 +58,8 @@ class SARIMAXAdapter(BaseAdapter):
     Args:
         date_column, target_column, independent_columns: see BaseAdapter.
         frequency: "daily" or "weekly". Required for validation, though
-            this adapter has no frequency-dependent feature logic left --
-            seasonality is the wrapper's concern now.
+            this adapter has no frequency-dependent feature logic --
+            seasonality is the wrapper's concern.
     """
 
     def __init__(
