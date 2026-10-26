@@ -465,10 +465,10 @@ def test_rejected_table_records_which_method_dropped_the_model():
 # ---------- the {method: EnsembleResult} dict a forecaster actually produces ----------
 #
 # `HorizonForecaster.forecast_ensemble` is a Dict[str, EnsembleResult], never a
-# bare one. Before 1.0 the fixtures in this file only ever built a bare result,
-# and the shape a real run produces reached several entry points untested --
-# which is exactly how export_forecast(save_plots=True) shipped raising
-# AttributeError on an ordinary run. These pin the dict shape at the two
+# bare one. Fixtures that only ever build a bare result would leave the shape a
+# real run produces untested at several entry points -- and
+# export_forecast(save_plots=True) raising AttributeError on an ordinary run
+# would go unnoticed. These pin the dict shape at the two
 # entry points that had no direct coverage.
 
 
@@ -557,7 +557,7 @@ def test_export_applies_both_best_model_checks_with_the_given_threshold(tmp_path
 
 # ---------- argument checks ----------
 #
-# A wrong argument used to surface as a raw AttributeError/KeyError deep
+# Unchecked, a wrong argument surfaces as a raw AttributeError/KeyError deep
 # inside, or -- for the scores -- as Python reprs written into the CSV.
 
 
@@ -600,7 +600,7 @@ def test_export_rejects_scores_that_are_not_numbers(tmp_path):
 
 
 def test_export_rejects_a_text_mape_threshold(tmp_path):
-    # Used to write a model_summary.csv with no model rows.
+    # Unchecked, it would write a model_summary.csv with no model rows.
     with pytest.raises(InvalidConfigError, match="mape_threshold must be a number"):
         export_forecast_csvs(
             _two_models(), make_ensemble(), mape_threshold="40", output_dir=str(tmp_path)

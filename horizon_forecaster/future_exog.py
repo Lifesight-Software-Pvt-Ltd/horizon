@@ -23,16 +23,14 @@ history for a short horizon and tiles it for a long one):
                         growing. Falls back to carry_forward under one cycle
                         of history.
     linear_trend        a fitted trend line projected forward.
-    cycle               legacy: replay/tile the trailing history, the
-                        pre-1.0 default, kept for backward compatibility.
+    cycle               replay/tile the trailing history verbatim.
 
 Type-aware: continuous drivers use the chosen strategy; binary 0/1 event
 flags (promos, holidays) default to 0 -- "no event unless you supply one" --
 EXCEPT under seasonal_naive, where they follow the cycle so recurring events
 still repeat. Flags come from an explicit `event_columns` list if given,
 else are auto-detected (columns whose values are only 0 and 1). The `cycle`
-legacy strategy is exempt from type-awareness and tiles every column as-is,
-to reproduce the old behaviour exactly.
+strategy is exempt from type-awareness and tiles every column as-is.
 
 Robustness: history is coerced to numeric and all aggregations are NaN-aware;
 any continuous output for a non-negative driver is clipped at 0 (so a
@@ -149,7 +147,7 @@ def _linear_trend(hist, ctx):
 
 
 def _cycle(hist, ctx):
-    """Legacy: tile the trailing history to cover the horizon (the pre-1.0 default)."""
+    """Tile the trailing history to cover the horizon."""
     n = hist.size
     if n == 0:
         return np.zeros(ctx.horizon)
@@ -274,7 +272,7 @@ def resolve_future_exog(
         hist = pd.to_numeric(history_df[col], errors="coerce").to_numpy(dtype=float)
 
         if strategy == "cycle":
-            # legacy: exempt from type-awareness; tile every column as-is
+            # exempt from type-awareness; tile every column as-is
             out[col] = _cycle(hist, ctx)
         elif _is_flag(col, hist, event_columns):
             out[col] = (
@@ -335,8 +333,8 @@ def describe_generation_risks(
        at this time last year is missed unless supplied -- Black Friday, in
        one real run.
 
-    Returns [] when nothing applies. The `cycle` legacy strategy tiles the
-    history as-is and is exempt, as it is from flag handling.
+    Returns [] when nothing applies. The `cycle` strategy tiles the history
+    as-is and is exempt, as it is from flag handling.
     """
     if strategy == "cycle" or not generated:
         return []
@@ -517,12 +515,13 @@ def check_future_table(
     Check a caller-supplied future driver table before any model sees it.
 
     Every model reads this table by POSITION -- row i is forecast period i --
-    and each model used to react to a bad table differently: too few rows
-    made Prophet and SARIMAX fail while CatBoost carried on alone; a
-    misspelled column was ignored and the real driver silently
-    auto-generated; a blank made two models drop out; an infinite value gave
-    Prophet a NaN forecast; a date column, if present, was never looked at.
-    The run still finished, so the damage looked like a forecast. Here a
+    and unchecked, each model reacts to a bad table differently: too few
+    rows make Prophet and SARIMAX fail while CatBoost carries on alone; a
+    misspelled column is ignored and the real driver silently
+    auto-generated; a blank makes two models drop out; an infinite value
+    gives Prophet a NaN forecast; an unread date column lets a misaligned
+    table through. The run still finishes, so the damage looks like a
+    forecast. Here a
     table either matches the forecast exactly or is rejected with the reason.
 
     Errors (InvalidConfigError):

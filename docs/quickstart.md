@@ -394,9 +394,9 @@ the seasonal-naive baseline. Any of `ensemble`, `per_model_mape`,
 `per_model_validation_mape`, `ensemble_mape` and `mape_threshold` passed
 explicitly replaces the forecaster's value; an explicit
 `per_model_validation_mape` also makes the best model be chosen on those
-MAPEs, even on a run that selected on WAPE. The export works without
-`forecaster=` as before, just without the WAPE columns, the baseline row and
-the error correlation.
+MAPEs, even on a run that selected on WAPE. Without `forecaster=` the export
+still works, just without the WAPE columns, the baseline row and the error
+correlation.
 
 This writes `final_ensemble_<method>` — **one per combination rule**, so
 asking for all three writes three of them — plus `final_best_model`,
@@ -429,11 +429,13 @@ stable pattern.
 selection-vs-reported gap is visible per model, plus `best_model_check`.
 After those, in this order: `validation_wape` and `wape`;
 `zero_actuals_excluded`, the test rows MAPE left out; `beats_naive`, whether
-the row's test WAPE is lower than the seasonal-naive baseline's; and
-`selection_metric`. The baseline itself is the last row, `seasonal_naive`,
+the row's test WAPE is lower than the seasonal-naive baseline's;
+`selection_metric`; and `band_coverage` and `band_test_points`, the share of
+test-window actuals inside the row's 95% band and how many points that is.
+The baseline itself is the last row, `seasonal_naive`,
 with status `baseline`. In `rejected_models`, the `mape` column holds the
 score the model was screened on, so its WAPE when `selection_metric` is
-`"wape"`; the added `selection_metric` column and the `reason` text say
+`"wape"`; its `selection_metric` column and the `reason` text say
 which. Its `ensemble_weight` column
 is deliberately blank for weightless rules such as the default trimmed mean —
 there is no weight, and filling in an equal share would imply an averaging

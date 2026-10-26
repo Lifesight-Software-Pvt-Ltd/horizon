@@ -614,8 +614,8 @@ def as_name_list(value, param_name: str) -> Optional[list]:
     other collection of names (list, tuple, set, pandas Index, 1-D array)
     becomes a list. Anything else raises InvalidConfigError.
 
-    A bare string used to be iterated letter by letter, so
-    independent_columns="spend" asked for the columns 's', 'p', 'e', ...
+    Iterated as-is, a bare string would be read letter by letter, so
+    independent_columns="spend" would ask for the columns 's', 'p', 'e', ...
     """
     if value is None:
         return None
@@ -737,15 +737,14 @@ def resolve_split(
        constant's comment for why the windows are absolute.
 
     2. **The percentage route.** Give `training_size` as a percentage
-       (50-100) or fraction (0.5-1.0), exactly as it has always meant, and
-       the remainder is divided between validation and test in the
+       (50-100) or fraction (0.5-1.0), and the remainder is divided
+       between validation and test in the
        _PERCENTAGE_ROUTE_VALIDATION_SHARE ratio.
 
     Passing `training_size` *and* either window size raises, rather than
-    silently letting one win. Note also that `training_size` keeps its
-    original percentage-only meaning: `training_size=80` is 80%, never 80
-    periods. The new window parameters are the ones that accept periods,
-    so no existing call quietly changes meaning.
+    silently letting one win. `training_size` is percentage-only:
+    `training_size=80` is 80%, never 80 periods; the window parameters are
+    the ones that accept periods.
 
     Returns:
         SplitSizes(n_train, n_validation, n_test).
@@ -876,9 +875,9 @@ def validate_mape_threshold(mape_threshold: Optional[float]) -> Optional[float]:
     if mape_threshold is None:
         return None
 
-    # A number, checked first: "40" used to fail later with a bare TypeError
-    # from the comparison below, and in the exporters it silently emptied
-    # model_summary.csv. bool is excluded because it is an int subclass.
+    # A number, checked first: "40" would otherwise fail later with a bare
+    # TypeError from the comparison below, and in the exporters it would
+    # silently empty model_summary.csv. bool is excluded because it is an int subclass.
     if isinstance(mape_threshold, bool) or not isinstance(mape_threshold, numbers.Real):
         raise InvalidConfigError(
             f"mape_threshold must be a number between {MAPE_THRESHOLD_MIN:g} and "
@@ -904,9 +903,9 @@ def validate_mape_threshold(mape_threshold: Optional[float]) -> Optional[float]:
 # Those modules take the result dicts a forecaster returns and are
 # duck-typed (they never import forecaster.py), so a wrong argument -- the
 # evaluate() results handed to export_forecast(), a list instead of a dict,
-# EvaluationResult objects as per_model_mape -- used to surface as a raw
-# AttributeError deep inside, or, for the scores, as Python reprs written
-# into the CSV.
+# EvaluationResult objects as per_model_mape -- would otherwise surface as
+# a raw AttributeError deep inside, or, for the scores, as Python reprs
+# written into the CSV.
 
 _RESULT_KINDS = {
     "forecast": (("forecast",), "forecaster.forecast(horizon)", "ForecastResult"),
@@ -993,9 +992,9 @@ def check_history(history, date_column, target_column, caller: str):
     """
     `history`, when given, must be a DataFrame holding the two named columns.
     Returns it with the date column read as dates (on a copy), using the same
-    rules as the forecaster: text dates straight from a CSV used to crash the
-    plots with a raw matplotlib TypeError, because they were drawn as text
-    categories on a date axis.
+    rules as the forecaster: text dates straight from a CSV would otherwise
+    crash the plots with a raw matplotlib TypeError, because they are drawn
+    as text categories on a date axis.
     """
     if history is None:
         return None

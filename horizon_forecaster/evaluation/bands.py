@@ -4,9 +4,9 @@ Calibrated 95% bands for every model and ensemble rule.
 Every forecast HorizonForecaster returns, from any model or ensemble rule,
 carries the same kind of band: one built from that forecast's own errors on
 the validation window (split conformal prediction). The models' own
-intervals are not used. They meant different things (Prophet's trend
+intervals are not used. They mean different things (Prophet's trend
 simulation, SARIMAX's state-space variance, PyMC's posterior), CatBoost,
-NeuralProphet and the ensembles had none, and the ones that existed covered
+NeuralProphet and the ensembles have none, and the ones that exist cover
 too little: on 80 test windows, Prophet's own band set to 95% held 86% of
 actuals over the first 28 days and SARIMAX's 76%, against 91% and 87% for
 these bands.

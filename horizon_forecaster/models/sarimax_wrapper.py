@@ -7,15 +7,13 @@ here -- the log transform, the annual Fourier terms, and the back-transform
 safeguards.
 
 Selection: SARIMAX uses the SAME forecaster-level grid search as every
-other model. It previously self-tuned via an internal search over a
-validation tail it carved out of train itself, which made it the odd one
-out: every other model was selected by the orchestrator, on the
-orchestrator's window. Since 1.0 the orchestrator scores every model's
-candidates on a dedicated validation window that no reported number comes
-from, so the concern that motivated SARIMAX's private search -- that
-shared selection meant selecting on the reported window -- no longer
-applies to anyone. One selection mechanism for every model is the more
-useful property here, so the grid varies (p, q), the seasonal (P, Q), and
+other model. A private search inside the wrapper, over a validation tail
+carved out of train, was considered and rejected: it would make SARIMAX
+the odd one out, selected differently from every other model, and it would
+protect nothing, since the orchestrator scores every model's candidates on
+a dedicated validation window that no reported number comes from. One
+selection mechanism for every model is the more useful property, so the
+grid varies (p, q), the seasonal (P, Q), and
 the annual Fourier order, while `d` stays ADF-derived (a property of the
 data, not a hyperparameter).
 
@@ -25,7 +23,7 @@ daily series annual Fourier was a clear win, while on a ~2-year weekly
 series it was actively harmful (and diverged outright at high order). No
 fixed default serves both.
 
-Key safeguards, all kept from the validation-search era:
+Key safeguards:
 
 - log1p fit / expm1 predict, so yhat is returned in RAW units.
 - enforce_stationarity=True on the final fit (falling back to False),
@@ -34,8 +32,8 @@ Key safeguards, all kept from the validation-search era:
   (not its raw max, which a single spike inflates enormously).
 - +sigma^2/2 lognormal bias correction, optional via `bias_correction`.
 - A divergence guard: a forecast pinned to the clip is rejected rather
-  than emitted as a degenerate flat line. With the grid now tolerating
-  per-candidate failures, a diverging candidate is simply skipped.
+  than emitted as a degenerate flat line. The grid tolerates
+  per-candidate failures, so a diverging candidate is simply skipped.
 - Unexpected zeros are left out of the fit (see unexpected_zero_mask()):
   in log space a zero among values in the thousands is an outlier of about
   7 units, and one or two of them were enough to wreck the forecast.
@@ -357,13 +355,13 @@ class SARIMAXWrapper(BaseModel):
         as possible. The fit then looks respectable in-sample and the
         forecast mean-reverts toward zero, gently at first and then not.
 
-        Observed directly on a trending daily series: ADF returned d=0, and
-        the resulting 80-period forecast fell from ~945 to 3.3 against
-        actuals near 1,300 (97.7% MAPE). Over a shorter 28-period horizon
-        the same defect merely halved the forecast -- which is far more
-        dangerous, because it reads as a plausible downturn rather than an
-        obvious failure, and the existing divergence guard only watches for
-        explosions upward.
+        Observed directly on a trending daily series fitted without a
+        trend term: ADF returned d=0, and the resulting 80-period forecast
+        fell from ~945 to 3.3 against actuals near 1,300 (97.7% MAPE). Over
+        a shorter 28-period horizon it merely halved the forecast -- which
+        is far more dangerous, because it reads as a plausible downturn
+        rather than an obvious failure, and the divergence guard only
+        watches for explosions upward.
 
         The term used when nothing is differenced is "ct" (constant AND
         linear trend), not just "c". A constant alone stops the collapse to
@@ -377,10 +375,10 @@ class SARIMAXWrapper(BaseModel):
         slope is estimated at essentially zero and costs nothing (4.1% with
         "c" vs 3.9% with "ct" on flat synthetic data).
 
-        Deliberately narrow: this changes only the branch that was broken.
-        The differencing decision itself is untouched, so every series that
-        currently gets d>=1 -- random walks, level shifts, exponential
-        growth -- fits exactly as it did before.
+        Deliberately narrow: only an undifferenced fit gets a trend term.
+        The differencing decision itself is separate, and a series that gets
+        d>=1 -- random walks, level shifts, exponential growth -- is fitted
+        with no trend term.
         """
         differenced = order[1] > 0 or seasonal_order[1] > 0
         return "n" if differenced else "ct"

@@ -24,8 +24,8 @@ notes unless you would rather we did not.
 
 `neuralprophet==0.8.0` constrains `torch` and `pytorch-lightning` to versions
 carrying 24 known CVEs. This is a consequence of NeuralProphet's own upper
-bounds rather than a choice, and it is documented in `CHANGELOG.md` under
-"Still deferred". The alternative available today is a NeuralProphet
+bounds rather than a choice, and it is listed in `CHANGELOG.md` under
+"Known gaps". The alternative available today is a NeuralProphet
 pre-release with breaking API changes and no coverage against this code, so the
 pin stands until a vetted release can be adopted. If your deployment cannot
 accept those CVEs, run without NeuralProphet — pass `models=` excluding it, and

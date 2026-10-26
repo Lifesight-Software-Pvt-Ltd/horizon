@@ -59,7 +59,7 @@ def test_primary_loader_is_used_when_it_works(monkeypatch):
 
 def test_fallback_restores_the_trainer(monkeypatch):
     """
-    Regression cover for a CI-only failure: save() nulls the Lightning
+    Covers a failure seen only in CI: save() nulls the Lightning
     trainer (it isn't picklable) and NeuralProphet's load() rebuilds it via
     restore_trainer(). A bare torch.load() skips that, so the model returns
     with trainer=None and the next predict() dies with a bare

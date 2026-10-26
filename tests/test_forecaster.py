@@ -278,10 +278,9 @@ def test_constructor_rejects_spacing_it_does_not_support(dates, frequency, typic
 
 def test_constructor_rejects_dates_with_no_regular_spacing():
     """
-    Previously this only warned ("irregular spacing should warn, not
-    raise"). Four dates with gaps of 2, 7 and 15 days have no frequency at
-    all, and the run went on to produce settings and forecast dates for one
-    anyway.
+    Four dates with gaps of 2, 7 and 15 days have no frequency at all; with
+    only a warning, the run would go on to produce settings and forecast
+    dates for one anyway.
     """
     dates = pd.to_datetime(["2026-01-01", "2026-01-03", "2026-01-10", "2026-01-25"])
     with pytest.raises(UnsupportedFrequencyError, match="resample"):
@@ -313,8 +312,7 @@ def test_constructor_rejects_daily_dates_with_inconsistent_times():
 )
 def test_constructor_rejects_any_missing_date(dates, frequency):
     """
-    Missing dates used to warn when scattered and raise only past four
-    weeks in a row. Now one missing day or week is enough.
+    One missing day or week is enough to raise, scattered or not.
     """
     with pytest.raises(InvalidConfigError, match="Every (day|week) must be present"):
         _build(_spacing_df(dates), frequency)
@@ -689,7 +687,7 @@ def test_evaluate_all_models_fail_raises_all_models_rejected_error():
     raised rather than returning a silently-empty dict. The real
     underlying exception is still available via evaluate_errors.
     """
-    df = make_raw_df(n=10)  # 80% train -> 8 rows, below daily floor of 14
+    df = make_raw_df(n=10)  # 6 train + 3 validation rows: below the daily floor of 14 even refit
     forecaster = HorizonForecaster(
         df, date_column="date", target_column="orders", frequency="daily", models=["prophet"]
     )
@@ -759,11 +757,9 @@ def test_forecast_runs_both_models_by_default():
 
 def test_evaluate_partial_failure_returns_successful_models_and_records_errors():
     """
-    CatBoostAdapter's redesign removed the lag-warmup mechanism that
-    used to give CatBoost a higher EFFECTIVE min-rows floor than
-    Prophet's (see CHANGELOG) -- both models now use the exact same raw
-    row-count check. So a genuine partial failure here needs a real
-    model-family failure, not a data-size coincidence: depth=-1 is a
+    CatBoost and Prophet use the exact same raw row-count check, so a
+    genuine partial failure here needs a real model-family failure, not a
+    data-size coincidence: depth=-1 is a
     confirmed-empirically-real invalid CatBoost hyperparameter (see
     test_catboost.py), used here to make CatBoost fail while Prophet
     (given valid params) succeeds on the same dataset.
@@ -833,7 +829,7 @@ def test_grid_search_is_independent_per_model():
 
 def test_catboost_test_split_features_are_anchored_to_train_history_not_test_split():
     """
-    Direct regression test for the orchestrator's split construction,
+    Direct test of the orchestrator's split construction,
     against CatBoostAdapter's lag/rolling-free feature set: the
     test split's features must be built via transform_future() (reusing
     the adapter's retained reference_date from transform_train()), not
@@ -908,7 +904,7 @@ def test_forecast_raises_on_non_positive_horizon():
 
 @pytest.mark.parametrize("horizon", [2.5, float("nan"), True, "5"])
 def test_forecast_raises_on_non_integer_horizon(horizon):
-    # A float used to build int(horizon) future dates and then fail inside
+    # A float would build int(horizon) future dates and then fail inside
     # every model as a row-count mismatch, surfacing as AllModelsRejectedError.
     # Raised before any model is fitted, so this costs no fit.
     df = make_raw_df(n=60)
@@ -1207,9 +1203,9 @@ def test_forecast_does_not_warn_when_horizon_is_reasonable():
 
 def test_forecast_warns_once_horizon_exceeds_half_of_history():
     """
-    The old rule only fired above 2x the ENTIRE history, so forecasting
-    100 periods from 121 was silent -- the case that produced a real
-    implausible forecast. Now half the history is enough to flag.
+    Half the history is enough to flag. Forecasting 100 periods from 121 is
+    the case that produced a real implausible forecast, and a rule that
+    fired only above 2x the whole history would stay silent on it.
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
@@ -1309,7 +1305,7 @@ def test_grid_search_skips_failing_candidates_and_uses_the_survivors():
         frequency="daily",
         models=["sarimax"],
         # The split these tests were written against: SARIMAX needs 35
-        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        # training rows, which the scaled-down defaults (33 of 60) do not leave.
         validation_size=16,
         test_size=8,
     )
@@ -1339,7 +1335,7 @@ def test_grid_search_fails_the_model_only_when_every_candidate_fails():
         frequency="daily",
         models=["sarimax"],
         # The split these tests were written against: SARIMAX needs 35
-        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        # training rows, which the scaled-down defaults (33 of 60) do not leave.
         validation_size=16,
         test_size=8,
     )
@@ -1405,9 +1401,8 @@ def test_total_grid_failure_preserves_the_original_exception_type():
     original exception must be re-raised rather than relabelled, so its type
     and structured attributes survive for callers that branch on them.
 
-    Regression cover: candidate-skipping originally wrapped every total
-    failure in ModelConvergenceError, which turned a plain "not enough rows"
-    into a misleading convergence error and dropped
+    Wrapping every total failure in ModelConvergenceError instead would turn
+    a plain "not enough rows" into a misleading convergence error and drop
     required_periods/available_periods on the floor.
     """
     df = make_raw_df(n=60)
@@ -1418,7 +1413,7 @@ def test_total_grid_failure_preserves_the_original_exception_type():
         frequency="daily",
         models=["sarimax"],
         # The split these tests were written against: SARIMAX needs 35
-        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        # training rows, which the scaled-down defaults (33 of 60) do not leave.
         validation_size=16,
         test_size=8,
     )
@@ -1452,7 +1447,7 @@ def test_mixed_grid_failures_become_an_aggregate_convergence_error():
         frequency="daily",
         models=["sarimax"],
         # The split these tests were written against: SARIMAX needs 35
-        # training rows, which the scaled-down defaults (33 of 60) no longer leave.
+        # training rows, which the scaled-down defaults (33 of 60) do not leave.
         validation_size=16,
         test_size=8,
     )
@@ -1644,8 +1639,8 @@ def test_forecast_screens_on_validation_mape_without_running_a_full_evaluate():
     forecast() needs a validation MAPE to screen and weight, but it does
     NOT need evaluate(): selection has to happen anyway to know which
     hyperparameters to fit with, and that produces the score for free.
-    Before 1.0 this ran the whole of evaluate() internally, additionally
-    paying for a test-window prediction it then threw away.
+    Running the whole of evaluate() internally would also pay for a
+    test-window prediction that is then thrown away.
     """
     df = make_noisy_raw_df()
     forecaster = HorizonForecaster(
@@ -1721,13 +1716,12 @@ def test_forecast_skips_internal_evaluate_when_already_called_explicitly():
 
 def test_forecast_succeeds_when_the_model_cannot_be_scored_on_validation():
     """
-    n=16 -> evaluate()'s 80% train split is 12 rows, below the daily
-    floor of 14 (fails outright), but forecast()'s own full-data refit
-    uses all 16 rows, which clears the floor. This confirms forecast()
-    still attempts (and succeeds at) its own fits even when the
-    internal evaluate() call it runs for ensemble weights finds nothing
-    at all -- a model failing on the smaller train/test split doesn't
-    block forecast() from succeeding with more data.
+    n=16 -> 9 training rows, below the daily floor of 14, so the model
+    cannot be scored on validation; forecast()'s own full-data refit uses
+    all 16 rows, which clears the floor. This confirms forecast() still
+    attempts (and succeeds at) its own fit when selection has no
+    validation score -- a model failing on the smaller training window
+    doesn't block forecast() from succeeding with more data.
     """
     df = make_raw_df(n=16)
     forecaster = HorizonForecaster(
@@ -1752,8 +1746,8 @@ def test_forecast_succeeds_when_the_model_cannot_be_scored_on_validation():
 # ---------- drivers that never change inside one fit window ----------
 # A driver can vary over the full history (so it survives the zero-variance
 # check) yet be one value throughout a fit window -- a price change that
-# first appears in validation. NeuralProphet used to crash on it and Prophet
-# to invent an effect; it is now left out of that window's fit for every
+# first appears in validation. Left in, NeuralProphet crashes on it and
+# Prophet invents an effect, so it is left out of that window's fit for every
 # model, with a warning naming the score it affects.
 
 
@@ -1901,9 +1895,9 @@ def test_forecast_warns_when_carry_forward_holds_a_last_day_spike():
 
 # ---------- input checks: values, column roles and arguments ----------
 #
-# Each case here used to run to completion with a meaningless result, or
-# fail as a raw Python error deep inside the models. All are constructor
-# checks, so no model is fitted.
+# Unchecked, each case here would run to completion with a meaningless
+# result, or fail as a raw Python error deep inside the models. All are
+# constructor checks, so no model is fitted.
 
 
 def _construct(df, **kwargs):
@@ -1939,7 +1933,7 @@ def test_constructor_rejects_infinite_driver(bad):
 
 
 def test_constructor_rejects_a_driver_that_is_infinite_everywhere():
-    # Used to be dropped as "zero variance" without a word.
+    # Unchecked, it would be dropped as "zero variance" without a word.
     df = make_raw_df(with_spend=True)
     df["spend"] = math.inf
     with pytest.raises(InvalidConfigError, match="'spend' is infinite in every row"):
@@ -1948,7 +1942,7 @@ def test_constructor_rejects_a_driver_that_is_infinite_everywhere():
 
 @pytest.mark.parametrize("blank", [float("nan"), None, ""])
 def test_constructor_rejects_an_all_blank_driver_like_a_single_blank(blank):
-    # A single blank always raised; an all-blank driver used to count as
+    # Like a single blank; unchecked, an all-blank driver would count as
     # "constant" and vanish from the run.
     df = make_raw_df(with_spend=True)
     df["spend"] = blank
@@ -2156,8 +2150,8 @@ def test_forecast_rejects_a_horizon_past_the_last_representable_date():
 
 # ---------- models that drop out, and ensembles that lose members ----------
 #
-# Each of these used to be visible only by reading evaluate_errors /
-# forecast_errors or the EnsembleResult fields.
+# Without the warnings, each of these is visible only by reading
+# evaluate_errors / forecast_errors or the EnsembleResult fields.
 
 _QUICK = {"prophet": {"seasonality_mode": "additive"}, "catboost": {"iterations": 50, "depth": 3}}
 

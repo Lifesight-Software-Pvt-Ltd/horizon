@@ -27,9 +27,9 @@ def test_requires_valid_frequency():
 
 def test_transform_train_emits_ds_y_and_independents_only():
     """
-    Annual Fourier used to be generated here; it now lives in the wrapper so
-    the grid search can choose its order. The adapter must emit nothing but
-    ds, y and the (transformed) independent columns.
+    Annual Fourier lives in the wrapper, so the grid search can choose its
+    order. The adapter must emit nothing but ds, y and the (transformed)
+    independent columns.
     """
     adapter = SARIMAXAdapter("date", "orders", ["spend", "promo"], "daily")
     out = adapter.transform_train(make_raw(220))

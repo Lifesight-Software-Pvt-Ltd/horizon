@@ -57,8 +57,9 @@ The notebooks read their data from a URL by default so that Colab works unchange
 
 These notebooks fit real models — Prophet and PyMC compile on first use, and Bayesian PyMC
 draws a full MCMC sample per grid candidate. Each notebook has a `FAST` switch. It is off as
-committed, so the saved outputs show all five models; expect the daily notebook to take an hour
-or more on a free Colab CPU. Set `FAST = True` to run three models (Prophet, CatBoost, SARIMAX)
+committed, so the saved outputs show all five models; on a free Colab CPU expect about half
+an hour for the daily notebook and about 15 minutes for the weekly one, plus the install.
+Set `FAST = True` to run three models (Prophet, CatBoost, SARIMAX)
 in a few minutes, with their grid searches intact, so the real selection machinery still runs.
 
 ## Data

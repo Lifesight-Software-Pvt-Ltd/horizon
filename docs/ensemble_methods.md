@@ -93,7 +93,7 @@ Each value in the dict is an `EnsembleResult` (`evaluation/ensemble.py`):
 
 | Field | Meaning |
 |---|---|
-| `combined` | `DataFrame["ds", "yhat"]` — the combined prediction, a genuinely new series. `None` if no member was available to combine. |
+| `combined` | `DataFrame["ds", "yhat", "yhat_lower", "yhat_upper"]` — the combined prediction, a genuinely new series, with its own calibrated 95% band (no band columns when the rule has no band; see `band`). `None` if no member was available to combine. |
 | `method` | The combination rule that was **requested**. |
 | `rule_applied` | The rule that actually **ran** — see the ladder above. Branch on this, not on `method`, when what matters is the statistic produced. |
 | `members` | The models that fed the combination, in the order they were combined. |
@@ -102,6 +102,8 @@ Each value in the dict is an `EnsembleResult` (`evaluation/ensemble.py`):
 | `trim_shares` | Trimming only: a per-member DataFrame of how often each member was discarded as the period's high or low. More diagnostically useful than weights — it identifies which model misbehaves, and on how much of the horizon. `None` for the weighted rules and for the degraded fallbacks. |
 | `rejected_models` | `{"catboost": ThresholdRejectionError(...)}` — one entry per model excluded before combination, with its validation score and the threshold it exceeded (if any). |
 | `mape` | The ensemble's own `MapeResult`, scored against real actuals. Only set in the `evaluate()` context (held-out actuals exist); always `None` for `forecast_ensemble`, since there is no ground truth for the future yet. |
+| `wape` | The ensemble's own WAPE on the same window, set exactly when `mape` is; `None` for `forecast_ensemble`. |
+| `band` | How the 95% band in `combined` was calibrated: a `BandCalibration` with its width, the number of validation errors and the zero days left out. `width` is `None`, with a `reason`, when the rule has no band. |
 
 A model in `rejected_models` is **not the same thing** as a model in
 `evaluate_errors`/`forecast_errors`. A rejected model fit and predicted

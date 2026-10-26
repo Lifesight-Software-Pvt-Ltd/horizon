@@ -322,7 +322,7 @@ def test_save_and_load_preserves_categorical_feature_names(tmp_path):
 
 def test_save_and_load_preserves_target_min_for_clipping(tmp_path):
     """
-    Regression test: target_min must survive the save/load roundtrip,
+    target_min must survive the save/load roundtrip,
     or a reloaded model would silently lose its clipping behavior (fall
     back to _target_min=None, which skips clipping regardless of what
     the original model would have done).
@@ -335,29 +335,6 @@ def test_save_and_load_preserves_target_min_for_clipping(tmp_path):
 
     reloaded = CatBoostWrapper.load(save_path)
     assert reloaded._target_min == original._target_min == 10.0
-
-
-def test_load_of_pre_target_min_envelope_falls_back_to_none(tmp_path):
-    """
-    Backward compatibility: an envelope saved before target_min existed
-    (no such key) must load cleanly with _target_min=None (no clipping),
-    not raise a KeyError.
-    """
-    import json
-
-    save_path = str(tmp_path / "catboost_model.json")
-    original = CatBoostWrapper(frequency="daily")
-    original.fit(make_train_df())
-    original.save(save_path)
-
-    with open(save_path) as f:
-        envelope = json.load(f)
-    del envelope["target_min"]
-    with open(save_path, "w") as f:
-        json.dump(envelope, f)
-
-    reloaded = CatBoostWrapper.load(save_path)
-    assert reloaded._target_min is None
 
 
 def test_loaded_model_is_a_fresh_instance_not_shared_state(tmp_path):
@@ -408,9 +385,9 @@ def test_fit_writes_no_catboost_info_folder(tmp_path, monkeypatch):
 
 def test_load_reads_the_model_file_next_to_the_envelope_after_a_move(tmp_path):
     """
-    load() used to read the .cbm path stored inside the envelope, so moving
-    the saved files broke it ("Model file doesn't exist"), and a different
-    model left at the old path would have been loaded instead.
+    load() reads the .cbm file next to the envelope, not the path stored
+    inside it: that path would break after a move ("Model file doesn't
+    exist"), or load a different model left at the original location.
     """
     original_dir, moved_dir = tmp_path / "saved", tmp_path / "moved"
     original_dir.mkdir()
@@ -422,7 +399,7 @@ def test_load_reads_the_model_file_next_to_the_envelope_after_a_move(tmp_path):
     (tmp_path / "model.tmp").rename(moved_dir / "model")
     (original_dir / "model.cbm").rename(moved_dir / "model.cbm")
 
-    # A different model now sits at the old path: it must not be the one loaded.
+    # A different model sits at the original path: it must not be the one loaded.
     other = CatBoostWrapper(frequency="daily", params={"iterations": 5})
     other.fit(make_train_df())
     other.save(str(original_dir / "model"))

@@ -157,7 +157,10 @@ contribution is:
    and `transform_future()`, with state fitted on train reused for the future.
 2. `models/<name>_wrapper.py` — `fit()`/`predict()`, plus `save()`/`load()` if
    the backend does not pickle reliably. `predict()` returns `ds`/`yhat`, and
-   `yhat_lower`/`yhat_upper` only if the model produces them natively.
+   `yhat_lower`/`yhat_upper` only if the model produces them natively;
+   `HorizonForecaster` replaces any native bounds with its calibrated 95% band.
+   If the model has settings that only shape its own interval, list them in
+   `_NATIVE_BAND_SETTINGS` in `forecaster.py`, so `model_params` refuses them.
 3. A `<name>:` block in `config/default_params.yaml` with daily and weekly
    `base_hyperparameters`, `hyperparameter_grid` and `wrapper_config`
    (`min_rows_required`, `random_seed`), mirroring the existing blocks.
@@ -198,11 +201,9 @@ actually needed them.
   trusted. Do not add a global skip.
 - `CHANGELOG.md` has an `Added`/`Fixed`/`Changed` entry if a user of the
   library would notice the change. Open a new `## [Unreleased]` section above
-  the latest release if one is not there; do not file under
-  `## Prior development`, which is a closed record. For a real bug, say what
-  actually broke, how it was diagnosed, and what confirmed the fix — the
-  entries in 1.0.0 set the level of detail. Purely internal refactoring needs
-  no entry, but still needs test coverage.
+  the latest release if one is not there. For a real bug, say what actually
+  broke, how it was diagnosed, and what confirmed the fix. Purely internal
+  refactoring needs no entry, but still needs test coverage.
 - If you changed anything the example notebooks call or show — a parameter,
   a default, an exported column, a warning — check that the notebooks in
   `examples/` still run (`FAST = True` takes a few minutes) and update their
@@ -245,7 +246,7 @@ anything in `forecaster.py` or `evaluation/ensemble.py`:
 
 Known gaps — rolling-origin backtesting, benchmark-relative metrics
 (RelMAE/MASE), family de-duplication of Prophet and NeuralProphet, and using
-error diversity in the ensemble (it is reported, not acted on) — are listed with their reasoning under "Still
-deferred" in [`CHANGELOG.md`](CHANGELOG.md) and in
-[`docs/design_notes.md`](docs/design_notes.md) §9. They are open to
+error diversity in the ensemble (it is reported, not acted on) — are listed
+under "Known gaps" in [`CHANGELOG.md`](CHANGELOG.md) and, with their
+reasoning, in [`docs/design_notes.md`](docs/design_notes.md) §9. They are open to
 contribution, but each is a design conversation first.

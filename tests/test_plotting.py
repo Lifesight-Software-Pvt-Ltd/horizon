@@ -224,9 +224,8 @@ def test_plot_model_comparison_flags_when_no_ensemble_formed():
 
 
 def test_plot_model_comparison_tolerates_a_nan_mape():
-    # A test window of nothing but zero actuals gives a NaN MAPE. The chart
-    # used to pass that to set_ylim, which raised -- and took
-    # save_evaluation_plots down with it.
+    # A test window of nothing but zero actuals gives a NaN MAPE. Passed to
+    # set_ylim it would raise -- and take save_evaluation_plots down with it.
     results = {"prophet": make_eval_result(float("nan")), "catboost": make_eval_result(12.0)}
     ax = plot_model_comparison(results)
     assert len(ax.patches) == 2
@@ -349,10 +348,10 @@ def _three_rules():
 
 def test_plot_evaluation_draws_one_chart_per_rule_against_every_model():
     """
-    The defect this shape exists to prevent: with three rules built, the
-    charts used to show only the first, so two combinations the caller had
-    paid to compute were invisible. Each rule now gets its own chart
-    carrying the SAME models and actuals, which is what makes the rules
+    What this shape exists to prevent: with three rules built, charts that
+    showed only the first would hide two combinations the caller had paid
+    to compute. Each rule gets its own chart carrying the SAME models and
+    actuals, which is what makes the rules
     comparable against the truth rather than only against each other.
     """
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(12.0)}
@@ -470,10 +469,10 @@ def test_bar_chart_note_only_when_no_rule_formed_at_all():
 def test_every_plot_entry_point_accepts_the_forecaster_dict():
     """
     HorizonForecaster.evaluate_ensemble / forecast_ensemble are
-    {method: EnsembleResult} dicts. Before 1.0.0 only the overlay charts
-    normalised that, so the per-model and save_* variants -- and therefore
-    exporters.export_forecast(save_plots=True), the documented one-call
-    export -- died with AttributeError on a perfectly ordinary run. Every
+    {method: EnsembleResult} dicts. An entry point that did not normalise
+    that would die with AttributeError on a perfectly ordinary run -- and
+    through save_* so would exporters.export_forecast(save_plots=True), the
+    documented one-call export. Every
     entry point must accept the dict.
     """
     results = {"prophet": make_eval_result(5.0), "catboost": make_eval_result(9.0)}
@@ -587,7 +586,7 @@ def test_empty_results_raise_the_librarys_error_which_is_still_a_value_error():
 
 
 def test_plot_forecast_reads_text_dates_in_history():
-    # Text dates straight from a CSV used to crash with a raw matplotlib TypeError.
+    # Text dates straight from a CSV would otherwise crash with a raw matplotlib TypeError.
     history = pd.DataFrame(
         {"date": ["2022-12-29", "2022-12-30", "2022-12-31"], "orders": [1, 2, 3]}
     )

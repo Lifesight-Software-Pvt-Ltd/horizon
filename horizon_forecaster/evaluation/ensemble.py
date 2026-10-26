@@ -37,9 +37,8 @@ takes `per_model_selection_mape` (used for screening and for
 inverse-MAPE weights) and, optionally, `actuals` (used to score the
 combined result). The first must come from a window that was allowed to
 influence decisions -- Horizon's validation window. The second is
-measured on the reporting window. Collapsing them into one argument is
-what allowed the pre-1.0 library to weight an ensemble using the very
-numbers it then reported.
+measured on the reporting window. Collapsing them into one argument would
+let an ensemble be weighted using the very numbers it then reports.
 
 Design constraint carried over from models/base.py's BaseModel.predict()
 contract: this module operates on the "yhat" column ONLY. Bounds
@@ -181,12 +180,10 @@ def as_ensemble_dict(
     caller holding one result doesn't have to wrap it, and None maps to an
     empty dict so consumers need no special case.
 
-    Lives here, next to EnsembleResult, rather than in either consumer.
-    It previously existed as identical copies in plotting.py and
-    exporters.py, and the two drifted: exporters normalised its input
-    while half of plotting's entry points did not, so passing the dict a
-    forecaster actually produces raised AttributeError from
-    export_forecast(save_plots=True). Note it cannot live in plotting.py
+    Lives here, next to EnsembleResult, rather than in either consumer:
+    one copy in each of plotting.py and exporters.py would drift, and a
+    consumer that skipped the normalisation would raise AttributeError on
+    the dict a forecaster actually produces. It cannot live in plotting.py
     either -- that module imports matplotlib at module scope, and
     exporters.py deliberately keeps matplotlib off the CSV-only path.
     """
@@ -222,10 +219,10 @@ def _align_members(
     misalignment between models raises instead of silently combining
     mismatched rows.
 
-    This is deliberately separate from the rules that consume it. In the
-    pre-1.0 module, alignment was fused into the weighted-sum loop --
-    which meant the loop was driven by the weights dict, and a rule with
-    no weights (like trimming) had no way to align anything at all.
+    This is deliberately separate from the rules that consume it: fused
+    into a weighted-sum loop, alignment would be driven by the weights
+    dict, and a rule with no weights (like trimming) would have no way to
+    align anything at all.
     """
     aligned: Optional[pd.DataFrame] = None
     expected_rows: Optional[int] = None

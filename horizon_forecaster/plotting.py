@@ -507,7 +507,7 @@ def plot_model_comparison(
     # name, so at a fixed width they run into their neighbours and become
     # unreadable -- horizontal labels only fit while every name is short.
     # Rotating anchors each label's right end under its own bar, so length
-    # no longer decides whether it collides.
+    # does not decide whether it collides.
     ax = _new_ax(ax, figsize=(max(8.0, 1.35 * len(names)), 5))
     bars = ax.bar(names, values, color=colors)
     ax.bar_label(bars, fmt="%.2f%%", padding=3)

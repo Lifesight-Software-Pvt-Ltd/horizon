@@ -46,9 +46,9 @@ from:
 
 - Uncertainty: yhat_lower/upper are a posterior-PREDICTIVE interval -- the
   3rd/97th percentiles of draws from `y ~ StudentT(nu, mu, sigma)`, not of
-  `mu` alone. The reference implementation (and an earlier cut of this
-  wrapper) banded `mu`, the latent mean, which omits the observation noise and badly under-covers
-  (only ~34% of real actuals fell inside its nominal 94% band on daily
+  `mu` alone. The reference implementation banded `mu`, the latent mean,
+  which omits the observation noise and badly under-covers (only ~34% of
+  real actuals fell inside its nominal 94% band on daily
   data); sampling the likelihood adds that noise back so the band covers
   ~(ci_upper - ci_lower)% of outcomes. These bounds are what the wrapper
   returns when used on its own: HorizonForecaster discards them and gives
@@ -363,15 +363,15 @@ class BayesianPyMCWrapper(BaseModel):
             Undo the target z-scoring, flooring at zero only when the
             training target itself never went negative.
 
-            The floor used to be unconditional, which silently corrupted
-            any target that legitimately goes below zero -- net revenue
-            after refunds, inventory deltas, week-on-week change. Such a
-            series would have every negative prediction quietly rewritten
-            to 0, which is not a conservative approximation but a wrong
-            number presented with full confidence. Now data-driven, the
-            same rule CatBoostWrapper and NeuralProphetWrapper already
-            apply: a target observed to be non-negative keeps the floor,
-            and one that dips negative is returned unaltered.
+            An unconditional floor would silently corrupt any target that
+            legitimately goes below zero -- net revenue after refunds,
+            inventory deltas, week-on-week change. Such a series would have
+            every negative prediction quietly rewritten to 0, which is not a
+            conservative approximation but a wrong number presented with
+            full confidence. So the floor is data-driven, the same rule
+            CatBoostWrapper and NeuralProphetWrapper apply: a target
+            observed to be non-negative keeps the floor, and one that dips
+            negative is returned unaltered.
             """
             raw = z * self._y_std + self._y_mean
             if self._target_min is not None and self._target_min >= 0:
