@@ -28,7 +28,8 @@ class CatBoostWrapper(BaseModel):
     output, and BaseModel's contract (see models/base.py) explicitly
     says wrappers without native uncertainty support should simply omit
     those columns rather than fabricate them. predict() therefore
-    always returns exactly ["ds", "yhat"].
+    always returns exactly ["ds", "yhat"]; HorizonForecaster adds the same
+    calibrated 95% band it gives every model (evaluation/bands.py).
 
     Design decision (revised — see CatBoostAdapter's module docstring for
     the full finding): no calendar feature is declared categorical.

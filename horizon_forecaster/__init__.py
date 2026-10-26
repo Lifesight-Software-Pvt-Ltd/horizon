@@ -17,6 +17,7 @@ imports its own backend lazily, inside fit(), so a script that only needs
 the metrics or the ensemble maths pays none of that cost.
 """
 
+from horizon_forecaster.evaluation.bands import BAND_LEVEL, BandCalibration
 from horizon_forecaster.evaluation.ensemble import (
     DEFAULT_ENSEMBLE_METHOD,
     ENSEMBLE_METHODS,
@@ -66,6 +67,9 @@ __all__ = [
     "build_ensembles",
     "ENSEMBLE_METHODS",
     "DEFAULT_ENSEMBLE_METHOD",
+    # bands
+    "BandCalibration",
+    "BAND_LEVEL",
     # metrics
     "MapeResult",
     "mape",

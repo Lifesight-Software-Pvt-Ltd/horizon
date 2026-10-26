@@ -709,6 +709,8 @@ def test_summary_keeps_the_original_columns_first():
         "zero_actuals_excluded",
         "beats_naive",
         "selection_metric",
+        "band_coverage",
+        "band_test_points",
     ]
 
 

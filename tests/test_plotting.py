@@ -646,3 +646,16 @@ def test_comparison_metric_accepts_any_case(tmp_path):
         {"prophet": _scored(5.0, 7.5)}, output_dir=str(tmp_path), metric="Wape"
     )
     assert Path(written["wape_comparison"]).name == "evaluation_wape_comparison.png"
+
+
+def test_overlay_shades_only_the_ensembles_band_when_every_model_has_one():
+    results = {
+        "prophet": make_eval_result(5.0, with_bounds=True),
+        "sarimax": make_eval_result(6.0, with_bounds=True),
+    }
+    ensemble = make_ensemble()
+    ensemble.combined["yhat_lower"] = [10, 18, 30]
+    ensemble.combined["yhat_upper"] = [14, 22, 34]
+    ax = _only(plot_evaluation(results, ensemble=ensemble))
+    assert len(ax.collections) == 1  # five overlapping bands would hide the lines
+    assert ax.collections[0].get_label() == "Ensemble 95% band"

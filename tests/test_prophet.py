@@ -150,6 +150,28 @@ def test_predict_returns_expected_shape_and_columns():
     assert len(forecast) == 7
 
 
+def test_predict_without_uncertainty_samples_returns_only_the_point_forecast():
+    # HorizonForecaster's config sets uncertainty_samples=0: Prophet then
+    # skips its interval simulation and returns no bound columns, and the
+    # point forecast is unchanged.
+    future = pd.DataFrame({"ds": pd.date_range("2026-01-31", periods=7, freq="D")})
+    with_interval = ProphetWrapper(frequency="daily").fit(make_train_df(), "y")
+    without = ProphetWrapper(frequency="daily", params={"uncertainty_samples": 0})
+    forecast = without.fit(make_train_df(), "y").predict(horizon=7, future_exog=future)
+    assert list(forecast.columns) == ["ds", "yhat"]
+    assert forecast["yhat"].tolist() == pytest.approx(
+        with_interval.predict(horizon=7, future_exog=future)["yhat"].tolist()
+    )
+
+
+def test_the_config_turns_off_prophets_own_interval():
+    from horizon_forecaster.forecaster import _default_params
+
+    for frequency in ("daily", "weekly"):
+        base = _default_params()["prophet"][frequency]["base_hyperparameters"]
+        assert base["uncertainty_samples"] == 0
+
+
 def test_predict_raises_when_horizon_does_not_match_future_exog_length():
     model = ProphetWrapper(frequency="daily")
     model.fit(make_train_df(), target_column="y")

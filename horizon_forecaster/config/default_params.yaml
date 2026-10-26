@@ -54,6 +54,10 @@ prophet:
   daily:
     base_hyperparameters:
       daily_seasonality: false
+      # Prophet's own interval is never used: HorizonForecaster gives every
+      # model a calibrated 95% band (evaluation/bands.py). 0 skips the
+      # interval simulation Prophet would otherwise run on every predict().
+      uncertainty_samples: 0
     hyperparameter_grid:
       - seasonality_mode: additive
         yearly_seasonality: 10
@@ -85,6 +89,7 @@ prophet:
   weekly:
     base_hyperparameters:
       daily_seasonality: false
+      uncertainty_samples: 0  # see the daily block
     # NOTE: weekly_seasonality is included in the first 4 candidates for
     # consistency with the daily grid above, but is arguably not
     # meaningful at weekly granularity (each row already IS a week, so
@@ -386,7 +391,6 @@ catboost:
 sarimax:
   daily:
     base_hyperparameters:
-      alpha: 0.05                 # significance level for yhat_lower/upper (0.05 -> a 95% band)
       log_clip_headroom: 1.5      # explosion guard: cap log yhat at the anchor + this
       clip_anchor_quantile: 0.99  # anchor that cap on a high quantile, not the raw max
       bias_correction: true       # +sigma^2/2 lognormal lift; false = median (MAPE-optimal)
@@ -406,7 +410,6 @@ sarimax:
       random_seed: 42
   weekly:
     base_hyperparameters:
-      alpha: 0.05
       log_clip_headroom: 1.5
       clip_anchor_quantile: 0.99
       bias_correction: true
@@ -578,8 +581,6 @@ bayesianpymc:
       max_treedepth: 15
       init: adapt_diag
       use_short_seasonal: true    # weekly cycle, meaningful for daily data
-      ci_lower_pct: 3
-      ci_upper_pct: 97
     # beta_fourier_sigma is grid-selected here (0.3 tight vs 1.0 loose) -- the
     # data decides via validation score; see note (c) above.
     hyperparameter_grid:
@@ -599,8 +600,6 @@ bayesianpymc:
       max_treedepth: 15
       init: adapt_diag
       use_short_seasonal: false   # no sub-weekly cycle at weekly granularity
-      ci_lower_pct: 3
-      ci_upper_pct: 97
     hyperparameter_grid:
       - {n_fourier: 4, target_accept: 0.95}
       - {n_fourier: 2, target_accept: 0.95}

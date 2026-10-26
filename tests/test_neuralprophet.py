@@ -223,7 +223,10 @@ def test_neuralprophet_is_registered_and_flows_through_forecaster():
     )
     results = f.evaluate()
     assert "neuralprophet" in results
-    assert "yhat_lower" not in results["neuralprophet"].test_predictions.columns
+    # No interval of its own; the forecaster's calibrated band, when there are
+    # enough validation errors for one.
+    has_band = results["neuralprophet"].band.width is not None
+    assert ("yhat_lower" in results["neuralprophet"].test_predictions.columns) == has_band
 
     forecasts = f.forecast(horizon=7)
     assert len(forecasts["neuralprophet"].forecast) == 7

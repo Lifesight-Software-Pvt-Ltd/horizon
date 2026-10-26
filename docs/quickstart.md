@@ -258,7 +258,7 @@ warning, and warns when its sampler did not converge.
 ```python
 forecasts = forecaster.forecast(horizon=30)   # 30 future periods
 
-sarimax_future = forecasts["sarimax"].forecast   # DataFrame ["ds", "yhat"] (+ bounds where a model provides them)
+sarimax_future = forecasts["sarimax"].forecast   # DataFrame ["ds", "yhat", "yhat_lower", "yhat_upper"]
 future_ensembles = forecaster.forecast_ensemble  # Dict[str, EnsembleResult], same keys as above
 ```
 
@@ -269,6 +269,13 @@ perform anyway in order to know which parameters to fit with, so those scores
 come for free and are cached. It does
 **not** run `evaluate()` internally, so calling `forecast()` first costs no more
 than calling it second.
+
+Every model's forecast, and every ensemble's `combined`, carries a 95% band in
+`yhat_lower` / `yhat_upper`, calibrated on that forecast's own validation
+errors and widening past the validation window. `forecast()` warns when the
+horizon runs past that window, and `model_summary` reports how often each band
+held the actuals on the test window (`band_coverage`). See
+[`supported_models.md`](supported_models.md#uncertainty-bands).
 
 If your forecast depends on independent columns, supply their planned future
 values; otherwise they are auto-generated from history and a warning is
