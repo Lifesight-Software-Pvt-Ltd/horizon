@@ -424,9 +424,8 @@ def build_model_summary_table(
     Columns: ["model", "validation_mape", "mape", "ensemble_method",
     "rule_applied", "ensemble_weight", "status", "best_model_check",
     "validation_wape", "wape", "zero_actuals_excluded", "beats_naive",
-    "selection_metric", "band_coverage", "band_test_points"]. Columns after
-    the first eight were added later, at the end, so readers that pick
-    columns by name keep working.
+    "selection_metric", "band_coverage", "band_test_points"], always in
+    this order.
 
     `band_coverage` is the percentage of test-window actuals inside the
     row's 95% band, and `band_test_points` how many points that is: a
@@ -614,8 +613,8 @@ def build_rejected_models_table(
     "reason", "selection_metric"]. Built from EnsembleResult.rejected_models
     (a dict of ThresholdRejectionError). `mape` is the validation score the
     model was screened on: its MAPE, or its WAPE when `selection_metric` is
-    "wape" (the column keeps its name so existing readers still work, and
-    `reason` names the metric). It may be NaN for a model with no score
+    "wape" (the column is named `mape` whichever metric was used; `reason`
+    names it). It may be NaN for a model with no score
     (e.g. every actual in the window was zero).
 
     The `ensemble_method` column matters because exclusion is not

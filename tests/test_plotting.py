@@ -412,9 +412,9 @@ def test_saved_files_carry_the_method_suffix_even_for_a_single_rule(tmp_path):
 
 def test_supplied_ax_is_refused_for_several_rules():
     """
-    Drawing three rules onto one caller-supplied Axes would reintroduce
-    the overlaying this shape avoids, and quietly dropping two of them is
-    the original defect -- so it is an error the caller can act on.
+    Drawing three rules onto one caller-supplied Axes would overlay them,
+    and quietly drawing one would lose the other two -- so it is an error
+    the caller can act on.
     """
     fig, ax = plt.subplots()
     with pytest.raises(ValueError, match="several combination methods"):

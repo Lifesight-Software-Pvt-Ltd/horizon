@@ -68,9 +68,9 @@ _PERCENTAGE_ROUTE_VALIDATION_SHARE = 3 / 4
 # fraction and this never binds (it starts binding below ~249 daily rows,
 # ~116 weekly). On a short one it stops the defaults from eating the
 # training data alive: 84 + 28 out of 60 rows is not a split, it's an
-# error message. It was 0.4 while validation was twice test; at 0.4 the
-# wider windows would have shrunk the test window of a typical 2.3-year
-# weekly series (122 rows) below a quarter, so it moved to 0.45 with them.
+# error message. At 0.4 the default windows would shrink the test window
+# of a typical 2.3-year weekly series (122 rows) below a quarter, so it is
+# 0.45.
 #
 # Applies to DEFAULTED windows only. A size the caller asked for
 # explicitly is honoured exactly, or raises -- silently shrinking a

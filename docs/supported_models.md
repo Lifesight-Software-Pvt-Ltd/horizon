@@ -179,8 +179,9 @@ date, with L validation periods:
    81st of 84 by default for daily data, the 38th of 39 for weekly.
 3. The band is forecast ± q × √(max(1, h ÷ L)): flat for as far ahead as the
    validation window reaches, then widening with the square root of the
-   distance. The lower edge is floored at 0 when the target is never
-   negative.
+   distance. When the target is never negative, the lower edge is floored
+   at 0 wherever the forecast is at or above 0, so the band always contains
+   its forecast.
 
 An ensemble rule's band comes from its own validation forecast (the members'
 validation forecasts combined by the same rule), never from the members'

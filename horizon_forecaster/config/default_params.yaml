@@ -33,7 +33,7 @@
 # constructor) always skips the grid search entirely and uses exactly
 # what was passed, merged on top of base_hyperparameters.
 #
-# Only daily/weekly are supported currently, per project scope.
+# Only daily and weekly are supported.
 
 # Prophet's grid: 6 candidates per frequency. The first 4 are settings
 # validated on real datasets with enough history to support them. The last 2 use

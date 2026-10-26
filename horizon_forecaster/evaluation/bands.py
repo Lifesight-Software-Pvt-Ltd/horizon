@@ -19,7 +19,7 @@ The band, for a forecast yhat_h made h periods after the last fitted date:
     width       q = the k-th smallest of the n errors kept,
                 k = ceil(0.95 * (n + 1))
     band        yhat_h -/+ q * sqrt(max(1, h / L)), lower edge floored at 0
-                when the target is never negative
+                when the target is never negative, wherever yhat_h >= 0
 
 The "+1" in k is what makes this conformal rather than a plain percentile:
 if future errors behave like the validation errors, a new error is at most
@@ -144,7 +144,9 @@ def band(
     half = calibration.width * widening(np.arange(1, len(yhat) + 1), calibration.validation_length)
     lower, upper = yhat - half, yhat + half
     if floor_at_zero:
-        lower = np.maximum(lower, 0.0)
+        # Only where the forecast is at or above 0: a band floored above a
+        # negative forecast would not contain the forecast it is drawn around.
+        lower = np.where(yhat >= 0, np.maximum(lower, 0.0), lower)
     return lower, upper
 
 

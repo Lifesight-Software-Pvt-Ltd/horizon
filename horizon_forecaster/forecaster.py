@@ -2272,7 +2272,8 @@ class HorizonForecaster:
         """
         Replace any model-native bounds on `frame` with the calibrated band.
         Row i of `frame` is i + 1 periods after the last fitted date. The
-        lower edge is floored at 0 when the target is never negative.
+        lower edge is floored at 0 when the target is never negative,
+        wherever the forecast itself is at or above 0.
         """
         out = frame.drop(columns=[c for c in ("yhat_lower", "yhat_upper") if c in frame.columns])
         floor = bool((self.raw_df[self.target_column] >= 0).all())
