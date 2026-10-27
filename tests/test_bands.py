@@ -73,6 +73,15 @@ def test_band_floors_at_zero_only_when_asked():
     assert lower.tolist() == [-5.0]
 
 
+def test_the_floor_never_lifts_the_band_above_a_negative_forecast():
+    c = calibrate(np.zeros(20), np.full(20, 10.0))  # width 10
+    yhat = np.array([-30.0, -5.0, 0.0, 4.0])
+    lower, upper = band(yhat, c, floor_at_zero=True)
+    assert lower.tolist() == [-40.0, -15.0, 0.0, 0.0]
+    assert upper.tolist() == [-20.0, 5.0, 10.0, 14.0]
+    assert (lower <= yhat).all() and (yhat <= upper).all()
+
+
 def test_no_band_without_a_width():
     assert band(np.array([1.0]), calibrate(np.ones(5), np.ones(5)), True) is None
 

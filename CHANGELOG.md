@@ -71,8 +71,9 @@ The first public release. The reasoning behind each choice below is in
   `yhat_lower` / `yhat_upper`, calibrated on that forecast's own validation
   errors (split conformal prediction). It is flat for as far ahead as the
   validation window reaches and widens with the square root of the distance
-  after that. Unexpected zero days are left out of the calibration, and the
-  lower edge is floored at 0 when the target is never negative.
+  after that. Unexpected zero days are left out of the calibration, and when
+  the target is never negative the lower edge is floored at 0 wherever the
+  forecast is at or above 0.
 - On 80 test windows across 44 real and synthetic series the bands held
   87–95% of actuals over the first four weeks (the trimmed ensemble 91%),
   and 82–88% from 3 to 16 months ahead on daily data.

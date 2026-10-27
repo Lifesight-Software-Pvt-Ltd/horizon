@@ -381,8 +381,8 @@ class NeuralProphetWrapper(BaseModel):
             UnpicklingError: Unsupported global: GLOBAL
             neuralprophet.forecaster.NeuralProphet was not an allowed global
 
-        This is genuinely version-dependent -- it passed local testing on an
-        older torch and only surfaced in CI on torch >= 2.6.
+        This is genuinely version-dependent: on torch < 2.6 NeuralProphet's
+        own loader works, so the failure appears only on a newer torch.
 
         We try NeuralProphet's own loader first (correct on older torch), then
         fall back to torch.load with weights_only=False. Allowlisting classes
@@ -402,9 +402,8 @@ class NeuralProphetWrapper(BaseModel):
         `predict()` dies deep inside NeuralProphet with a bare
         `AttributeError: 'NoneType' object has no attribute 'predict'`.
 
-        This is the second CI-only failure on this same method, from the same
-        cause: the fallback path silently diverged from what NeuralProphet's
-        own loader does. Runs on torch < 2.6 never reach the fallback, which
+        So the fallback must do everything NeuralProphet's own loader does,
+        restore_trainer() included. Runs on torch < 2.6 never reach it, which
         is why tests/test_neuralprophet_compat.py stubs torch to exercise it
         on any version.
         """

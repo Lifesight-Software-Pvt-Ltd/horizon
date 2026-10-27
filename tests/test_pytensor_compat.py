@@ -2,7 +2,7 @@
 Tests for ``horizon_forecaster.models._pytensor_compat``.
 
 The shim only does anything on macOS with a toolchain that rejects PyTensor's
-``-ld64`` flag, so on CI (Linux) and on most Macs its patch branch would never
+``-ld64`` flag, so on Linux and on most Macs its patch branch would never
 run. These tests stub the platform check, the PyTensor lookup and the
 compiler probe, so every branch is exercised on any OS without PyTensor or a
 C++ compiler installed.

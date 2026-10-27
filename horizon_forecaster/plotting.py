@@ -140,10 +140,9 @@ def _reject_shared_ax(caller: str, ax: "Optional[Axes]", n_charts: int) -> None:
     """
     A supplied Axes can only receive one chart.
 
-    Drawing several rules onto one caller-supplied Axes would reintroduce
-    exactly the overlaying this module avoids, and silently ignoring the
-    extra rules is what this function exists to prevent. So it is an error
-    the caller can act on rather than a surprise in the output.
+    Drawing several rules onto one caller-supplied Axes would overlay them,
+    and silently drawing one would ignore the others. So it is an error the
+    caller can act on rather than a surprise in the output.
     """
     if ax is not None and n_charts > 1:
         raise InvalidConfigError(

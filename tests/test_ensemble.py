@@ -371,10 +371,9 @@ def test_build_ensembles_is_always_a_dict_even_for_one_method():
 
 # ---------- as_ensemble_dict ----------
 #
-# The shared normaliser plotting.py and exporters.py both route through. It
-# exists because two near-identical private copies drifted and shipped an
-# AttributeError, so its own behaviour is pinned here rather than only
-# exercised transitively through its consumers.
+# The shared normaliser plotting.py and exporters.py both route through, so
+# the two cannot drift apart. Its own behaviour is pinned here rather than
+# only exercised transitively through its consumers.
 
 
 def test_as_ensemble_dict_maps_none_to_an_empty_dict():

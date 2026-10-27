@@ -39,8 +39,8 @@ SUPPORTED_FREQUENCIES = ("daily", "weekly")
 #   - The VALIDATION window is a selection instrument. It has to rank 3-18
 #     grid candidates against each other, so it wants stability, which
 #     means more data. Hence it defaults to THREE TIMES the test window.
-#     It was twice until a comparison on 19 real series (5 weekly, 14
-#     daily, up to 4 test origins each): on weekly data, models chosen on
+#     Twice the test window was tried first. On 19 real series (5 weekly,
+#     14 daily, up to 4 test origins each), weekly models chosen on
 #     a 26-week window had a mean regret of 9.1 MAPE points against the
 #     best model on test, and a rank correlation with the test ranking of
 #     0.01; scoring on 39 weeks cut that to 7.3 points and 0.20. Three
@@ -68,9 +68,9 @@ _PERCENTAGE_ROUTE_VALIDATION_SHARE = 3 / 4
 # fraction and this never binds (it starts binding below ~249 daily rows,
 # ~116 weekly). On a short one it stops the defaults from eating the
 # training data alive: 84 + 28 out of 60 rows is not a split, it's an
-# error message. It was 0.4 while validation was twice test; at 0.4 the
-# wider windows would have shrunk the test window of a typical 2.3-year
-# weekly series (122 rows) below a quarter, so it moved to 0.45 with them.
+# error message. At 0.4 the default windows would shrink the test window
+# of a typical 2.3-year weekly series (122 rows) below a quarter, so it is
+# 0.45.
 #
 # Applies to DEFAULTED windows only. A size the caller asked for
 # explicitly is honoured exactly, or raises -- silently shrinking a

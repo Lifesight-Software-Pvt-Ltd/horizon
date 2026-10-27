@@ -49,15 +49,14 @@ FAST_PARAMS = {
     #
     # Same trigger, different explosion, the same ten tests down in both.
     # Neither reproduces on a machine lacking omegaconf >= 2.2 or
-    # TensorFlow, which is why this went unnoticed locally.
+    # TensorFlow.
     #
     # The forecaster ALWAYS merges the YAML's collect_metrics=false on top
     # of any model_params, so metrics-on is a configuration Horizon never
-    # ships. Driving the wrapper with it enabled was therefore testing a
-    # state that cannot occur in production, while importing a whole class
-    # of environmental fragility. (The integration test at the bottom of
-    # this file passed throughout for exactly this reason -- it goes via
-    # the forecaster, so it received the merge.)
+    # ships. Driving the wrapper with it enabled would test a state that
+    # cannot occur in production, while importing a whole class of
+    # environmental fragility. (The integration test at the bottom of this
+    # file goes via the forecaster, so it receives the merge.)
     "collect_metrics": False,
 }
 
@@ -237,10 +236,10 @@ def test_neuralprophet_is_registered_and_flows_through_forecaster():
 
 def test_first_import_inside_a_warning_recorder_still_records_horizon_warnings():
     """
-    neuralprophet/__init__.py calls logging.captureWarnings(True). Before the
-    fix, a catch_warnings(record=True) (or pytest.warns) block that was open
-    when NeuralProphet was first imported stopped recording, and every later
-    warning in the process printed as a log line. Run in a fresh interpreter:
+    neuralprophet/__init__.py calls logging.captureWarnings(True). Unless
+    the wrapper undoes that, a catch_warnings(record=True) (or pytest.warns)
+    block that is open when NeuralProphet is first imported stops recording,
+    and every later warning in the process prints as a log line. Run in a fresh interpreter:
     NeuralProphet is already imported in this one.
     """
     import subprocess

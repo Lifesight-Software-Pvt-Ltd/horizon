@@ -114,8 +114,8 @@ class SARIMAXAdapter(BaseAdapter):
             # a spend spike far above anything seen in training) can't extrapolate
             # the fitted coefficient into a log-space blow-up. SARIMAX is linear in
             # the exog, so extrapolating a coefficient beyond the trained range is
-            # unreliable anyway -- confirmed on real data, where a test-window spend
-            # spike made the forecast diverge until this clamp went in.
+            # unreliable anyway -- on real data, an unclamped test-window spend
+            # spike made the forecast diverge.
             self._std_min = standardized.min()
             self._std_max = standardized.max()
             for col in self.independent_columns:

@@ -374,7 +374,7 @@ def make_trimmed_ensemble(*, degraded=False, n=3):
     Every other fixture in this file builds an `inverse_mape` ensemble with
     a populated `weights` dict, so without this the weightless branches --
     a blank `ensemble_weight` column, the `degraded` status, `rule_applied`
-    -- were exported by code no test ever ran.
+    -- would be exported by code no test runs.
     """
     return EnsembleResult(
         combined=pd.DataFrame({"ds": _ds(n), "yhat": [12.0, 20.0, 32.0][:n]}),
@@ -468,15 +468,14 @@ def test_rejected_table_records_which_method_dropped_the_model():
 # bare one. Fixtures that only ever build a bare result would leave the shape a
 # real run produces untested at several entry points -- and
 # export_forecast(save_plots=True) raising AttributeError on an ordinary run
-# would go unnoticed. These pin the dict shape at the two
-# entry points that had no direct coverage.
+# would go unnoticed. These pin the dict shape at two entry points that
+# nothing else calls directly.
 
 
 def test_build_final_forecast_table_accepts_the_forecaster_dict():
-    # Regression: this builder is deliverable #1 in the module docstring and
-    # was the last consumer not normalising its input, so a caller holding
-    # forecaster.forecast_ensemble and calling it directly got
-    # "AttributeError: 'dict' object has no attribute 'combined'".
+    # This builder is deliverable #1 in the module docstring, and a caller
+    # holding forecaster.forecast_ensemble may pass it straight in: it must
+    # not fail with "AttributeError: 'dict' object has no attribute 'combined'".
     table = build_final_forecast_table({"trimmed": make_trimmed_ensemble()})
     assert list(table.columns) == ["ds", "yhat"]
     assert list(table["yhat"]) == [12.0, 20.0, 32.0]
@@ -490,7 +489,7 @@ def test_build_final_forecast_table_empty_dict_is_empty_but_shaped():
 
 def test_export_forecast_accepts_the_forecaster_dict(tmp_path):
     # The documented one-call export, given the real dict shape AND asked for
-    # plots -- the precise combination that shipped broken.
+    # plots -- the path an ordinary run takes.
     import matplotlib
 
     matplotlib.use("Agg")

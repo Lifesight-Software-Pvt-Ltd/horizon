@@ -9,11 +9,9 @@ just enough surface for the code under test to bind to.
 
 Why this file exists: on torch >= 2.6 the primary loader fails and the
 fallback must reproduce what NeuralProphet's own load() does, including
-restore_trainer(). Both failures this method has had appeared only in CI, for the
-same structural reason: where local torch is < 2.6 the fallback branch never
-executes at all, making it effectively untested code that ran only on the
-matrix. These stub tests exercise the fallback directly on any torch
-version, closing that gap.
+restore_trainer(). Where the installed torch is < 2.6 the fallback branch
+never executes at all, so it would go untested on that machine. These stub
+tests exercise the fallback directly on any torch version.
 """
 
 import sys
@@ -59,7 +57,7 @@ def test_primary_loader_is_used_when_it_works(monkeypatch):
 
 def test_fallback_restores_the_trainer(monkeypatch):
     """
-    Covers a failure seen only in CI: save() nulls the Lightning
+    The fallback must rebuild the trainer: save() nulls the Lightning
     trainer (it isn't picklable) and NeuralProphet's load() rebuilds it via
     restore_trainer(). A bare torch.load() skips that, so the model returns
     with trainer=None and the next predict() dies with a bare

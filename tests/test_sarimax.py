@@ -264,7 +264,7 @@ def test_sarimax_uses_the_standard_grid_search_like_other_models():
     assert len(forecasts["sarimax"].forecast) == 10
 
 
-# ---------- deterministic trend term (regression: the undifferenced collapse) ----------
+# ---------- deterministic trend term when nothing is differenced ----------
 
 
 def test_trend_term_is_ct_when_nothing_is_differenced():
@@ -287,7 +287,7 @@ def test_trend_term_is_ct_when_nothing_is_differenced():
 )
 def test_no_trend_term_once_anything_is_differenced(order, seasonal_order):
     """Differencing removes the level; a constant would imply a drift
-    nobody asked for. Untouched by the d=0 fix."""
+    nobody asked for."""
     assert SARIMAXWrapper._trend_for(order, seasonal_order) == "n"
 
 

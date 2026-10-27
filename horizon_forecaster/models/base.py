@@ -10,8 +10,8 @@ contract, never against any concrete model class directly.
 
 Exception contract (must be honored by every subclass):
     fit()     may raise ModelPredictionError (adapter-contract/shape
-              check, before any fitting is attempted -- the name is
-              historical), InsufficientDataError or ModelConvergenceError.
+              check, before any fitting is attempted; read it as a
+              contract error), InsufficientDataError or ModelConvergenceError.
     predict() may raise ModelPredictionError.
     Both may let unexpected/unrelated exceptions propagate as-is — only
     wrap exceptions that are genuinely InsufficientData/Convergence/
@@ -80,8 +80,8 @@ class BaseModel(ABC):
         Raises:
             ModelPredictionError: if train_df is missing the columns the
                 adapter is contracted to supply ("ds"/"y"). Raised before
-                any fitting is attempted; the name is historical, so read
-                it as a shape/contract error rather than a prediction one.
+                any fitting is attempted; read it as a shape/contract
+                error rather than a prediction one.
             InsufficientDataError: if train_df does not have enough rows
                 for this model to train reliably.
             ModelConvergenceError: if the underlying library's fit

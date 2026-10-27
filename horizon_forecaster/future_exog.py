@@ -175,7 +175,7 @@ def _looks_binary(hist: np.ndarray) -> bool:
     A 0/1 column -- the only shape auto-detected as an event flag. Any other
     two-value column is a quantity, not an on/off switch: TV spend of 0 or
     5,000, a price of 9.99 or 12.99, a 0% or 20% discount. Treating those as
-    flags set their future to 0 -- a free product, no spend at all.
+    flags would set their future to 0 -- a free product, no spend at all.
     """
     finite = hist[np.isfinite(hist)]
     return finite.size > 0 and set(np.unique(finite)) <= {0.0, 1.0}
