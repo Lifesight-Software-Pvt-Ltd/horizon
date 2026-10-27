@@ -102,7 +102,7 @@ _SUMMARY_COLUMNS = [
 ]
 
 # Matches HorizonForecaster's default mape_threshold. Pass the forecaster's
-# own value (forecaster.mape_threshold) when it was changed.
+# own value (forecaster.mape_threshold) when it is set to something else.
 DEFAULT_MAPE_THRESHOLD = 40.0
 
 
@@ -345,7 +345,7 @@ def build_best_model_forecast_table(
     The best single model's forecast, as a ["model", "ds", "yhat"] table,
     plus its calibrated 95% band when it has one.
 
-    Exists because a weighted ensemble is NOT guaranteed to beat the best
+    Exists because an ensemble is NOT guaranteed to beat the best
     individual model (see evaluation/ensemble.py) -- exporting only the
     blend can mean shipping the worse forecast. This is written alongside
     the ensemble so the choice can be made per run rather than baked in.
@@ -366,10 +366,11 @@ def build_best_model_forecast_table(
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)
     if per_model_validation_mape is None:
         warnings.warn(
-            "The best-model file is written empty: the best model is chosen on validation "
-            "MAPE, and per_model_validation_mape was not given. Pass forecaster=forecaster "
-            "to the export, or {m: r.validation_mape.value for m, r in results.items()} "
-            "from evaluate().",
+            f"The best-model file is written empty: the best model is chosen on validation "
+            f"{metric}, and per_model_validation_mape was not given. Pass "
+            f"forecaster=forecaster to the export, or the validation scores from evaluate(): "
+            f"{{m: r.validation_mape.value for m, r in results.items()}} for MAPE, "
+            f"{{m: r.validation_wape for m, r in results.items()}} for WAPE.",
             stacklevel=3,
         )
         return pd.DataFrame(columns=_PER_MODEL_BASE_COLUMNS)

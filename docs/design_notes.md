@@ -1019,6 +1019,7 @@ None of these block a stable API; all are additive.
   point forecasts; SARIMAX is non-negative structurally via its `log1p` fit,
   which is also why it is left out of any run whose target goes negative;
   CatBoost, NeuralProphet and Bayesian PyMC clamp only when the training
-  target was itself non-negative.
+  target was itself non-negative. Where a forecast is below 0, its band is
+  not floored, so the band still contains the forecast it is drawn around.
 - **NeuralProphet autoregression** (`n_lags > 0`), which needs the contract
   discussion described in §5.

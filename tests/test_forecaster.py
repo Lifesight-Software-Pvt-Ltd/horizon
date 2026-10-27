@@ -571,8 +571,8 @@ def test_grid_search_winner_matches_evaluate_result():
     result = forecaster.evaluate()["prophet"]
     # The grid summary holds VALIDATION scores -- that is the window
     # candidates were chosen on. result.mape is the test-window score and
-    # is a different number by design; if these two ever match again, the
-    # selection/reporting separation has regressed.
+    # is a different number by design; if these two ever match, selection
+    # is reading the reporting window.
     assert result.validation_mape.value == result.grid_search_summary[0]["mape"]
 
 
@@ -876,10 +876,10 @@ def test_forecast_continues_trend_correctly():
     """
     orders = 100 + i*2, so trend is +2/period. We check the diffs are
     CLOSE to +2 rather than exactly == 2.0: whichever grid candidate wins
-    (picked by lowest test-set MAPE) may be a multiplicative-seasonality
+    (picked by lowest validation MAPE) may be a multiplicative-seasonality
     one, which introduces tiny (sub-0.01) numerical deviation from a pure
-    linear trend even on clean data. Exact equality made this test flaky
-    depending on which of the 6 real candidates the grid search selects.
+    linear trend even on clean data, so exact equality would depend on
+    which of the 6 candidates the grid search selects.
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
@@ -1184,12 +1184,10 @@ def test_forecast_warns_when_horizon_far_exceeds_history():
 
 def test_forecast_does_not_warn_when_horizon_is_reasonable():
     """
-    Isolates specifically the horizon-vs-history warning (see
-    test_forecast_warns_when_horizon_far_exceeds_history above) from
-    the unrelated "running evaluate() internally" warning --
-    evaluate() is called first, outside the strict block, so its
-    one-time warning doesn't get mistaken for a horizon warning that
-    shouldn't have fired.
+    Isolates the horizon-vs-history warning (see
+    test_forecast_warns_when_horizon_far_exceeds_history above):
+    evaluate() is called first, outside the strict block, so only a
+    warning from forecast() itself can fail the test.
     """
     df = make_raw_df(n=60)
     forecaster = HorizonForecaster(
@@ -1198,7 +1196,7 @@ def test_forecast_does_not_warn_when_horizon_is_reasonable():
     forecaster.evaluate()
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes a test failure
-        forecaster.forecast(horizon=10)  # well within 2x of 60 rows of history
+        forecaster.forecast(horizon=10)  # well under half of 60 rows of history
 
 
 def test_forecast_warns_once_horizon_exceeds_half_of_history():
@@ -1621,12 +1619,12 @@ def test_evaluate_ensemble_rejects_model_above_threshold():
     assert ensemble.combined is None
     assert ensemble.members == []
     assert ensemble.rule_applied == "none"
-    # None, not {} -- there is no weighting to report either way now.
+    # None, not {} -- with no members there is no weighting to report.
     assert ensemble.weights is None
     # Screening must read the VALIDATION score, never the reported one.
-    # Without this the wiring could be switched back to the test window --
-    # reintroducing exactly the leak the three-way split exists to close --
-    # and every other test would still pass.
+    # Without this the wiring could read the test window -- exactly the
+    # leak the three-way split exists to close -- and every other test
+    # would still pass.
     rejection = ensemble.rejected_models["prophet"]
     assert rejection.mape_value == results["prophet"].validation_mape.value
     assert rejection.mape_value != results["prophet"].mape.value
@@ -1852,7 +1850,7 @@ def test_neuralprophet_runs_when_a_driver_first_changes_in_validation():
     assert not math.isnan(results["neuralprophet"].validation_mape.value)
 
 
-# ---------- event flags and on/off text (item: flags and promo weeks) ----------
+# ---------- event flags and on/off text ----------
 
 
 def _flag_df(values):

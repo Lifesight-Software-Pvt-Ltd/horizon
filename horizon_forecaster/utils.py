@@ -39,8 +39,8 @@ SUPPORTED_FREQUENCIES = ("daily", "weekly")
 #   - The VALIDATION window is a selection instrument. It has to rank 3-18
 #     grid candidates against each other, so it wants stability, which
 #     means more data. Hence it defaults to THREE TIMES the test window.
-#     It was twice until a comparison on 19 real series (5 weekly, 14
-#     daily, up to 4 test origins each): on weekly data, models chosen on
+#     Twice the test window was tried first. On 19 real series (5 weekly,
+#     14 daily, up to 4 test origins each), weekly models chosen on
 #     a 26-week window had a mean regret of 9.1 MAPE points against the
 #     best model on test, and a rank correlation with the test ranking of
 #     0.01; scoring on 39 weeks cut that to 7.3 points and 0.20. Three

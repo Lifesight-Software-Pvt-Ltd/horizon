@@ -369,7 +369,7 @@ def test_save_and_load_preserves_wrapper_level_config(tmp_path):
 
 
 def test_fit_failure_message_names_the_cause():
-    # "CatBoost failed to fit." alone left evaluate_errors with no reason.
+    # evaluate_errors must get the cause, not "CatBoost failed to fit." alone.
     model = CatBoostWrapper(frequency="daily", params={"depth": 20})
     with pytest.raises(
         ModelConvergenceError, match=r"CatBoost failed to fit \(CatBoostError: .*depth"

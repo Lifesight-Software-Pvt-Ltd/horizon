@@ -109,7 +109,7 @@ def _default_params() -> dict:
     changes at runtime, so caching is safe.
 
     Callers must treat the returned dict as READ-ONLY -- it is shared by
-    every HorizonForecaster in the process. Nothing mutates it today:
+    every HorizonForecaster in the process. Nothing mutates it:
     _load_config only indexes into it, and the per-candidate merges in
     the grid search build new dicts via {**base, **entry}.
     """
@@ -118,11 +118,11 @@ def _default_params() -> dict:
 
 
 # Warn once the requested horizon exceeds this fraction of the available
-# history. Deliberately strict: the previous rule only fired when the
-# horizon exceeded TWICE the entire history, so forecasting 100 weeks from
-# 121 weeks of data passed silently -- exactly the case that produced an
-# implausible real-world forecast. Forecasting more than half your history
-# ahead is already a stretch and deserves a flag.
+# history. Deliberately strict: a rule that fired only above TWICE the
+# entire history was tried and let 100 weeks from 121 weeks of data pass
+# silently -- exactly the case that produced an implausible real-world
+# forecast. Forecasting more than half your history ahead is already a
+# stretch and deserves a flag.
 _HORIZON_WARNING_FRACTION = 0.5
 
 # How a run is scored when deciding. MAPE is the default metric; "auto"
@@ -544,7 +544,7 @@ class HorizonForecaster:
             weekly. Training takes every row the two windows leave.
         training_size: the percentage route, for callers who would rather
             think in percentages than windows. A percentage (50-100) or
-            fraction (0.5-1.0), meaning exactly what it always has; the
+            fraction (0.5-1.0) of the rows to train on; the
             remainder is divided between validation and test, three-quarters
             to validation. Mutually exclusive with validation_size/
             test_size -- passing both raises InvalidConfigError rather
@@ -1690,8 +1690,8 @@ class HorizonForecaster:
 
         Critical detail: the scoring window is shaped via
         adapter.transform_future(), NOT adapter.transform_train().
-        Using transform_train() on the scoring window alone happened to
-        work for ProphetAdapter,
+        Using transform_train() on the scoring window alone would give the
+        same result for ProphetAdapter,
         which is a stateless pure function -- but it would be actively
         WRONG for an adapter that carries state across the train/future
         boundary like CatBoostAdapter: transform_train() resets the
@@ -1968,8 +1968,8 @@ class HorizonForecaster:
         A model given explicit `model_params` skips the grid, but is still
         fitted once on train and scored on validation -- the ensemble needs
         a validation MAPE for it either way, and inventing one from the
-        test window would reintroduce exactly the leak the three-way split
-        removes.
+        test window would leak the test window into selection, which the
+        three-way split exists to prevent.
         """
         if model_name in self._selection_cache:
             return self._selection_cache[model_name]

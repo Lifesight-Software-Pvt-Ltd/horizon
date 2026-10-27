@@ -212,7 +212,7 @@ class BayesianPyMCWrapper(BaseModel):
         # ANNUAL_MIN_SPAN_DAYS.
         self.annual_terms = True
         # Set from the training target in fit(); None here so an unfitted
-        # (or older, unpickled) wrapper degrades to "don't clip" rather
+        # wrapper degrades to "don't clip" rather
         # than raising AttributeError inside predict().
         self._target_min: Optional[float] = None
 
@@ -427,17 +427,14 @@ class BayesianPyMCWrapper(BaseModel):
         order _WEEKLY_MAX_ORDER. Both are built from absolute day offsets
         against the reference date. Column layout is [cos_1..cos_k,
         sin_1..sin_k].
-
-        The getattr defaults keep a model pickled before these settings
-        existed predicting exactly as it was fitted.
         """
         offset_days = pd.to_datetime(ds).reset_index(drop=True) - self._reference_date
         day = offset_days.dt.total_seconds().to_numpy() / 86400.0
-        if getattr(self, "annual_terms", True):
+        if self.annual_terms:
             ff_long = self._fourier_basis(day, _ANNUAL_PERIOD_DAYS, self.n_fourier)
         else:
             ff_long = np.empty((len(day), 0))
-        weekly_order = getattr(self, "_weekly_order", self.n_fourier)
+        weekly_order = self._weekly_order
         ff_short = (
             self._fourier_basis(day, _WEEKLY_PERIOD_DAYS, weekly_order)
             if self.use_short_seasonal

@@ -19,7 +19,7 @@ Three combination rules are available, and the DEFAULT IS `trimmed`:
   inverse_mape  Weight each member by 1/MAPE, normalised.
   equal         Weight every member identically.
 
-Why trimming is the default, when the two weighted rules came first:
+Why trimming is the default rather than a weighted rule:
 estimated weights have to be estimated FROM something, and everything
 available to estimate them from is a finite sample of past error. A
 trimmed mean consumes no such quantity at all, so it cannot leak
@@ -82,8 +82,8 @@ from horizon_forecaster.exceptions import InvalidConfigError, ThresholdRejection
 ENSEMBLE_METHODS = ("trimmed", "inverse_mape", "equal")
 DEFAULT_ENSEMBLE_METHOD = "trimmed"
 
-# The subset of ENSEMBLE_METHODS that produce weights. Load-bearing, not
-# a naming leftover: _screen() uses it to decide that a NaN selection MAPE
+# The subset of ENSEMBLE_METHODS that produce weights. Load-bearing:
+# _screen() uses it to decide that a NaN selection MAPE
 # disqualifies a member from the WEIGHTED rules only, since trimming needs
 # no MAPE at all. Removing it would silently change which members survive.
 WEIGHTING_STRATEGIES = ("inverse_mape", "equal")

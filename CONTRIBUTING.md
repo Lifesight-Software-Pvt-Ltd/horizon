@@ -180,8 +180,7 @@ Every raised error is a typed subclass of `HorizonForecasterError`
 message. That is what lets `evaluate_errors`, `forecast_errors` and
 `EnsembleResult.rejected_models` build a real report rather than parsing
 exception text. If you need a new failure mode, check `exceptions.py` first —
-several fitting exceptions sat unused for a long time before a use case
-actually needed them.
+the one you need may already be there.
 
 ## Before opening a PR
 

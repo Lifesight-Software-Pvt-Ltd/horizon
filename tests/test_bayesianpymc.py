@@ -181,15 +181,6 @@ def test_no_annual_columns_when_the_fit_turned_annual_terms_off():
     assert ff_short.shape == (10, 6)
 
 
-def test_a_model_pickled_before_the_cap_keeps_its_original_basis():
-    w = _geom_wrapper(n_fourier=4)
-    del w._weekly_order, w.annual_terms
-    ds = pd.Series(pd.date_range("2022-01-01", periods=10, freq="D"))
-    ff_long, ff_short = w._fourier_terms(ds)
-    assert ff_long.shape == (10, 8)
-    assert ff_short.shape == (10, 8)
-
-
 def test_span_days_counts_calendar_days_inclusive():
     assert span_days(pd.Series(pd.date_range("2022-01-01", periods=183, freq="D"))) == 183
     unordered = pd.Series(pd.to_datetime(["2022-07-01", "2022-01-03", "2022-03-15"]))
@@ -357,7 +348,7 @@ def test_convergence_warning_only_past_the_loose_thresholds(stats, expected):
 
 
 # --------------------------------------------------------------------------
-# 3. real sampling integration (local/CI gate)
+# 3. real sampling integration (skipped where pymc is not installed)
 # --------------------------------------------------------------------------
 
 pytest.importorskip("pymc", reason="pymc is not installed; sampling tests are skipped")

@@ -100,7 +100,7 @@ class BayesianPyMCAdapter(BaseAdapter):
             # fitted coefficient into an implausible forecast. The PyMC regression is
             # linear in the exog, so extrapolating a coefficient beyond the trained
             # range is unreliable regardless of the prior -- the same guard SARIMAX
-            # adopted after real data showed a test-window spend spike diverging.
+            # uses, for the same reason.
             self._std_min = standardized.min()
             self._std_max = standardized.max()
             for col in self.independent_columns:

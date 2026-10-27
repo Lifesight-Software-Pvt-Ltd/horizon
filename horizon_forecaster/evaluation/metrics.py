@@ -132,8 +132,9 @@ def wape(y_true, y_pred) -> float:
 
     Unlike MAPE, this does not blow up on individual zero-actual rows,
     since the denominator is a sum over the whole series rather than a
-    per-row division. Provided as a supplementary metric only (not used
-    for threshold/ensemble decisions per project spec).
+    per-row division. It replaces MAPE for selection, screening and
+    weighting when HorizonForecaster's selection_metric resolves to
+    'wape', and is reported alongside MAPE either way.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
