@@ -14,7 +14,7 @@ Set the strategy once on the constructor:
 HorizonForecaster(
     ...,
     independent_columns=["spend", "promo"],
-    future_exog_strategy="carry_forward",   # default
+    future_exog_strategy="auto",            # default: last_year or carry_forward
     event_columns=["promo"],                # explicit 0/1 flags (optional)
     future_exog_aggregator="mean",          # "mean" | "median"
     recent_average_window=28,               # N for recent_average
@@ -23,14 +23,31 @@ HorizonForecaster(
 
 ## The strategies
 
+The default, `"auto"`, is `last_year` when the history covers a year (364
+days, or 52 weeks) and `carry_forward` when it is shorter. The strategy used
+is stored in `forecaster.future_exog_strategy`. Pass any strategy below by name
+to use it instead.
+
 | Strategy | What it does | Good when |
 |---|---|---|
-| `carry_forward` *(default)* | Holds the last observed value flat across the horizon. | A neutral baseline; short horizons; slowly-changing drivers. |
+| `last_year` | Copies each driver from the same weekday 364 days earlier (daily) or the same week 52 weeks earlier (weekly), so the latest year of history repeats for as long as the horizon runs. A driver that is live now but was 0 on every copied date is new since last year, and holds its last value instead. Falls back to `carry_forward` under a year of history. | Marketing data with a year or more of history, where this year's plan follows last year's. The default then. |
+| `carry_forward` | Holds the last observed value flat across the horizon. | A neutral baseline; short horizons; slowly-changing drivers. The default under a year of history. |
 | `recent_average` | Mean (or median) of the last `recent_average_window` periods. | A one-off recent spike or dip you do not want to project forward. |
 | `historical_average` | **Season-aware** mean/median — by day-of-week (daily) or week-of-year (weekly), not one flat mean. | Drivers with a stable seasonal shape and no strong trend. |
 | `seasonal_naive` | The seasonal cycle repeated, **plus drift** (the fitted historical trend). Falls back to `carry_forward` under one full cycle of history. | Long horizons on drivers that are both seasonal and trending. |
 | `linear_trend` | A fitted trend line projected forward. | Steadily trending drivers (e.g. a spend ramp). |
 | `cycle` | Replays/tiles the trailing history verbatim, and is exempt from the flag handling below. | Reproducing a naive seasonal repeat exactly. |
+
+Why `last_year` is the default with a year of history: on the testers' real
+series (8 daily and 6 weekly, 42 forecasts of 4 weeks to 6 months), a
+forecast made with `last_year`'s drivers had a median WAPE 0.9 points above
+the same forecast made with the drivers that actually happened on daily data,
+and level with it on weekly data, against 3.6 and 6.9 points above for
+`carry_forward`. The day it copies keeps the weekday, because spend follows
+weekdays: copying the same calendar date a year back instead more than
+doubled the error in the daily spend curve. It copies values exactly, with no
+growth: if spend has grown since last year, the forecast assumes last year's
+level.
 
 All strategies are defined for **any horizon** — short ones take the tail,
 long ones tile — so the same choice works whether you forecast 7 periods or
@@ -45,8 +62,10 @@ averaging it would produce a nonsensical fractional flag. So:
 - **Binary 0/1 event flags** (promos, holidays) default to **0** — "no event
   unless you supply one" — *except* under `seasonal_naive`, where they follow
   the cycle so recurring events still repeat, by week of the year (weekly) or
-  day of the week (daily). A holiday whose date moves, such as Black Friday,
-  can land a week off; see the warnings below.
+  day of the week (daily), and under `last_year`, where they are copied from a
+  year earlier like every other driver. A holiday whose date moves, such as
+  Black Friday, can land a week off, and under `last_year` an event that
+  happened once last year is assumed to happen again; see the warnings below.
 
 Flags are taken from the explicit `event_columns` list if you give one;
 otherwise they're auto-detected: a column whose values are only 0 and 1
@@ -58,7 +77,7 @@ and tiles every column as-is.
 
 ## Warnings about generated values
 
-Two warnings point at generated values that are likely wrong:
+These warnings point at generated values that are likely wrong:
 
 - **A last period that looks like a promotion, held by `carry_forward`.**
   When a generated driver's last value is at least 1.5× (or at most 0.5×)
@@ -66,12 +85,38 @@ Two warnings point at generated values that are likely wrong:
   the last period, carry-forward would hold that level for the whole
   forecast. The warning names the driver, its value and its usual level.
   Supply planned values, or use `recent_average`.
-- **An event from last year left out.** When a flag is generated and it was
-  1 within a week of the same date last year (364 days, so the weekday
-  matches), the warning names those dates. Generated flags are 0 throughout
-  — and under `seasonal_naive` they repeat by week number or weekday, which
-  puts a holiday that moves (Black Friday) in the wrong period. Supply the
-  dates of known events in `future_independent_data`.
+- **An event from last year left out or misplaced.** When a flag is
+  generated and it was 1 within a week of the same date last year (364 days,
+  so the weekday matches), the warning names those dates. Generated flags
+  are 0 throughout — and under `seasonal_naive` they repeat by week number
+  or weekday, which puts a holiday that moves (Black Friday) in the wrong
+  period. Under `last_year` they are copied by date, so a holiday that moves
+  lands in the wrong period and a one-off event repeats. Supply the dates of
+  known events in `future_independent_data`.
+- **A driver that started or stopped since last year, under `last_year`.**
+  Each case gets its own warning, which names every driver and says exactly
+  what was done to it:
+  - **Held at its last value.** Above 0 in each of the last 28 days (4
+    weeks) but 0 on every copied date: the driver is new since last year, and
+    copying would set it to 0 for the whole forecast. The warning gives the
+    value it is held at.
+  - **Switched back on, as seasonal.** At 0 in each of the last 28 days (4
+    weeks), and also at 0 in the same 28 days a year earlier, but above 0 on
+    a copied date: an off-season. It is copied, and the warning gives the date
+    it comes back on and its total over the forecast. On the testers' series,
+    9 of 10 channels like this did come back.
+  - **Switched back on, although it looks stopped.** At 0 in each of the last
+    28 days (4 weeks), but running in the same 28 days a year earlier. It is
+    still copied, because the data cannot tell a pause from a stop (4 of the
+    11 channels like this on the testers' series came back), and the warning
+    gives the date it comes back on and its total. If it has stopped, supply
+    0 for it.
+- **Under a year of history, under `last_year`.** There is no year to copy,
+  so the drivers hold their last value, as `carry_forward` does, and the
+  warning says so.
+
+The auto-generation warning itself names the strategy, and under `last_year`
+the dates whose values were copied.
 
 ## Partial fill
 

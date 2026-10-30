@@ -11,7 +11,7 @@ than as evidence about how well these models forecast real data.
 | Notebook | Frequency | Shows |
 |---|---|---|
 | [`daily_website_traffic.ipynb`](daily_website_traffic.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lifesight-Software-Pvt-Ltd/horizon/blob/main/examples/daily_website_traffic.ipynb) | daily | The full run on three years of daily data — the three-way split, several combination rules side by side, supplying known future drivers while the library generates the rest, and the chart and CSV outputs. |
-| [`weekly_marketing_mix.ipynb`](weekly_marketing_mix.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lifesight-Software-Pvt-Ltd/horizon/blob/main/examples/weekly_marketing_mix.ipynb) | weekly | Three years of weekly marketing-mix data — preparing a week × region × product panel into one series, the weekly split defaults, and forecasting a quarter against a supplied media plan while the seasonal drivers are generated with `seasonal_naive`. |
+| [`weekly_marketing_mix.ipynb`](weekly_marketing_mix.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lifesight-Software-Pvt-Ltd/horizon/blob/main/examples/weekly_marketing_mix.ipynb) | weekly | Three years of weekly marketing-mix data — preparing a week × region × product panel into one series, the weekly split defaults, and forecasting a quarter against a supplied media plan while the seasonal drivers are copied from the same week last year (`last_year`). |
 
 ## The paper
 

@@ -14,6 +14,7 @@ from horizon_forecaster.future_exog import (
     FUTURE_EXOG_STRATEGIES,
     check_future_table,
     describe_generation_risks,
+    last_year_source_dates,
     resolve_future_exog,
 )
 
@@ -124,6 +125,89 @@ def test_seasonal_naive_flag_follows_cycle_not_zero():
     out, _ = _resolve(df, ["holiday"], 7, strategy="seasonal_naive")
     assert out["holiday"].iloc[0] == 1.0  # future Monday
     assert out["holiday"].iloc[1:].sum() == 0.0  # other days 0
+
+
+# --------------------------------------------------------------------------
+# last_year -- the latest year of history, repeated
+# --------------------------------------------------------------------------
+
+
+def test_last_year_copies_the_same_weekday_364_days_back():
+    df = _hist({"spend": np.arange(400.0)}, n=400)
+    fut = _future(df, 30)
+    out, generated = resolve_future_exog(df, "date", ["spend"], fut, "daily", strategy="last_year")
+    source = last_year_source_dates(df["date"], fut, "daily")
+    assert list(out["spend"]) == list(np.arange(400.0)[400 - 364 : 400 - 364 + 30])
+    assert (source - fut.reset_index(drop=True) == pd.Timedelta(days=-364)).all()
+    assert (source.dt.dayofweek == fut.reset_index(drop=True).dt.dayofweek).all()
+    assert generated == ["spend"]
+
+
+def test_last_year_copies_the_same_week_52_weeks_back():
+    df = _hist({"spend": np.arange(60.0)}, n=60, freq="weekly")
+    out, _ = _resolve(df, ["spend"], 5, strategy="last_year", frequency="weekly")
+    assert list(out["spend"]) == [8.0, 9.0, 10.0, 11.0, 12.0]  # rows 60 - 52 on
+
+
+@pytest.mark.parametrize("freq,n,year", [("daily", 400, 364), ("weekly", 60, 52)])
+def test_last_year_repeats_the_latest_year_past_a_year_and_never_goes_further_back(freq, n, year):
+    df = _hist({"spend": np.arange(float(n))}, n=n, freq=freq)
+    horizon = 2 * year + 5
+    out, _ = _resolve(df, ["spend"], horizon, strategy="last_year", frequency=freq)
+    values = out["spend"].to_numpy()
+    assert values.min() == n - year  # nothing older than the latest year
+    assert (values[year : 2 * year] == values[:year]).all()  # year two repeats year one
+    assert (values[2 * year :] == values[:5]).all()
+
+
+def test_last_year_falls_back_to_carry_forward_under_a_year():
+    df = _hist({"spend": np.arange(363.0)}, n=363)
+    out, _ = _resolve(df, ["spend"], 4, strategy="last_year")
+    assert list(out["spend"]) == [362.0] * 4
+    assert last_year_source_dates(df["date"], _future(df, 4), "daily") is None
+    exactly = _hist({"spend": np.arange(364.0)}, n=364)
+    out, _ = _resolve(exactly, ["spend"], 2, strategy="last_year")
+    assert list(out["spend"]) == [0.0, 1.0]
+
+
+def test_last_year_copies_flags_with_everything_else():
+    flag = np.zeros(400)
+    flag[[50, 60]] = 1  # copied into future rows 14 and 24 (row + 364 - 400)
+    df = _hist({"promo": flag}, n=400)
+    out, _ = _resolve(df, ["promo"], 30, strategy="last_year", event_columns=["promo"])
+    assert list(np.flatnonzero(out["promo"].to_numpy())) == [14, 24]
+
+
+def test_last_year_holds_a_driver_that_is_new_since_last_year():
+    new = np.r_[np.zeros(372), np.full(28, 50.0)]  # live in every one of the last 28 days
+    off_one_day = new.copy()
+    off_one_day[-3] = 0.0  # not live in every one of them: copied as it was
+    df = _hist({"new": new, "patchy": off_one_day}, n=400)
+    out, _ = _resolve(df, ["new", "patchy"], 30, strategy="last_year")
+    assert list(out["new"]) == [50.0] * 30
+    assert list(out["patchy"]) == [0.0] * 30
+
+
+def test_last_year_keeps_a_new_driver_live_over_a_horizon_past_a_year():
+    # Copies of the last 28 days say nothing about a year ago, so a horizon long
+    # enough to repeat them still treats the driver as new.
+    df = _hist({"new": np.r_[np.zeros(372), np.full(28, 50.0)]}, n=400)
+    out, _ = _resolve(df, ["new"], 400, strategy="last_year")
+    assert (out["new"] == 50.0).all()
+
+
+def test_last_year_copies_a_driver_that_stopped_as_it_was():
+    seasonal = np.r_[np.zeros(30), np.full(40, 7.0), np.zeros(330)]  # on a year ago, off now
+    df = _hist({"tv": seasonal}, n=400)
+    out, _ = _resolve(df, ["tv"], 60, strategy="last_year")
+    assert out["tv"].max() == 7.0
+
+
+def test_last_year_keeps_supplied_columns():
+    df = _hist({"spend": np.arange(400.0), "promo": np.zeros(400)}, n=400)
+    supplied = pd.DataFrame({"spend": [1.0] * 5})
+    out, generated = _resolve(df, ["spend", "promo"], 5, strategy="last_year", supplied=supplied)
+    assert list(out["spend"]) == [1.0] * 5 and generated == ["promo"]
 
 
 # --------------------------------------------------------------------------
@@ -588,3 +672,65 @@ def test_risk_does_not_ask_for_events_that_were_supplied_or_out_of_range():
     df = _risk_hist(flag=flag, end="2025-10-26")
     assert _risks(df, ["spend", "event"], generated=["spend"], events=["event"]) == []
     assert _risks(df, ["spend", "event"], generated=["event"], horizon=2, events=["event"]) == []
+
+
+def _daily_risks(df, cols, horizon=30, strategy="last_year", generated=None, events=None):
+    fut = pd.Series(pd.date_range(df["date"].max() + pd.Timedelta(days=1), periods=horizon))
+    return describe_generation_risks(
+        df,
+        "date",
+        cols,
+        cols if generated is None else generated,
+        fut,
+        "daily",
+        strategy,
+        event_columns=events,
+    )
+
+
+def test_risk_says_what_last_year_did_with_each_changed_driver():
+    # History 2022-01-03 .. 2023-02-06; a 30-day forecast copies 2022-02-08 .. 2022-03-09.
+    new = np.r_[np.zeros(372), np.full(28, 50.0)]  # live in each of the last 28 days only
+    stopped = np.r_[np.zeros(30), np.full(40, 7.0), np.zeros(330)]  # ran 2022-02-02 .. 03-13
+    paused = np.r_[np.zeros(60), np.full(20, 9.0), np.zeros(320)]  # ran 2022-03-04 .. 03-23
+    df = _hist({"meta": new, "tv": stopped, "radio": paused, "search": np.full(400, 9.0)}, n=400)
+    held, seasonal, looks_stopped = _daily_risks(df, ["meta", "tv", "radio", "search"])
+
+    assert held.startswith("last_year held these drivers at their last value instead of copying")
+    assert "'meta' held at 50 for all 30 days" in held
+    assert "0 on every date copied from a year earlier (2022-02-08 to 2022-03-09)" in held
+
+    assert seasonal.startswith("last_year switched these drivers back on, treating them as")
+    assert "'radio' back on from 2023-03-03, 54 in total over the 30 days" in seasonal
+    assert "was also at 0 in the same 28 days a year earlier" in seasonal
+
+    assert looks_stopped.startswith("last_year switched these drivers back on although they look")
+    assert "'tv' back on from 2023-02-07, 210 in total over the 30 days" in looks_stopped
+    assert "was running in the same 28 days a year earlier" in looks_stopped
+    assert "supply 0 for it in future_independent_data" in looks_stopped
+
+    assert all("'search'" not in m for m in (held, seasonal, looks_stopped))
+
+
+def test_risk_under_a_year_says_last_year_held_the_last_value():
+    df = _hist({"spend": [1000.0] * 199 + [2600.0]}, n=200)
+    fallback, spike = _daily_risks(df, ["spend"], horizon=8)
+    assert "needs a year of history (364 days) and this data has 200" in fallback
+    assert "carry_forward holds its values" in spike  # what was actually done
+
+
+def test_risk_under_last_year_says_events_are_copied_not_left_out():
+    dates = pd.date_range(end="2025-10-26", periods=60, freq="W-SUN")
+    flag = [1 if d == pd.Timestamp("2024-11-24") else 0 for d in dates]
+    df = _risk_hist(flag=flag, end="2025-10-26")
+    (message,) = _risks(
+        df, ["spend", "event"], generated=["event"], strategy="last_year", events=["event"]
+    )
+    assert "'event' was 1 on 2024-11-24 (now 2025-11-23)" in message
+    assert "copies them from the same week a year earlier" in message
+    assert "in the wrong week" in message and "happened only once" in message
+
+
+def test_risk_is_quiet_under_last_year_when_nothing_changed():
+    df = _hist({"spend": np.full(400, 9.0)}, n=400)
+    assert _daily_risks(df, ["spend"]) == []

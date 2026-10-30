@@ -59,6 +59,8 @@ from horizon_forecaster.future_exog import (
     describe_generation_risks,
     AGGREGATORS,
     FUTURE_EXOG_STRATEGIES,
+    YEAR_PERIODS,
+    last_year_source_dates,
     resolve_future_exog,
 )
 from horizon_forecaster.exceptions import (
@@ -586,16 +588,23 @@ class HorizonForecaster:
             are close to free. evaluate_ensemble/forecast_ensemble are
             keyed by method name in every case.
         future_exog_strategy: how forecast() generates future values for the
-            independent columns when they aren't supplied. One of
-            future_exog.FUTURE_EXOG_STRATEGIES: "carry_forward" (default --
-            hold the last value flat), "recent_average", "historical_average"
-            (season-aware), "seasonal_naive" (seasonal cycle + drift),
-            "linear_trend", or "cycle" (replay the trailing history).
-            Continuous drivers use the chosen strategy; binary event flags
-            default to 0 (except under seasonal_naive). See future_exog.py.
+            independent columns when they aren't supplied. "auto" (default)
+            is "last_year" when the history covers a year (364 days, or 52
+            weeks) and "carry_forward" otherwise; the strategy used is
+            stored in self.future_exog_strategy. Or one of
+            future_exog.FUTURE_EXOG_STRATEGIES: "last_year" (the same weekday
+            364 days earlier, or the same week 52 weeks earlier, so the
+            latest year repeats), "carry_forward" (hold the last value flat),
+            "recent_average", "historical_average" (season-aware),
+            "seasonal_naive" (seasonal cycle + drift), "linear_trend", or
+            "cycle" (replay the trailing history). Continuous drivers use the
+            chosen strategy; binary event flags are 0, except under
+            seasonal_naive and last_year, where they repeat. See
+            future_exog.py.
         event_columns: names of the binary 0/1 event/flag columns (promos,
-            holidays) among independent_columns, so the strategy defaults them
-            to 0 ("no event unless supplied") instead of carrying them forward.
+            holidays) among independent_columns, so the strategy sets them to
+            0 ("no event unless supplied") instead of carrying them forward;
+            seasonal_naive and last_year repeat them instead.
             None (default) auto-detects flags: columns whose values are only
             0 and 1 (any other column, even one with two values such as a
             0/5,000 spend or a 9.99/12.99 price, is a quantity). Passing a
@@ -698,7 +707,7 @@ class HorizonForecaster:
         model_params: Optional[Dict[str, dict]] = None,
         mape_threshold: Optional[float] = 40.0,
         ensemble_method: Union[str, Sequence[str], None] = DEFAULT_ENSEMBLE_METHOD,
-        future_exog_strategy: str = "carry_forward",
+        future_exog_strategy: str = "auto",
         event_columns: Optional[List[str]] = None,
         future_exog_aggregator: str = "mean",
         recent_average_window: int = 28,
@@ -727,10 +736,10 @@ class HorizonForecaster:
         # driver values when they aren't supplied). Validated here like
         # ensemble_method; event_columns is validated against the surviving
         # independent columns below, once those are known.
-        if future_exog_strategy not in FUTURE_EXOG_STRATEGIES:
+        if future_exog_strategy != "auto" and future_exog_strategy not in FUTURE_EXOG_STRATEGIES:
             raise InvalidConfigError(
-                f"future_exog_strategy must be one of {sorted(FUTURE_EXOG_STRATEGIES)} "
-                f"(got '{future_exog_strategy}').",
+                f"future_exog_strategy must be 'auto' or one of "
+                f"{sorted(FUTURE_EXOG_STRATEGIES)} (got '{future_exog_strategy}').",
                 param_name="future_exog_strategy",
                 provided_value=future_exog_strategy,
             )
@@ -878,6 +887,10 @@ class HorizonForecaster:
 
         self.raw_df = cleaned_df.sort_values(date_column, kind="stable").reset_index(drop=True)
         self._validate_date_spacing()
+        if self.future_exog_strategy == "auto":
+            # Every period is present by now, so the row count is the span.
+            year = YEAR_PERIODS[self.frequency]
+            self.future_exog_strategy = "last_year" if len(self.raw_df) >= year else "carry_forward"
 
         # Computed once here, not per-model: which rows go to train /
         # validation / test depends only on the requested sizes and the row
@@ -2615,9 +2628,21 @@ class HorizonForecaster:
             horizon, future_dates, future_independent_data
         )
         if generated:
+            copied = ""
+            if self.future_exog_strategy == "last_year":
+                source = last_year_source_dates(
+                    self.raw_df[self.date_column], future_dates, self.frequency
+                )
+                if source is not None:
+                    copied = (
+                        f", which copies each from a year earlier: the values of "
+                        f"{source.min():%Y-%m-%d} to {source.max():%Y-%m-%d}"
+                    )
+                    if horizon > YEAR_PERIODS[self.frequency]:
+                        copied += ", the latest year of history, repeated"
             warnings.warn(
                 f"future values for {generated} were auto-generated for all {horizon} "
-                f"periods via the '{self.future_exog_strategy}' strategy (no values were "
+                f"periods via the '{self.future_exog_strategy}' strategy{copied} (no values were "
                 f"supplied for them). The forecast is only as reliable as those assumed "
                 f"inputs -- for an exogenous-variable-driven model this can dominate the "
                 f"result. Supply real planned values if you have them (you can supply "
