@@ -3,7 +3,7 @@
 All notable changes to `horizon_forecaster` are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.0.0] - 2026-10-26
+## [1.0.0] - 2026-10-30
 
 The first public release. The reasoning behind each choice below is in
 [`docs/design_notes.md`](docs/design_notes.md).
