@@ -399,31 +399,97 @@ columns, they are generated **once, model-agnostically**, in the
 orchestrator, and the same values feed every model's `transform_future()`.
 `future_exog.py` holds a `FUTURE_EXOG_STRATEGIES` registry of pure functions
 behind a single `resolve_future_exog()` entry point. Strategies:
-`carry_forward` (default), `recent_average`, `historical_average`,
-`seasonal_naive`, `linear_trend`, and `cycle`.
+`last_year`, `carry_forward`, `recent_average`, `historical_average`,
+`seasonal_naive`, `linear_trend`, and `cycle`; the default, `"auto"`, picks
+between the first two.
 
-- **The default is `carry_forward`, not replay.** Replaying the last
-  `horizon` periods of history injects the recent pattern — including any
-  one-off spike — into the future. Holding the last level flat is the
-  least-surprising neutral baseline. `cycle` replays the history for anyone
-  who wants it.
+- **The default copies last year when there is a year to copy.** Media
+  budgets are usually planned as "same as last year", and the timing of
+  spend through the year is what the models respond to. `"auto"` resolves to
+  `last_year` when the history covers 364 days (52 weeks) and to
+  `carry_forward` below that, once, at construction, and stores the result in
+  `future_exog_strategy`. Measured on the testers' real series that have
+  drivers (8 daily, 6 weekly; 42 forecasts of 28 and 91 days, 13 and 26
+  weeks, each fitted once and forecast with each strategy's drivers and with
+  the drivers that actually happened), the median ensemble WAPE above the
+  actual-drivers forecast was:
+
+  | Strategy | Daily | Weekly |
+  |---|---|---|
+  | `last_year` | +0.9 | 0.0 |
+  | `seasonal_naive` | +2.4 | +3.2 |
+  | `carry_forward` | +3.6 | +6.9 |
+  | `recent_average` | +5.0 | +4.9 |
+
+  `last_year` beat `carry_forward` in 35 of the 42. It loses where spend has
+  no yearly pattern (one daily series' total spend correlates 0.09 with the
+  same days a year earlier) and where most spend has moved to channels that
+  were small a year ago.
+- **`last_year` copies the same weekday, not the same date.** Daily data
+  steps back 364 days, weekly data 52 weeks. The same calendar date a year
+  back (365 days) puts last Monday's spend on this year's Tuesday; on the
+  same series it more than doubled the error in the daily total-spend curve
+  (9.8% vs 4.0%). The cost: a holiday on a fixed date drifts a day a year,
+  and Black Friday slips a week about every six years. A horizon past a
+  year steps back again, so every copied date is in the latest year of
+  history and that year repeats; older years are never used.
+- **`last_year` copies values, with no growth.** Scaling last year by the
+  recent year-on-year change in spend was tried: it lowered the bias on
+  daily data but made weekly forecasts worse, so the copy is exact and a
+  budget that has grown is understated. The generated-drivers warning names
+  the copied dates, so the assumption is visible.
+- **A channel that is live now but absent a year ago keeps its level.** A
+  driver above 0 in each of the last 28 days (4 weeks) and 0 on every copied
+  date would otherwise be switched off for the whole forecast; it holds its
+  last value instead, and a warning names it. On weekly data this beat the
+  plain copy 9 times and lost 4 of 18; on daily data it changed 1 forecast
+  in 24. A driver live now that was 0 on only some of the copied dates (it
+  started partway through that year, or paused then) is copied as it was, 0
+  on those dates. Holding such a driver at its last value instead was tested
+  on the 230 holdout forecasts of the testers' series where this happened
+  (Prophet, CatBoost and SARIMAX; such channels were a median 3% of spend):
+  the copy's median ensemble WAPE was 0.03 points below the actual-drivers
+  forecast, and holding it 0.08 to 0.11 points above, so the copy is kept.
+  The reverse case, a driver off now but on a year ago, is copied as it was.
+  Switching such a driver off after it has been at 0 for long enough was
+  considered, but in the same tests a channel at 0 for the last 28 days that
+  had also been at 0 in those days a year earlier came back in 9 of 10
+  cases: an off-season, which a length-of-pause rule would cut. One at 0 now
+  but running at that time a year earlier came back in 4 of 11 (6 of 11 with
+  a 3-month pause), so neither copying nor zeroing is reliably right. It is
+  copied, and the warning separates the two cases and says, for each driver,
+  the date it comes back on and its total, so the user can supply 0 for one
+  that has stopped. Copying last year's total spend and splitting it by each
+  channel's recent share was also tried, to handle both cases at once: it
+  was slightly better on daily data but clearly worse on weekly (+3.2 to
+  +3.9 against 0.0), because it loses each channel's own timing through the
+  year.
+- **`carry_forward` is the default under a year of history, not replay.**
+  Replaying the last `horizon` periods of history injects the recent pattern
+  — including any one-off spike — into the future. Holding the last level
+  flat is the least-surprising neutral baseline. `cycle` replays the history
+  for anyone who wants it.
 - **Flags are type-aware.** Carrying a binary promo flag forward assumes a
   permanent promo; averaging one yields a nonsensical fraction. Continuous
   drivers use the chosen strategy; binary 0/1 event flags default to 0 ("no
   event unless supplied") — except under `seasonal_naive`, where they follow
-  the cycle so recurring events still repeat. Flags come from an explicit
+  the cycle so recurring events still repeat, and under `last_year`, where
+  they are copied with everything else. Copying them was the clearer win: on
+  the daily series, last year's flags marked 452 of the 609 real event days
+  with 79 false ones, while `seasonal_naive`, which repeats each weekday's
+  latest flag, marked 400 with 392 false. Flags come from an explicit
   `event_columns` list, else are auto-detected as columns whose values are
   only 0 and 1. The first rule here was "≤2 distinct, non-negative values",
   which caught quantities too: TV spend of 0 or 5,000, a 0%/20% discount and
-  a 9.99/12.99 price were all forecast at 0 — the last one a free product.
-  A two-value column is not necessarily an on/off switch; only 0/1 is.
-  `cycle` is exempt from all of this and tiles every column as-is.
+  a 9.99/12.99 price were all forecast at 0 — the last one a free product. A
+  two-value column is not necessarily an on/off switch; only 0/1 is. `cycle`
+  is exempt from all of this and tiles every column as-is.
 - **On/off text is read from a fixed word list.** `true/false`, `yes/no`,
   `y/n`, `t/f` and `on/off` become 1/0, in the data and in the future table.
   Any other pair of words ("Promo"/"None") is an error, not a guess: guessing
   which word means "on" wrong would flip the sign of every effect the models
   learn, with nothing to show it.
-- **Two warnings point at generated values that are probably wrong.**
+- **Warnings point at generated values that are probably wrong.**
   `carry_forward` repeats the last value, so a last period that was a
   promotion sets the level for the whole forecast; on real retail data that
   produced a forecast at 1.6–2.5× the same period last year. A warning fires
@@ -431,15 +497,17 @@ behind a single `resolve_future_exog()` entry point. Strategies:
   previous 13 weeks / 28 days, or an event flag is 1 there. It warns rather
   than substituting a "non-promo" value, because a substitute would be one
   more hidden assumption. Separately, a generated flag is 0 throughout (or
-  repeated by week number under `seasonal_naive`, which puts a moving
-  holiday in the wrong week), so an event that happened within a week of
-  the same date last year triggers a warning naming those dates — one real
-  forecast missed Black Friday this way.
-- **`seasonal_naive` carries drift.** Pure seasonal naive repeats last year's
-  level, which is wrong for a growing driver over a long horizon. The
-  implementation fits a trend, adds the phase-wise seasonal residual, and
-  projects both. A flat driver degrades to pure seasonal naive; under one
-  full cycle of history it falls back to `carry_forward`.
+  repeated by week number under `seasonal_naive`, or copied by date under
+  `last_year`, which puts a moving holiday in the wrong week and repeats a
+  one-off event), so an event that happened within a week of the same date
+  last year triggers a warning naming those dates — one real forecast missed
+  Black Friday this way.
+- **`seasonal_naive` carries drift.** `last_year` repeats last year's level,
+  which is right for a budget planned as "same as last year" and wrong for a
+  driver that keeps growing over a long horizon. `seasonal_naive` is the
+  choice for the second: it fits a trend, adds the phase-wise seasonal
+  residual, and projects both. A flat driver degrades to pure seasonal
+  naive; under one full cycle of history it falls back to `carry_forward`.
 - **Partial fill.** A supplied column is used as-is and only the missing
   columns are generated — matching the common case where next quarter's
   planned spend is known but the promotional calendar is not.

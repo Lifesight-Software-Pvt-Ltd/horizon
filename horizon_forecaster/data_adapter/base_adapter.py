@@ -98,8 +98,8 @@ class BaseAdapter(ABC):
                 independent_columns declared — the caller (forecaster.py)
                 is responsible for having already resolved future values,
                 either from real user-provided data or by applying a
-                fallback strategy (carry_forward, seasonal_naive,
-                historical_average), BEFORE calling this method. This
+                fallback strategy (last_year, carry_forward,
+                seasonal_naive, ...), BEFORE calling this method. This
                 method does not invent future values itself, and treats
                 a missing DataFrame (when columns were declared) as a
                 hard error rather than silently proceeding without them.

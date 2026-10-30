@@ -1043,7 +1043,7 @@ def test_cycle_strategy_tiles_when_horizon_exceeds_history():
     assert not models_df["spend"].isna().any()
 
 
-def test_default_strategy_is_carry_forward():
+def test_default_strategy_is_carry_forward_under_a_year_of_history():
     df = make_raw_df(n=60, with_spend=True)  # spend last value = 109
     forecaster = HorizonForecaster(
         df,
@@ -1093,6 +1093,47 @@ def test_explicit_event_columns_treated_as_flags():
     assert models_df["spend"].tolist() == [0.0] * 3  # forced to 0 as a declared flag
 
 
+def _strategy_df(n, freq="D"):
+    return make_raw_df(n=n, freq=freq, with_spend=True)
+
+
+@pytest.mark.parametrize(
+    "n,freq,frequency,expected",
+    [
+        (364, "D", "daily", "last_year"),
+        (363, "D", "daily", "carry_forward"),
+        (52, "7D", "weekly", "last_year"),
+        (51, "7D", "weekly", "carry_forward"),
+    ],
+)
+def test_auto_strategy_is_last_year_with_a_year_of_history(n, freq, frequency, expected):
+    forecaster = HorizonForecaster(
+        _strategy_df(n, freq),
+        date_column="date",
+        target_column="orders",
+        frequency=frequency,
+        independent_columns=["spend"],
+        models=["prophet"],
+    )
+    assert forecaster.future_exog_strategy == expected
+
+
+def test_auto_strategy_copies_last_year_and_an_explicit_strategy_is_kept():
+    common = dict(
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+        models=["prophet"],
+    )
+    auto = HorizonForecaster(_strategy_df(400), **common)
+    models_df, _, _, generated = _resolve(auto, horizon=3)
+    assert models_df["spend"].tolist() == [50 + 36, 50 + 37, 50 + 38]  # rows 400 - 364 on
+    assert generated == ["spend"]
+    explicit = HorizonForecaster(_strategy_df(400), future_exog_strategy="carry_forward", **common)
+    assert explicit.future_exog_strategy == "carry_forward"
+
+
 def test_invalid_future_exog_params_raise():
     df = make_raw_df(n=60, with_spend=True)
     common = dict(
@@ -1102,7 +1143,7 @@ def test_invalid_future_exog_params_raise():
         independent_columns=["spend"],
         models=["prophet"],
     )
-    with pytest.raises(InvalidConfigError):
+    with pytest.raises(InvalidConfigError, match="must be 'auto' or one of"):
         HorizonForecaster(df, future_exog_strategy="nope", **common)
     with pytest.raises(InvalidConfigError):
         HorizonForecaster(df, future_exog_aggregator="mode", **common)
@@ -1225,6 +1266,27 @@ def test_forecast_warns_when_future_independent_data_is_auto_generated():
     )
     with pytest.warns(UserWarning, match="auto-generated"):
         forecaster.forecast(horizon=5)
+
+
+def test_forecast_warning_names_the_dates_last_year_copied():
+    forecaster = HorizonForecaster(
+        _strategy_df(400),
+        date_column="date",
+        target_column="orders",
+        frequency="daily",
+        independent_columns=["spend"],
+        models=["catboost"],
+        model_params={"catboost": {"iterations": 50, "depth": 3}},
+    )
+    # 2026-01-01 + 399 days is 2027-02-04; 364 days before 2027-02-05 is 2026-02-06.
+    with pytest.warns(
+        UserWarning,
+        match="via the 'last_year' strategy, which copies each from a "
+        "year earlier: the values of 2026-02-06 to 2026-02-10 ",
+    ):
+        forecaster.forecast(horizon=5)
+    with pytest.warns(UserWarning, match="2027-02-04, the latest year of history, repeated"):
+        forecaster.forecast(horizon=400)
 
 
 def test_forecast_does_not_warn_about_exog_when_it_is_supplied():
