@@ -24,13 +24,24 @@ history for a short horizon and tiles it for a long one):
                         of history.
     linear_trend        a fitted trend line projected forward.
     cycle               replay/tile the trailing history verbatim.
+    last_year           the value from the same weekday 364 days earlier
+                        (daily) or the same week 52 weeks earlier (weekly),
+                        so the latest year of history repeats for as long as
+                        the horizon runs. A driver that is live now but was 0
+                        throughout the copied dates is new since last year,
+                        and holds its last value instead. Falls back to
+                        carry_forward under a year of history.
+
+HorizonForecaster's default, "auto", is last_year when the history covers a
+year (364 days, or 52 weeks) and carry_forward otherwise.
 
 Type-aware: continuous drivers use the chosen strategy; binary 0/1 event
 flags (promos, holidays) default to 0 -- "no event unless you supply one" --
 EXCEPT under seasonal_naive, where they follow the cycle so recurring events
-still repeat. Flags come from an explicit `event_columns` list if given,
-else are auto-detected (columns whose values are only 0 and 1). The `cycle`
-strategy is exempt from type-awareness and tiles every column as-is.
+still repeat, and under last_year, where they are copied from a year earlier
+like every other driver. Flags come from an explicit `event_columns` list if
+given, else are auto-detected (columns whose values are only 0 and 1). The
+`cycle` strategy is exempt from type-awareness and tiles every column as-is.
 
 Robustness: history is coerced to numeric and all aggregations are NaN-aware;
 any continuous output for a non-negative driver is clipped at 0 (so a
@@ -58,6 +69,16 @@ from horizon_forecaster.utils import (
 _SEASONAL_PERIOD = {"daily": 7, "weekly": 52}
 AGGREGATORS: Dict[str, Callable] = {"mean": np.nanmean, "median": np.nanmedian}
 
+# last_year's lag, in periods: 364 days keeps the weekday, which daily spend
+# follows; the same calendar date a year back (365 days) lands one weekday
+# off, and on the test series it more than doubled the error in the daily
+# total-spend curve (9.8% vs 4.0%). Weekly data steps back 52 weeks.
+YEAR_PERIODS = {"daily": 364, "weekly": 52}
+# A driver above 0 in every one of this many latest periods is live now; one
+# at 0 in all of them is off now. last_year compares that with the copied
+# dates to find drivers that started or stopped since last year.
+_CHANNEL_LOOKBACK = {"daily": 28, "weekly": 4}
+
 
 @dataclass
 class _Ctx:
@@ -71,6 +92,8 @@ class _Ctx:
     seasonal_period: int
     aggregator: Callable  # np.nanmean or np.nanmedian
     window: int  # N for recent_average
+    year_periods: int = 364  # last_year's lag, in periods
+    lookback: int = 28  # latest periods that say whether a driver is live now
 
 
 # --------------------------------------------------------------------------
@@ -155,6 +178,72 @@ def _cycle(hist, ctx):
     return np.tile(hist, reps)[-ctx.horizon :]
 
 
+def _last_year_positions(hist_steps, future_steps, year_periods: int) -> Optional[np.ndarray]:
+    """
+    The history row each future row copies under last_year: one year back
+    (`year_periods`), and another year back for as long as that is still in
+    the future, so every copied date falls in the latest year of history.
+    None when the history covers less than a year, or (never for data that
+    passed the forecaster's date checks) a copied date is missing.
+    """
+    hist_steps = np.asarray(hist_steps, dtype=float)
+    future_steps = np.asarray(future_steps, dtype=float)
+    if hist_steps.size == 0 or hist_steps[-1] - hist_steps[0] + 1 < year_periods:
+        return None
+    years_back = np.maximum(np.ceil((future_steps - hist_steps[-1]) / year_periods), 1)
+    source = future_steps - years_back * year_periods
+    pos = np.searchsorted(hist_steps, source)
+    if (pos >= hist_steps.size).any() or not np.allclose(hist_steps[pos], source):
+        return None
+    return pos
+
+
+def _last_year(hist, ctx):
+    pos = _last_year_positions(ctx.hist_steps, ctx.future_steps, ctx.year_periods)
+    if pos is None:  # under a year of history
+        return _carry_forward(hist, ctx)
+    copied = hist[pos]
+    return np.where(np.isfinite(copied), copied, _last_valid(hist))
+
+
+def _change_since_last_year(hist, ctx) -> Optional[str]:
+    """
+    How a driver's latest `ctx.lookback` periods differ from the year
+    last_year copies:
+
+        "new"     above 0 in every one of them, but 0 on every copied date:
+                  it started since last year, and holds its last value.
+        "paused"  0 in every one of them, and 0 in the same periods a year
+                  earlier, but above 0 on some copied date: an off-season,
+                  and copying turns it back on when it came on last year.
+                  On the test series, 9 of 10 channels like this came back.
+        "stopped" 0 in every one of them, but running in the same periods a
+                  year earlier, and above 0 on some copied date: it looks
+                  stopped. It is still copied: the data cannot tell a pause
+                  from a stop, and 4 of the 11 channels like this on the
+                  test series came back, so neither copying nor zeroing is
+                  reliably right; the warning asks for 0 if it has stopped.
+
+    None otherwise. Copied dates inside the latest periods (a horizon of most
+    of a year or more repeats them) say nothing about a year ago, so they are
+    left out.
+    """
+    pos = _last_year_positions(ctx.hist_steps, ctx.future_steps, ctx.year_periods)
+    recent = hist[-ctx.lookback :]
+    if pos is None or recent.size < ctx.lookback or not np.isfinite(recent).all():
+        return None
+    copied = hist[pos[pos < hist.size - ctx.lookback]]
+    if not copied.size:
+        return None
+    if (recent > 0).all() and (copied == 0).all():
+        return "new"
+    if (recent == 0).all() and (copied > 0).any():
+        start = hist.size - ctx.lookback - ctx.year_periods
+        same_time_last_year = hist[max(start, 0) : hist.size - ctx.year_periods]
+        return "stopped" if (same_time_last_year > 0).any() else "paused"
+    return None
+
+
 FUTURE_EXOG_STRATEGIES: Dict[str, Callable] = {
     "carry_forward": _carry_forward,
     "recent_average": _recent_average,
@@ -162,7 +251,19 @@ FUTURE_EXOG_STRATEGIES: Dict[str, Callable] = {
     "seasonal_naive": _seasonal_naive,
     "linear_trend": _linear_trend,
     "cycle": _cycle,
+    "last_year": _last_year,
 }
+
+
+def last_year_source_dates(history_dates, future_dates, frequency: str) -> Optional[pd.Series]:
+    """
+    The history date each forecast date copies under last_year, or None when
+    the history covers less than a year (last_year then holds the last value).
+    """
+    hist_dates = pd.to_datetime(pd.Series(history_dates)).reset_index(drop=True)
+    ctx = _make_ctx(hist_dates, future_dates, frequency)
+    pos = _last_year_positions(ctx.hist_steps, ctx.future_steps, ctx.year_periods)
+    return None if pos is None else hist_dates.iloc[pos].reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------
@@ -197,9 +298,42 @@ def _flag_seasonal(hist, ctx):
     return out
 
 
+def _flag_last_year(hist, ctx):
+    """A binary flag under last_year: copied from a year earlier; 0 under a year of history."""
+    pos = _last_year_positions(ctx.hist_steps, ctx.future_steps, ctx.year_periods)
+    if pos is None:
+        return np.zeros(ctx.horizon)
+    copied = hist[pos]
+    return np.where(np.isfinite(copied), copied, 0.0)
+
+
 # --------------------------------------------------------------------------
 # public entry point
 # --------------------------------------------------------------------------
+
+
+def _make_ctx(hist_dates, future_dates, frequency: str, aggregator: str = "mean", window: int = 28):
+    hist_dates = pd.to_datetime(pd.Series(hist_dates)).reset_index(drop=True)
+    ref = hist_dates.min()
+    per = 1.0 if frequency == "daily" else 7.0
+
+    def _steps(dates):
+        return (
+            pd.to_datetime(pd.Series(dates).reset_index(drop=True)) - ref
+        ).dt.days.to_numpy() / per
+
+    return _Ctx(
+        horizon=len(future_dates),
+        hist_steps=_steps(hist_dates),
+        future_steps=_steps(future_dates),
+        hist_phase=_phase(hist_dates, frequency),
+        future_phase=_phase(future_dates, frequency),
+        seasonal_period=_SEASONAL_PERIOD.get(frequency, 7),
+        aggregator=AGGREGATORS[aggregator],
+        window=int(window),
+        year_periods=YEAR_PERIODS.get(frequency, 364),
+        lookback=_CHANNEL_LOOKBACK.get(frequency, 28),
+    )
 
 
 def resolve_future_exog(
@@ -240,25 +374,7 @@ def resolve_future_exog(
         )
 
     horizon = len(future_dates)
-    hist_dates = pd.to_datetime(history_df[date_column]).reset_index(drop=True)
-    ref = hist_dates.min()
-    per = 1.0 if frequency == "daily" else 7.0
-
-    def _steps(dates):
-        return (
-            pd.to_datetime(pd.Series(dates).reset_index(drop=True)) - ref
-        ).dt.days.to_numpy() / per
-
-    ctx = _Ctx(
-        horizon=horizon,
-        hist_steps=_steps(hist_dates),
-        future_steps=_steps(future_dates),
-        hist_phase=_phase(hist_dates, frequency),
-        future_phase=_phase(future_dates, frequency),
-        seasonal_period=_SEASONAL_PERIOD.get(frequency, 7),
-        aggregator=AGGREGATORS[aggregator],
-        window=int(window),
-    )
+    ctx = _make_ctx(history_df[date_column], future_dates, frequency, aggregator, window)
 
     supplied_cols = set(supplied.columns) if supplied is not None else set()
     out: Dict[str, np.ndarray] = {}
@@ -275,11 +391,18 @@ def resolve_future_exog(
             # exempt from type-awareness; tile every column as-is
             out[col] = _cycle(hist, ctx)
         elif _is_flag(col, hist, event_columns):
-            out[col] = (
-                _flag_seasonal(hist, ctx) if strategy == "seasonal_naive" else np.zeros(horizon)
-            )
+            if strategy == "seasonal_naive":
+                out[col] = _flag_seasonal(hist, ctx)
+            elif strategy == "last_year":
+                out[col] = _flag_last_year(hist, ctx)
+            else:
+                out[col] = np.zeros(horizon)
         else:
-            vals = FUTURE_EXOG_STRATEGIES[strategy](hist, ctx)
+            if strategy == "last_year" and _change_since_last_year(hist, ctx) == "new":
+                # Live now, absent a year ago: copying would switch it off.
+                vals = _carry_forward(hist, ctx)
+            else:
+                vals = FUTURE_EXOG_STRATEGIES[strategy](hist, ctx)
             finite = hist[np.isfinite(hist)]
             if finite.size and finite.min() >= 0:  # non-negative driver -> no negative future
                 vals = np.clip(vals, 0.0, None)
@@ -320,18 +443,25 @@ def describe_generation_risks(
     event_columns: Optional[List[str]] = None,
 ) -> List[str]:
     """
-    Warning messages for two ways generated future drivers go wrong.
+    Warning messages for the ways generated future drivers go wrong.
 
     1. A spike held flat. carry_forward repeats the last value, so a last
        period that was a promotion -- spend 2.6x its usual level, or an event
        flag of 1 -- sets the level for the whole forecast. In testing that
        lifted an 8-week forecast by 15%; on real retail data the forecast
        came out at 1.6-2.5x the same period last year.
-    2. A known event left out. A generated flag is 0 throughout the forecast
-       (or, under seasonal_naive, repeated by week number or weekday, which
-       puts a moving holiday in the wrong period), so an event that happened
-       at this time last year is missed unless supplied -- Black Friday, in
-       one real run.
+    2. A known event left out or misplaced. A generated flag is 0 throughout
+       the forecast, so an event that happened at this time last year is
+       missed unless supplied -- Black Friday, in one real run. Under
+       seasonal_naive flags repeat by week number or weekday, and under
+       last_year they are copied by date, so a holiday that moves lands in
+       the wrong period, and under last_year a one-off event repeats.
+    3. Under last_year: a history shorter than a year (carry_forward is used
+       instead), and drivers whose latest periods differ from the year it
+       copies (see _change_since_last_year). Each message says what was done
+       to each driver: held at its last value (new since last year), or
+       switched back on from a date, with its total (an off-season, or a
+       channel that looks stopped).
 
     Returns [] when nothing applies. The `cycle` strategy tiles the history
     as-is and is exempt, as it is from flag handling.
@@ -347,6 +477,68 @@ def describe_generation_risks(
     }
     flags = [c for c in independent_columns if _is_flag(c, numeric[c], event_columns)]
     messages = []
+
+    if strategy == "last_year":
+        ctx = _make_ctx(hist_dates, future_dates, frequency)
+        pos = _last_year_positions(ctx.hist_steps, ctx.future_steps, ctx.year_periods)
+        if pos is None:
+            messages.append(
+                f"future_exog_strategy='last_year' needs a year of history "
+                f"({ctx.year_periods} {unit}s) and this data has {len(hist_dates)}, so the "
+                f"generated drivers hold their last value instead, as carry_forward does."
+            )
+            strategy = "carry_forward"  # the checks below then describe what was done
+        else:
+            copied = hist_dates.iloc[pos]
+            span = f"{copied.min():%Y-%m-%d} to {copied.max():%Y-%m-%d}"
+            continuous = [c for c in generated if c not in flags]
+            changes = {c: _change_since_last_year(numeric[c], ctx) for c in continuous}
+            horizon = len(future_dates)
+            periods = f"{horizon} {unit}{'s' if horizon != 1 else ''}"
+
+            def back_on(col):
+                values = numeric[col][pos]
+                first = future_dates[int(np.flatnonzero(values > 0)[0])]
+                return (
+                    f"'{col}' back on from {first:%Y-%m-%d}, {_num(float(values.sum()))} in "
+                    f"total over the {periods}"
+                )
+
+            new = [
+                f"'{c}' held at {_num(_last_valid(numeric[c]))} for all {periods}"
+                for c, ch in changes.items()
+                if ch == "new"
+            ]
+            paused = [back_on(c) for c, ch in changes.items() if ch == "paused"]
+            stopped = [back_on(c) for c, ch in changes.items() if ch == "stopped"]
+            if new:
+                messages.append(
+                    f"last_year held these drivers at their last value instead of copying "
+                    f"them: {'; '.join(new)}. Each was above 0 in every one of the last "
+                    f"{ctx.lookback} {unit}s but 0 on every date copied from a year earlier "
+                    f"({span}), so it is new since last year, and copying would have set it "
+                    f"to 0 for the whole forecast. Supply planned values in "
+                    f"future_independent_data if you have them."
+                )
+            if paused:
+                messages.append(
+                    f"last_year switched these drivers back on, treating them as seasonal: "
+                    f"{'; '.join(paused)}. Each has been at 0 in every one of the last "
+                    f"{ctx.lookback} {unit}s and was also at 0 in the same {ctx.lookback} "
+                    f"{unit}s a year earlier, so it looks like an off-season, and it "
+                    f"is copied from last year ({span}). If it has stopped for good, "
+                    f"supply 0 for it in future_independent_data."
+                )
+            if stopped:
+                messages.append(
+                    f"last_year switched these drivers back on although they look stopped: "
+                    f"{'; '.join(stopped)}. Each has been at 0 in every one of the last "
+                    f"{ctx.lookback} {unit}s but was running in the same {ctx.lookback} "
+                    f"{unit}s a year earlier, and it is copied from last year ({span}) "
+                    f"anyway: the data cannot tell a pause from a stop, and in testing 4 of "
+                    f"11 channels like this came back. If it has stopped, supply 0 for it in "
+                    f"future_independent_data."
+                )
 
     if strategy == "carry_forward":
         lookback = _SPIKE_LOOKBACK.get(frequency, 13)
@@ -400,11 +592,18 @@ def describe_generation_risks(
             more = f" and {len(found) - 3} more" if len(found) > 3 else ""
             matches.append(f"'{col}' was 1 on {', '.join(found[:3])}{more}")
     if matches:
+        wrong = "on the wrong day" if frequency == "daily" else "in the wrong week"
         if strategy == "seasonal_naive":
             phase = "week of the year" if frequency == "weekly" else "day of the week"
             how = (
                 f"seasonal_naive repeats past flags by {phase}, so an event whose date "
-                f"moves, like Black Friday, can land in the wrong {unit}"
+                f"moves, like Black Friday, can land {wrong}"
+            )
+        elif strategy == "last_year":
+            how = (
+                f"last_year copies them from the same {unit} a year earlier, so an event "
+                f"whose date moves, like Black Friday, can land {wrong}, and an "
+                f"event that happened only once is assumed to happen again"
             )
         else:
             how = "they are set to 0 throughout the forecast, so these events are left out"

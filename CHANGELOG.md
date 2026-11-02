@@ -3,7 +3,7 @@
 All notable changes to `horizon_forecaster` are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.0.0] - 2026-10-26
+## [1.0.0] - 2026-10-30
 
 The first public release. The reasoning behind each choice below is in
 [`docs/design_notes.md`](docs/design_notes.md).
@@ -83,11 +83,16 @@ The first public release. The reasoning behind each choice below is in
 
 ### Future driver values
 
-- Drivers not supplied for the forecast are generated once, for every model,
-  by `carry_forward` (default), `recent_average`, `historical_average`,
-  `seasonal_naive` with drift, `linear_trend` or `cycle`. Event flags default
-  to 0 except under `seasonal_naive`. Supplied columns are used as given and
-  only the rest are generated. See [`docs/future_exog.md`](docs/future_exog.md).
+- Drivers not supplied for the forecast are generated once, for every model.
+  The default, `"auto"`, is `last_year` with a year or more of history: each
+  driver is copied from the same weekday 364 days earlier, or the same week
+  52 weeks earlier, so the latest year repeats, and a driver live now but
+  absent a year ago holds its last value. With less history it is
+  `carry_forward`. The others are `recent_average`, `historical_average`,
+  `seasonal_naive` with drift, `linear_trend` and `cycle`. Event flags are 0
+  except under `seasonal_naive` and `last_year`, where they repeat. Supplied
+  columns are used as given and only the rest are generated. See
+  [`docs/future_exog.md`](docs/future_exog.md).
 - A supplied future table must match the forecast exactly (rows, columns,
   dates, values); values outside a driver's historical range warn.
 - `future_exog_used` shows every value the forecast was given.
@@ -110,11 +115,12 @@ The first public release. The reasoning behind each choice below is in
   failed, were screened out or left an ensemble short; rules that formed no
   ensemble; models worse than the seasonal-naive baseline; generated future
   drivers; a last period that `carry_forward` would hold; events from last
-  year missing from a generated future; future values outside the historical
-  range; over-long horizons and horizons past the bands' validation window;
-  outputs with no band; zero days left out of the calibration; PyMC fits
-  without annual terms or with poor convergence; and forecasts far outside
-  history.
+  year missing from, or copied into, a generated future; drivers that
+  started or stopped since the year `last_year` copies; future values
+  outside the historical range; over-long horizons and horizons past the
+  bands' validation window; outputs with no band; zero days left out of the
+  calibration; PyMC fits without annual terms or with poor convergence; and
+  forecasts far outside history.
 
 ### Charts and exports
 

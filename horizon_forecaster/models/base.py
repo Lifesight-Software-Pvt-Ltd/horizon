@@ -107,8 +107,8 @@ class BaseModel(ABC):
                 raises ModelPredictionError on None, because this method
                 does not invent future exog data itself — the caller
                 (forecaster.py) must have already applied a
-                future-exogenous-data strategy (carry_forward,
-                seasonal_naive, historical_average, etc.). It is typed
+                future-exogenous-data strategy (last_year,
+                carry_forward, seasonal_naive, etc.). It is typed
                 Optional only so the signature stays uniform with
                 callers that pass the value through positionally.
 
